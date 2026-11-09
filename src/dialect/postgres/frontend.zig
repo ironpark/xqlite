@@ -105,11 +105,18 @@ pub fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.Comp
     // what they kept (dml.zig).
     var plan: dml.Plan = .{};
     const stmt: tree.Stmt = if (ps.merge) |m| {
-        if (parsed == .explain) {
-            ir.stmt.errorMsgAt(p, sql.ptr, "EXPLAIN of this statement is not supported", .{});
-            return error.Failed;
-        }
         const q = try dml.merge(ps, m, &plan);
+        if (parsed == .explain) {
+            // EXPLAIN MERGE: the plans of the steps, then the query's.
+            ir.stmt.setExplain(p, 2);
+            try plan.explain(ps);
+            if (q) |x| {
+                try jtype.statement(ps, x);
+                var l: lower.Lowerer = .init(p, sql);
+                try l.statement(x);
+            }
+            return;
+        }
         try ps.regOutputs(q orelse parsed);
         try plan.begin(p);
         if (q) |x| {
@@ -120,7 +127,7 @@ pub fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.Comp
         }
         return;
     } else blk: {
-        if (dml.dmlWith(parsed)) |w| try dml.with(ps, w, &plan);
+        if (dml.dmlWith(if (parsed == .explain) parsed.explain.* else parsed)) |w| try dml.with(ps, w, &plan);
         break :blk parsed;
     };
     try ps.regOutputs(stmt);
@@ -140,14 +147,22 @@ pub fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.Comp
         },
         else => {},
     }
-    if (plan.active()) try plan.begin(p);
+    // EXPLAIN of a data-modifying WITH: the plans of its statements
+    // first (they do not run).
+    const explaining = stmt == .explain;
+    if (plan.active()) {
+        if (explaining) {
+            ir.stmt.setExplain(p, 2);
+            try plan.explain(ps);
+        } else try plan.begin(p);
+    }
     var l: lower.Lowerer = .init(p, sql);
     try l.statement(stmt);
     // AND CHAIN: P3 of OP_AutoCommit begins the next transaction.
     if (ps.chain) if (p.vdbe) |v| for (v.ops.items) |*op| {
         if (op.opcode == .AutoCommit) op.p3 = 1;
     };
-    if (plan.active()) try plan.end(p);
+    if (plan.active() and !explaining) try plan.end(p);
 }
 
 /// The HINT of a function call no function matches.

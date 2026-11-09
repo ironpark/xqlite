@@ -2080,13 +2080,27 @@ test "pg: DISTINCT ON, GROUPING SETS, WITH TIES, INTERSECT ALL and LATERAL" {
     try c.expectRows("SELECT * FROM (VALUES (1), (2)) v(a), LATERAL (SELECT a * 10 AS p, a + 1 AS q) s(x, y) ORDER BY 1", "1|10|2\n2|20|3\n");
     try c.expectRows("SELECT * FROM (SELECT 1 AS a) v, LATERAL (SELECT a UNION ALL SELECT a * 10) s(x) ORDER BY 2", "1|1\n1|10\n");
     try c.expectRows("SELECT a.id, b.id FROM e a LEFT JOIN LATERAL (SELECT id FROM e b WHERE b.d = a.d AND b.id > a.id ORDER BY id LIMIT 1) b ON true ORDER BY 1", "1|2\n2|NULL\n3|4\n4|NULL\n5|NULL\n");
-    // In a view: the desugared query; a LATERAL reference has no SQLite text.
+    // In a view: the desugared query; a LATERAL subquery as json_each()
+    // over its rows (viewlateral.zig).
     try c.exec("CREATE VIEW v AS SELECT DISTINCT ON (d) * FROM e ORDER BY d, s");
     try c.expectRows("SELECT id FROM v", "1\n3\n5\n");
-    try c.expectError("CREATE VIEW w AS SELECT a.id, b.n FROM e a, LATERAL (SELECT a.s + 1 AS n) b", "LATERAL in the query of a view is not supported");
+    // pg_get_viewdef(): the query as written, kept in a comment of the
+    // text while the query is the one it was written with.
+    try c.expectRows("SELECT pg_get_viewdef('v')", " SELECT DISTINCT ON (d) id,\n    d,\n    s\n   FROM e\n  ORDER BY d, s;\n");
+    try c.exec("CREATE TABLE r (a int); CREATE VIEW rv AS SELECT DISTINCT ON (a) a FROM r ORDER BY a");
+    try c.exec("ALTER TABLE r RENAME COLUMN a TO b");
+    try c.expectRows("SELECT pg_get_viewdef('rv') LIKE '%xq_rn%'", "1\n");
+    try c.exec("CREATE VIEW w AS SELECT a.id, b.n FROM e a, LATERAL (SELECT a.s + 1 AS n) b");
+    try c.exec("CREATE VIEW w2 AS SELECT a.id, b.id AS nid, b.t FROM e a LEFT JOIN LATERAL (SELECT id, s > 10 AS t FROM e b WHERE b.d = a.d AND b.id > a.id ORDER BY id LIMIT 1) b ON true");
+    try c.exec("CREATE VIEW w3 AS SELECT * FROM e, LATERAL (SELECT d AS k UNION ALL SELECT s WHERE d = 2) g WHERE id < 4");
+    try c.expectRows("SELECT * FROM w ORDER BY id", "1|11\n2|31\n3|21\n4|21\n5|6\n");
+    try c.expectRows("SELECT * FROM w2 ORDER BY id", "1|2|1\n2|NULL|NULL\n3|4|1\n4|NULL|NULL\n5|NULL|NULL\n");
+    try c.expectRows("SELECT * FROM w3 ORDER BY id, k", "1|1|10|1\n2|1|30|1\n3|2|20|2\n3|2|20|20\n");
+    try c.expectRows("SELECT pg_typeof(n), pg_typeof(t) FROM w, w2 LIMIT 1", "integer|boolean\n");
     // The SQLite dialect reads the view's text.
     try c.exec("PRAGMA xq_dialect = 'sqlite'");
     try c.expectRows("SELECT id, d FROM v", "1|1\n3|2\n5|NULL\n");
+    try c.expectRows("SELECT * FROM w2 ORDER BY id", "1|2|1\n2|NULL|NULL\n3|4|1\n4|NULL|NULL\n5|NULL|NULL\n");
 }
 
 test "pg: math, statistical, ordered-set and hypothetical-set aggregates" {
@@ -2165,7 +2179,10 @@ test "pg: MERGE" {
     try c.expectRows("SELECT id, a FROM t ORDER BY id", "1|10\n2|20\n4|40\n7|7\n9|90\n");
     try expectErrorState(&c, "SELECT merge_action()", "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command", "42601");
     try expectErrorState(&c, "MERGE INTO t USING (SELECT 1 AS id) s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN UPDATE SET a = s.id", "invalid reference to FROM-clause entry for table \"s\"\nDETAIL:  There is an entry for table \"s\", but it cannot be referenced from this part of the query.", "42P01");
-    try c.expectError("EXPLAIN MERGE INTO t USING (SELECT 1 AS id) s ON t.id = s.id WHEN MATCHED THEN DELETE", "EXPLAIN of this statement is not supported");
+    // EXPLAIN MERGE: the plans of its steps (dml.zig's tests), which do
+    // not run.
+    try c.exec("EXPLAIN MERGE INTO t USING (SELECT 1 AS id) s ON t.id = s.id WHEN MATCHED THEN DELETE");
+    try c.expectRows("SELECT count(*) FROM t WHERE id = 1", "1\n");
 }
 
 test "pg: data-modifying WITH, ON CONFLICT ON CONSTRAINT, RETURNING old and new" {
@@ -2215,4 +2232,21 @@ test "pg: double precision and real input and text, -0, numbers against string l
     try c.expectRows("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'fv'::regclass AND attnum > 0 ORDER BY attnum", "real\ntext\n");
     try c.expectRows("SELECT x FROM (VALUES (5), (10)) v(x) WHERE x > '7'", "10\n");
     try c.expectRows("SELECT x::text FROM (VALUES (2.50), (1.0), (3)) v(x) ORDER BY x", "1.0\n2.50\n3\n");
+}
+
+test "pg: RIGHT and FULL JOIN LATERAL" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE a (x int); CREATE TABLE b (y int); INSERT INTO a VALUES (1), (2); INSERT INTO b VALUES (2), (3)");
+    // No reference to an item before it: an ordinary join, also when it
+    // names the outer query's table.
+    try c.expectRows("SELECT * FROM a FULL JOIN LATERAL (SELECT y FROM b) s ON s.y = a.x ORDER BY 1, 2", "1|NULL\n2|2\nNULL|3\n");
+    try c.expectRows("SELECT (SELECT count(*) FROM b RIGHT JOIN LATERAL (SELECT a.x AS z) s ON s.z = b.y) FROM a ORDER BY x", "1\n1\n");
+    // A reference to an item on the left: PostgreSQL's error, at the
+    // column; past a comma, not supported.
+    try expectErrorState(&c, "SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.x) s ON true", "invalid reference to FROM-clause entry for table \"a\"\nDETAIL:  The combining JOIN type must be INNER or LEFT for a LATERAL reference.", "42P10");
+    try testing.expectEqual(@as(i32, 43), main_mod.errorOffset(c.db));
+    try expectErrorState(&c, "SELECT * FROM a RIGHT JOIN unnest(ARRAY[a.x]) u ON true", "invalid reference to FROM-clause entry for table \"a\"\nDETAIL:  The combining JOIN type must be INNER or LEFT for a LATERAL reference.", "42P10");
+    try expectErrorState(&c, "SELECT * FROM a, b RIGHT JOIN LATERAL (SELECT a.x) s ON true", "a LATERAL reference to \"a\" before a comma from a RIGHT or FULL JOIN is not supported", "0A000");
 }

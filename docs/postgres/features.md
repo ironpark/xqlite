@@ -65,9 +65,10 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 - **`SELECT`**
   - `DISTINCT [ON (expr, ...)]`: `DISTINCT ON`은 `ORDER BY` 순서로 묶음마다 첫 행을 남깁니다. `ORDER BY`가 `DISTINCT ON`의 식으로 시작하지 않으면 PostgreSQL처럼 `SELECT DISTINCT ON expressions must match initial ORDER BY expressions`(42P10)입니다.
   - `FROM` 절: 테이블 조인(`INNER`, `LEFT`, `RIGHT`, `FULL OUTER`, `CROSS`), 서브쿼리, 테이블 값 함수(`unnest`, `generate_series`, `jsonb_to_recordset`), `JOIN ... USING (cols) AS alias`(`alias.col`이 합친 열)
-  - `LATERAL` 서브쿼리: `FROM t, LATERAL (...)`, `[CROSS | LEFT] JOIN LATERAL (...) ON ...`. 앞 항목의 열을 쓰는 서브쿼리는 앞 항목의 행마다 다시 돕니다(그룹마다 상위 N개 같은 질의). `FROM`의 함수도 앞 항목의 열을 인자로 받습니다(`generate_series(1, t.n)`, `unnest(t.arr)`).
+  - `LATERAL` 서브쿼리: `FROM t, LATERAL (...)`, `[CROSS | LEFT] JOIN LATERAL (...) ON ...`. 앞 항목의 열을 쓰는 서브쿼리는 앞 항목의 행마다 다시 돕니다(그룹마다 상위 N개 같은 질의). `FROM`의 함수도 앞 항목의 열을 인자로 받습니다(`generate_series(1, t.n)`, `unnest(t.arr)`). 뷰에도 쓸 수 있습니다(`LEFT JOIN LATERAL ... ON` 포함): SQLite 텍스트로는 `json_each()`와 엔진 함수 `xq_lateral_rows()`·`xq_lateral_col()`로 저장되어 확장을 올린 sqlite3도 읽습니다([차이점](differences.md)).
+  - `RIGHT`/`FULL JOIN LATERAL (...)`(과 `RIGHT`/`FULL JOIN`의 함수)은 앞 항목을 쓰지 않으면 보통 조인입니다. 그 조인의 왼쪽 항목을 쓰면 PostgreSQL처럼 `42P10: invalid reference to FROM-clause entry for table "t"`(DETAIL `The combining JOIN type must be INNER or LEFT for a LATERAL reference.`)이고, 위치는 그 열입니다.
   - `WHERE`, `GROUP BY`, `HAVING`
-  - `GROUP BY [ALL | DISTINCT]`의 `ROLLUP (...)`, `CUBE (...)`, `GROUPING SETS (...)`, `()`와 보통 식을 섞은 것(집합들의 곱), `GROUPING(expr, ...)`. 다른 집합의 열은 NULL이고, 집계의 `DISTINCT`·`FILTER`·`ORDER BY`, `HAVING`, 전체에 대한 `ORDER BY`·`LIMIT`가 PostgreSQL처럼 동작합니다.
+  - `GROUP BY [ALL | DISTINCT]`의 `ROLLUP (...)`, `CUBE (...)`, `GROUPING SETS (...)`, `()`와 보통 식을 섞은 것(집합들의 곱), `GROUPING(expr, ...)`. 다른 집합의 열은 NULL이고, 집계의 `DISTINCT`·`FILTER`·`ORDER BY`, `HAVING`, 전체에 대한 `ORDER BY`·`LIMIT`가 PostgreSQL처럼 동작합니다. 윈도우 함수(집계를 인자나 `OVER`에 쓰는 `sum(sum(x)) OVER (...)`, `rank() OVER (ORDER BY count(*))`, `PARTITION BY grouping(...)`), `DISTINCT ON`, `FETCH ... WITH TIES`와 함께 쓸 수 있습니다. 이때는 집합마다의 `UNION ALL`을 파생 테이블로 두고 그 위에서 윈도우 함수와 `DISTINCT ON`, `ORDER BY`를 계산합니다.
   - 윈도우 함수 (`OVER (PARTITION BY ... ORDER BY ... [frame])`)
   - 집합 연산: `UNION [ALL]`, `INTERSECT [ALL]`, `EXCEPT [ALL]` (`ALL`은 중복을 센 다중 집합 연산)
   - 정렬 및 페이징: `ORDER BY ... [ASC | DESC] [NULLS FIRST | NULLS LAST]`, `LIMIT n OFFSET m`, `FETCH FIRST n ROWS ONLY`, `FETCH FIRST n ROWS WITH TIES`(`ORDER BY`가 없으면 42601)
@@ -97,6 +98,10 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
   - 제약, 기본값, identity, 생성 열, 열 타입의 저장 변환은 `INSERT`·`UPDATE`의 것 그대로입니다. 바뀐 행 수가 명령 태그(`MERGE n`)입니다
   - `WITH m AS (MERGE ... RETURNING ...) SELECT ...`
   - `WHEN` 절이 볼 수 없는 쪽을 쓰면 `invalid reference to FROM-clause entry for table "s"`(42P01), `merge_action()`을 `RETURNING` 밖에서 쓰면 42601
+  - 뷰가 대상(PostgreSQL 17): 자동으로 갱신할 수 있는 뷰(테이블 하나를 읽고 `DISTINCT`, `GROUP BY`, `HAVING`, 집합 연산, `WITH`, `LIMIT`/`OFFSET`, 집계, 윈도우 함수가 없는 뷰)는 그 테이블에 씁니다. 뷰의 `WHERE`가 빼는 행은 대상이 아니고, 테이블의 열인 뷰의 열(이름을 바꾼 것도)만 쓸 수 있으며 계산한 열은 읽기만 합니다. `RETURNING`(`merge_action()` 포함)은 뷰의 열입니다. 뷰에서의 `UPDATE SET col = DEFAULT`는 PostgreSQL처럼 NULL(뷰의 열에는 기본값이 없음), `INSERT`가 빠뜨린 열은 테이블의 기본값입니다.
+    - 갱신할 수 없는 뷰는 PostgreSQL의 오류: `cannot update view "v"`(55000, DETAIL 그 이유, HINT `INSTEAD OF` 트리거), 테이블의 열이 아닌 열에 쓰면 `cannot merge into column "c" of view "v"`(0A000), 뷰에 없는 열은 42703. `DO NOTHING`만 있으면 갱신할 수 없는 뷰도 됩니다.
+    - 지원하지 않음(0A000): 뷰의 뷰, `INSTEAD OF` 트리거의 뷰(PostgreSQL 방언에는 트리거가 없음), `WITH CHECK OPTION`(뷰를 만들 수 없음), 뷰가 대상일 때의 `RETURNING`의 `OLD`/`NEW`, 뷰의 열에 `SET (a, b) = (SELECT ...)`·`SET arr[i] = ...`. 뷰에 대한 `INSERT`·`UPDATE`·`DELETE`는 여전히 지원하지 않습니다.
+  - `EXPLAIN MERGE ...`: 단계마다(조인, `WHEN` 절의 동작, 뷰의 `UPDATE`가 새 값을 계산하는 단계) 그 문장의 계획을 단계 이름의 줄 아래에 보이고, `RETURNING`의 질의 계획이 뒤에 옵니다. 데이터 변경 `WITH`의 `EXPLAIN`도 하위 문장마다(`WITH d: DELETE`) 그렇게 보입니다. 단계는 실행되지 않습니다. 형식은 PostgreSQL의 것과 다릅니다.
 - **데이터 변경 `WITH`**: `WITH d AS (DELETE ... RETURNING *) INSERT INTO log SELECT * FROM d`, `WITH u AS (UPDATE ... RETURNING ...) SELECT ...`, `INSERT`·`UPDATE`·`DELETE`·`MERGE`를 여럿, 다른 `WITH` 질의와 섞어서. 읽지 않아도 돕니다. `RETURNING`이 없는 것을 읽으면 `WITH query "d" does not have a RETURNING clause`(0A000), 최상위가 아닌 `WITH`에 있으면 0A000입니다. 명령 태그는 바깥 문장의 것입니다(`INSERT 0 n`). 스냅숏의 차이는 [차이점](differences.md#1-엔진-설계-및-동작-차이점)에 있습니다.
 
 ### 2.3 커서
@@ -108,6 +113,7 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 - **`FETCH [direction] [FROM | IN] name`**, **`MOVE [direction] [FROM | IN] name`**: `NEXT`, `PRIOR`, `FIRST`, `LAST`, `ABSOLUTE n`, `RELATIVE n`, `n`, `ALL`, `FORWARD [n | ALL]`, `BACKWARD [n | ALL]`. 첫 행 앞, 행 위, 마지막 행 뒤의 위치와 행 수는 PostgreSQL의 `DoPortalRunFetch()`·`PortalRunSelect()`를 그대로 따릅니다(`FETCH 0`, `MOVE BACKWARD ALL`, 음수 개수 ...). `FETCH`는 준비해 두고 여러 번 실행해도 실행할 때마다 커서를 움직입니다. `MOVE`는 행을 내지 않고, 지나간 행 수가 문장의 `changes()`입니다(와이어 서버의 `MOVE n`).
   - 없는 커서는 `34000: cursor "x" does not exist`, `NO SCROLL` 커서를 뒤로 움직이면 `55000: cursor can only scan forward`(HINT도 같음).
   - `SCROLL`도 `NO SCROLL`도 없으면 PostgreSQL처럼 계획이 뒤로 갈 수 있을 때만 뒤로 갑니다. xqlite는 계획 대신 질의의 꼴로 정합니다: 집계, 윈도우, 조인, 집합 연산, `FROM` 없는 질의, 한 행의 `VALUES`, `FOR UPDATE`는 뒤로 가지 못하고, `GROUP BY`·`DISTINCT`·`IN (SELECT ...)`는 `ORDER BY`가 있을 때만 갑니다. `pg_cursors.is_scrollable`도 이것입니다.
+- **`DECLARE name BINARY CURSOR ...`**: 와이어 서버의 단순 질의로 `FETCH`하면 PostgreSQL처럼 행을 이진 형식으로 보냅니다(`RowDescription`의 형식 코드 1). 와이어 서버가 이진 형식을 모르는 타입(`date`, `timestamp` ...)의 열은 텍스트(형식 코드 0)입니다. 확장 질의의 `FETCH`는 `Bind`의 결과 형식을 따르고, 내장 API의 결과는 그대로입니다. `pg_cursors.is_binary`가 참입니다.
 - **`CLOSE name`**, **`CLOSE ALL`**.
 - **`UPDATE ... WHERE CURRENT OF name`**, **`DELETE ... WHERE CURRENT OF name`**: 커서가 테이블 하나를 그대로 훑는 질의일 때(조인, 집계, `DISTINCT`, 집합 연산이 없고, `ORDER BY`는 `FOR UPDATE`/`FOR SHARE`와 함께일 때만: PostgreSQL의 "simply updatable scan") 커서가 선 행입니다. `DECLARE`가 행마다 `rowid`를 함께 기억합니다. 그렇지 않으면 `24000: cursor "c" is not a simply updatable scan of table "t"`, 행 위에 있지 않으면 `24000: cursor "c" is not positioned on a row`.
 - **`pg_cursors`** 뷰: `name`, `statement`, `is_holdable`, `is_binary`, `is_scrollable`, `creation_time`.
@@ -119,8 +125,18 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 - **`SET LOCAL name {TO | =} value`**, `set_config(name, value, true)`: 트랜잭션이 끝날 때까지만입니다. 트랜잭션 밖의 `SET LOCAL`은 아무것도 하지 않고 `WARNING: SET LOCAL can only be used in transaction blocks`입니다. `SET`도 PostgreSQL처럼 트랜잭션을 따릅니다: 롤백되면 트랜잭션 전의 값으로 돌아가고, 커밋되면 마지막 `SET`의 값이 남습니다(그 뒤의 `SET LOCAL`은 남지 않음). `RESET ALL`도 같습니다. 세이브포인트로 되돌리는 것은 설정을 되돌리지 않습니다.
 - **`PREPARE name [(type, ...)] AS statement`**, **`EXECUTE name [(arg, ...)]`**, **`DEALLOCATE [PREPARE] {name | ALL}`**: 문장의 텍스트를 세션에 두고(`src/dialect/postgres/commands.zig`), `EXECUTE`가 `$n`을 인자(`PREPARE`가 타입을 주었으면 그 타입으로 캐스트)로 바꾼 문장을 컴파일합니다. 계획을 한 번 세워 두지는 않으므로 `EXECUTE`마다 컴파일합니다. 오류: 같은 이름(`42P05`), 없는 이름(`26000`), 인자 수(`42601`, DETAIL `Expected 1 parameters but got 0.`; 매개변수가 없는 문장은 인자를 무시함). 와이어 서버의 태그는 실행한 문장의 것입니다(`INSERT 0 1`, `SELECT 2`).
 - **`DISCARD ALL | PLANS | SEQUENCES | TEMP`**: `ALL`은 커서를 닫고 준비된 문장을 지우고 `RESET ALL`과 아래 셋을 합니다(트랜잭션 블록 안이면 `25001`). `PLANS`는 컴파일된 문장을 만료시키고, `SEQUENCES`는 `currval()`·`lastval()`을 잊고, `TEMP`는 임시 테이블과 뷰를 지웁니다.
-- **`SET CONSTRAINTS {ALL | name, ...} {DEFERRED | IMMEDIATE}`**: 트랜잭션 동안의 `PRAGMA defer_foreign_keys`입니다(트랜잭션이 끝나면 꺼짐). SQLite는 외래 키를 모두 미루거나 하나도 미루지 않으므로, `DEFERRED`는 `DEFERRABLE`이 아닌 외래 키도 미루고 `IMMEDIATE`는 그때 검사하지 않습니다(커밋에서 검사). 이름은 있는 제약이어야 합니다(`42704`). 트랜잭션 밖이면 `WARNING`만 냅니다.
-- **`LOCK [TABLE] [ONLY] name [*], ... [IN mode MODE] [NOWAIT]`**: 테이블이 있는지와 트랜잭션 블록(`25P01`)만 봅니다. SQLite는 데이터베이스 전체를 잠그고 쓰는 쪽은 하나뿐이므로 따로 잠그는 것은 없습니다.
+- **`SET CONSTRAINTS {ALL | [schema.]name, ...} {DEFERRED | IMMEDIATE}`**: `DEFERRABLE`인 외래 키마다 트랜잭션이 끝날 때까지 미루거나 바로 검사하게 합니다(`src/dialect/postgres/setconstraints.zig`). SQLite는 외래 키의 위반을 미룰지를 문장을 컴파일할 때 정하므로, PostgreSQL 방언으로 컴파일할 때 연결이 가진 모드(`ALL`의 모드와 그 뒤에 이름으로 준 모드, 이름이 앞섬)를 따르고, 모드가 바뀌거나 트랜잭션이 끝나면 컴파일된 문장을 만료시킵니다. SQLite 방언의 프로그램은 바뀌지 않습니다.
+  - `DEFERRABLE [INITIALLY IMMEDIATE]`도 이제 스키마 텍스트에 남습니다(`REFERENCES ... DEFERRABLE`, `pg_constraint.condeferrable`). 이 변경 전에 만든 테이블의 `DEFERRABLE INITIALLY IMMEDIATE`는 남아 있지 않아 `DEFERRABLE`이 아닌 것으로 봅니다.
+  - 이름은 PostgreSQL처럼 찾습니다: 스키마가 있으면 그 스키마에서, 없으면 `pg_temp`와 `search_path`의 스키마 중 그 이름의 제약이 있는 첫 스키마에서. 없는 이름은 `42704`, 없는 스키마는 `3F000`, `DEFERRABLE`이 아닌 제약(외래 키, 키, CHECK, NOT NULL)을 `DEFERRED`로 주면 `55000: constraint "x" is not deferrable`입니다(`IMMEDIATE`는 그냥 넘어감). `ALL`은 `DEFERRABLE`인 외래 키만 바꿉니다.
+  - `IMMEDIATE`는 바로 검사로 바뀌는 외래 키의 미뤄 둔 위반을 그 자리에서 검사합니다(`23503`, DETAIL `Key (x)=(5) is not present in table "p".`). 연결은 미룬 위반을 외래 키별로 세지 않고 하나의 수로만 세므로, 그 수가 0이 아니면 해당 외래 키를 `PRAGMA foreign_key_check`처럼 테이블 전체에서 찾습니다. 오류 뒤에는 모드가 바뀌지 않습니다.
+  - 세이브포인트를 따릅니다: `ROLLBACK TO`는 그 세이브포인트를 만들 때의 모드로 돌아가고, `RELEASE`는 바꾼 모드를 남깁니다.
+  - 트랜잭션 블록 밖이면 이름을 검사한 뒤 `WARNING: SET CONSTRAINTS can only be used in transaction blocks`만 내고 아무것도 바꾸지 않습니다. 블록 안인지는 실행할 때 보므로 와이어 서버의 여러 문장 질의가 여는 암묵적 블록에서도 모드를 바꿉니다. 다만 경고는 컴파일할 때 정하므로, 그때 트랜잭션 밖이었으면 암묵적 블록 안이라도 경고가 함께 나갑니다(PostgreSQL은 내지 않음).
+  - 모드가 그대로이면 컴파일된 문장을 만료시키지 않습니다.
+- **`LOCK [TABLE] [ONLY] name [*], ... [IN mode MODE] [NOWAIT]`**: 트랜잭션 블록(와이어 서버의 여러 문장 질의가 여는 암묵적 블록도) 안에서(`25P01`, 실행할 때 검사) 테이블이 든 데이터베이스(파일)의 SQLite 잠금을 그 자리에서 잡습니다. 없는 테이블은 `42P01`입니다.
+  - `ROW EXCLUSIVE`, `SHARE UPDATE EXCLUSIVE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, `ACCESS EXCLUSIVE`(기본)는 쓰기 잠금(`RESERVED`)입니다. 미뤄 둔 트랜잭션이 `BEGIN IMMEDIATE`처럼 바뀝니다.
+  - `ACCESS SHARE`, `ROW SHARE`, `SHARE`는 읽기 트랜잭션(`SHARED`)을 엽니다. 스냅숏이 그때 정해지고, 롤백 저널 모드에서는 끝날 때까지 다른 연결이 커밋하지 못합니다.
+  - 다른 연결이 잠금을 쥐고 있으면 바쁨 처리기(`busy_timeout`)만큼 기다리고, 그래도 안 되면 `55P03: canceling statement due to lock timeout`입니다. `NOWAIT`는 기다리지 않고 `55P03: could not obtain lock on relation "t"`입니다.
+  - 잠금은 테이블이 아니라 파일 전체에 걸립니다([차이점](differences.md)).
 
 ---
 

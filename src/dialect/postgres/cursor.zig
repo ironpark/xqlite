@@ -36,6 +36,11 @@
 //! list) and the statement's WHERE is `rowid = xq_pg_cursor_rowid(name,
 //! table)`.
 //!
+//! A BINARY cursor's rows are the same; a FETCH of it is marked
+//! (Parse.xq_binary_rows, Stmt.binaryRows()) for the wire server, which
+//! sends them in the binary format, as PostgreSQL does for a FETCH of a
+//! simple query.
+//!
 //! pg_cursors (catalog_views.zig) reads xq_pg_cursors().
 
 const std = @import("std");
@@ -89,6 +94,9 @@ pub const Cursor = struct {
     hold: bool,
     /// NO SCROLL: no fetch backward.
     no_scroll: bool,
+    /// BINARY: a FETCH of it is marked (Parse.xq_binary_rows) for the
+    /// wire server, which sends its rows in the binary format.
+    binary: bool = false,
     /// Declared in the transaction that is open: dropped if it rolls back.
     in_tx: bool,
     /// The savepoints open when it was declared (savepointEnded()).
@@ -336,13 +344,7 @@ pub fn ended(db: *int.Sqlite3, committed: bool) void {
     }
 }
 
-/// The number of savepoints open on `db`.
-fn savepoints(db: *const int.Sqlite3) u32 {
-    var n: u32 = 0;
-    var it = db.savepoint;
-    while (it) |sp| : (it = sp.next) n += 1;
-    return n;
-}
+const savepoints = @import("state.zig").savepoints;
 
 /// A RELEASE or ROLLBACK TO ran (dialect.savepointEnded()): a rollback to
 /// a savepoint drops the cursors declared after it (as PostgreSQL's
@@ -397,6 +399,7 @@ pub fn statement(ps: *Parser) Error!bool {
 const flag_hold = 1;
 const flag_no_scroll = 2;
 const flag_rowid = 4;
+const flag_binary = 8;
 
 fn declare(ps: *Parser) Error!void {
     const a = ps.arena;
@@ -406,9 +409,7 @@ fn declare(ps: *Parser) Error!void {
     var scroll: ?bool = null;
     var sensitive: ?bool = null;
     var binary = false;
-    var binary_pos: usize = 0;
     while (true) {
-        const at = ps.c.peek().start;
         if ((isWord(ps, ps.c.peek(), "no") and isWord(ps, ps.c.peekAt(1), "scroll") and skip2(ps))) {
             if (scroll == true) return conflict(ps, "SCROLL", "NO SCROLL");
             scroll = false;
@@ -417,7 +418,6 @@ fn declare(ps: *Parser) Error!void {
             scroll = true;
         } else if (eatWord(ps, "binary")) {
             binary = true;
-            binary_pos = at;
         } else if (eatWord(ps, "insensitive")) {
             if (sensitive == true) return conflict(ps, "ASENSITIVE", "INSENSITIVE");
             sensitive = false;
@@ -455,7 +455,6 @@ fn declare(ps: *Parser) Error!void {
     }
     const qend = ps.c.lastEnd();
     const query = sql[q.start..qend];
-    if (binary) return ps.unsupported(binary_pos, "DECLARE BINARY");
     const p = ps.p.?;
     const db = p.db;
     const shape = try analyze(ps, q.start, lock != null);
@@ -485,6 +484,7 @@ fn declare(ps: *Parser) Error!void {
     // (shape.scrollable).
     if (scroll == false or (scroll == null and !shape.scrollable)) flags |= flag_no_scroll;
     if (table.len > 0) flags |= flag_rowid;
+    if (binary) flags |= flag_binary;
     try text.print(a, ", {d}, ", .{flags});
     try literal(&text, a, run_query);
     try text.appendSlice(a, ", ");
@@ -746,6 +746,7 @@ fn fetchStmt(ps: *Parser, move: bool) Error!void {
     }
     const body = try tree.new(a, tree.Body, .{ .core = try tree.new(a, tree.Core, .{ .cols = cols, .from = from }) });
     const sel = try tree.new(a, tree.Select, .{ .body = body });
+    p.xq_binary_rows = c.binary;
     var l: lower.Lowerer = .init(p, ps.c.sql);
     try l.statement(.{ .select = sel });
 }
@@ -848,6 +849,7 @@ fn declareFunc(ctx: *Context, argv: []*Mem) void {
     const c = materialize(ctx, db, query, argv[5..], flags & flag_rowid != 0) orelse return;
     c.hold = hold;
     c.no_scroll = flags & flag_no_scroll != 0;
+    c.binary = flags & flag_binary != 0;
     c.in_tx = in_tx;
     c.depth = savepoints(db);
     c.created = (api.stmtCurrentTime(ctx) - 210866760000000) * 1000;
@@ -1046,7 +1048,7 @@ fn writeCursors(db: *int.Sqlite3, out: *std.ArrayList(u8)) error{OutOfMemory}!vo
         try jsonString(gpa, out, c.name);
         try out.appendSlice(gpa, ",\"statement\":");
         try jsonString(gpa, out, c.statement);
-        try out.print(gpa, ",\"is_holdable\":{},\"is_binary\":false,\"is_scrollable\":{},\"creation_time\":\"", .{ c.hold, !c.no_scroll });
+        try out.print(gpa, ",\"is_holdable\":{},\"is_binary\":{},\"is_scrollable\":{},\"creation_time\":\"", .{ c.hold, c.binary, !c.no_scroll });
         try timestamp(gpa, out, c.created);
         try out.appendSlice(gpa, "+00\"}");
     };

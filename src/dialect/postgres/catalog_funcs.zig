@@ -633,12 +633,38 @@ fn viewSource(c: ViewCtx, name: []const u8) error{OutOfMemory}!?deparse.Resolved
 /// pg_get_viewdef() of view `r` (CREATE VIEW text `sql`): deparse.zig's,
 /// else the query as the schema has it.
 fn viewDef(a: Allocator, s: *const Snapshot, p: []const u32, r: *const pgc.Rel, sql: []const u8, pretty_mode: bool) error{OutOfMemory}![]const u8 {
+    const d = try deparseView(a, s, p, r, sql, pretty_mode);
+    return d.def orelse viewQuery(a, s, d.text);
+}
+
+/// deparse.zig's text of view `r` (`def`, null where it cannot) and the
+/// CREATE VIEW text it read (`text`): the query as written, where the
+/// text keeps it (a desugared or LATERAL query: render.zig's
+/// displayOf()), else `sql`.
+fn deparseView(a: Allocator, s: *const Snapshot, p: []const u32, r: *const pgc.Rel, sql: []const u8, pretty_mode: bool) error{OutOfMemory}!struct { def: ?[]const u8, text: []const u8 } {
     const attrs = s.columnsOf(r.oid);
     const names = try a.alloc([]const u8, attrs.len);
     for (attrs, names) |at, *n| n.* = at.name;
     const ctx: ViewCtx = .{ .a = a, .s = s, .p = p, .db = r.db };
-    if (try deparse.viewDef(a, sql, names, ctx, viewSource, pretty_mode)) |z| return z;
-    return viewQuery(a, s, sql);
+    const vt = try @import("../../ir/render.zig").displayOf(a, sql);
+    const text = if (vt.display) |d| try std.fmt.allocPrint(a, "CREATE VIEW v AS {s}", .{d}) else vt.plain;
+    return .{ .def = try deparse.viewDef(a, text, names, ctx, viewSource, pretty_mode), .text = text };
+}
+
+/// pg_get_viewdef() of the view `name` of database `db_name` (SQLite's
+/// names) as deparse.zig prints it, null where it cannot: MERGE into a
+/// view (dml.zig) writes statements of it. The text is `a`'s, not the
+/// snapshot's.
+pub fn viewText(db: *int.Sqlite3, a: Allocator, db_name: []const u8, name: []const u8) error{OutOfMemory}!?[]const u8 {
+    const s = pgc.acquire(db) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return null,
+    };
+    defer pgc.release(db, s);
+    const r = s.tableRel(db_name, name) orelse return null;
+    const sql = r.sql orelse return null;
+    const p = try pgc.path(db, s, a);
+    return (try deparseView(a, s, p, r, sql, false)).def;
 }
 
 /// The query of a view's CREATE VIEW text, as pg_get_viewdef() writes it

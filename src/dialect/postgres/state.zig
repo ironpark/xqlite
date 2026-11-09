@@ -88,6 +88,8 @@ pub const State = struct {
     /// Changes with each change of a parameter: what the wire server
     /// compares to tell the client of the ones that changed.
     version: u32 = 0,
+    /// SET CONSTRAINTS of the open transaction (setconstraints.zig).
+    constraints: @import("setconstraints.zig").Modes = .{},
 
     /// Forget the parameters set (RESET ALL).
     pub fn resetParams(s: *State, gpa: std.mem.Allocator) void {
@@ -135,6 +137,7 @@ pub const State = struct {
         if (s.cursors) |p| if (s.cursors_free) |f| f(gpa, p);
         if (s.prepared) |p| if (s.prepared_free) |f| f(gpa, p);
         if (s.dml_rows) |p| if (s.dml_rows_free) |f| f(gpa, p);
+        s.constraints.deinit(gpa);
         s.* = .{};
     }
 
@@ -262,6 +265,25 @@ pub fn splitPath(a: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]co
     }
     return out.items;
 }
+
+/// The number of savepoints open on `db` (the depth of PostgreSQL's
+/// subtransactions): cursor.zig and setconstraints.zig.
+pub fn savepoints(db: *const Sqlite3) u32 {
+    var n: u32 = 0;
+    var it = db.savepoint;
+    while (it) |sp| : (it = sp.next) n += 1;
+    return n;
+}
+
+/// Whether a statement running now is in a transaction block (LOCK TABLE
+/// and SET CONSTRAINTS act only in one): BEGIN's, or the implicit block
+/// of the wire server's script, which begins after its statements are
+/// compiled: so asked when the statement runs, not when it compiles.
+pub fn inTransactionBlock(db: *const Sqlite3) bool {
+    return !db.auto_commit;
+}
+
+const Sqlite3 = @import("../../sql/sqlite_int.zig").Sqlite3;
 
 test "splitPath" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

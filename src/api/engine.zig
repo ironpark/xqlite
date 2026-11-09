@@ -486,6 +486,13 @@ pub fn queryOfNoColumns(v: *const Vm) bool {
     return v.xq_no_columns;
 }
 
+/// Whether the statement's rows are those of PostgreSQL's binary cursor
+/// (a FETCH from a cursor of DECLARE BINARY): a wire protocol sends them
+/// in the binary format, where the types have one.
+pub fn binaryRows(v: *const Vm) bool {
+    return v.xq_binary_rows;
+}
+
 /// A column's type as the catalog records it.
 pub const CatalogType = struct {
     /// The declared type, as written in `dialect`.

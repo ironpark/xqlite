@@ -12,14 +12,16 @@
 //!       a transaction block); PLANS expires the compiled statements;
 //!       SEQUENCES forgets currval() and lastval(); TEMP drops the
 //!       temporary tables and views.
-//!   SET CONSTRAINTS {ALL | name [, ...]} {DEFERRED | IMMEDIATE}
-//!       PRAGMA defer_foreign_keys for the transaction (SQLite defers every
-//!       foreign key or none, and turns it off when the transaction ends);
-//!       a name must be a constraint (whether it is deferrable is not
-//!       known: SQLite keeps DEFERRABLE only with INITIALLY DEFERRED).
+//!   SET CONSTRAINTS {ALL | [schema.]name [, ...]} {DEFERRED | IMMEDIATE}
+//!       The mode of each DEFERRABLE foreign key named (or of all) until
+//!       the transaction ends: setconstraints.zig.
 //!   LOCK [TABLE] [ONLY] name [*] [, ...] [IN mode MODE] [NOWAIT]
-//!       Checked (the tables exist, a transaction block), nothing more:
-//!       SQLite locks the whole database, a writer at a time.
+//!       In a transaction block, the lock of SQLite on the database (the
+//!       file) of each table, taken now (xq_pg_lock()): the write lock
+//!       (RESERVED, as BEGIN IMMEDIATE) for ROW EXCLUSIVE and the modes
+//!       above it, the read transaction (SHARED) for ACCESS SHARE, ROW
+//!       SHARE and SHARE. It covers the whole file, not the table. The
+//!       busy handler waits for it; NOWAIT does not wait (55P03).
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
@@ -364,78 +366,136 @@ fn dropTemp(ps: *Parser) Error!void {
 fn setConstraints(ps: *Parser) Error!void {
     ps.c.skipN(2); // SET CONSTRAINTS
     const p = ps.p.?;
-    const db = p.db;
-    var names: std.ArrayList(tree.Name) = .empty;
-    if (!eatWord(ps, "all")) {
+    var names: std.ArrayList(parser.QName) = .empty;
+    const all = eatWord(ps, "all");
+    if (!all) {
         while (true) {
-            try names.append(ps.arena, try ps.colId());
-            if (ps.c.eat(.dot)) names.items[names.items.len - 1] = try ps.colId();
+            var q: parser.QName = .{ .name = try ps.colId() };
+            if (ps.c.eat(.dot)) q = .{ .schema = q.name, .name = try ps.colId() };
+            try names.append(ps.arena, q);
             if (!ps.c.eat(.comma)) break;
         }
     }
     const deferred = if (eatWord(ps, "deferred")) true else if (eatWord(ps, "immediate")) false else return ps.c.syntaxError();
     try expectEnd(ps);
-    // A named constraint exists (pg_constraint). Whether it is
-    // deferrable is not checked: SQLite keeps DEFERRABLE only with
-    // INITIALLY DEFERRED.
-    for (names.items) |n| {
-        if (!try constraintExists(db, n.text)) return ps.c.failState(null, .of("42704"), "constraint \"{s}\" does not exist", .{n.text});
-    }
-    if (main_mod.getAutocommit(db)) {
+    // The foreign keys named (setconstraints.zig), checked now.
+    var args: std.ArrayList(u8) = .empty;
+    try setconstraints.resolve(ps, names.items, deferred, &args);
+    // Outside a transaction block it does nothing, as the function finds
+    // when it runs (a script of the wire server runs in an implicit
+    // block, which begins after the statement is compiled); the warning
+    // is the program's, so it is decided now.
+    if (main_mod.getAutocommit(p.db)) {
         @import("../../sql/util.zig").notice(p, .{ .level = .warning, .sqlstate = "25P01".*, .fields = .{ .message = "SET CONSTRAINTS can only be used in transaction blocks" } });
-        _ = @import("../../sql/build.zig").getVdbe(p);
-        return;
     }
-    try @import("../../ir/ir.zig").stmt.lowerSqliteText(p, if (deferred) "PRAGMA defer_foreign_keys = ON" else "PRAGMA defer_foreign_keys = OFF");
+    const text = try std.fmt.allocPrintSentinel(ps.arena, "SELECT 1 WHERE xq_pg_set_constraints('{s}', {d}{s}) IS NULL", .{ if (deferred) "d" else "i", @intFromBool(all), args.items }, 0);
+    try lowerPg(ps, text);
 }
 
-fn constraintExists(db: *int.Sqlite3, name: []const u8) Error!bool {
-    var v: ?*vi.Vdbe = null;
-    const rc = prepare.prepareLang(db, "SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = $1", .of(.postgres), 0, &v, null);
-    const stmt = v orelse {
-        if (rc == RC.NOMEM) return error.OutOfMemory;
-        return false;
-    };
-    defer _ = api.finalize(stmt);
-    if (api.bindText(stmt, 1, name) != RC.OK) return error.OutOfMemory;
-    return api.step(stmt) == RC.ROW;
+const setconstraints = @import("setconstraints.zig");
+
+test {
+    _ = setconstraints;
 }
 
 // =================================================================== LOCK
 
 fn lock(ps: *Parser) Error!void {
+    const a = ps.arena;
+    const build = @import("../../sql/build.zig");
     ps.c.skip(); // LOCK
     _ = eatWord(ps, "table");
+    // The databases of the tables, each once, and a name of each (-1:
+    // a table that does not exist, and where its name is).
+    var dbs: std.ArrayList(struct { i: i32, name: []const u8, pos: usize = 0 }) = .empty;
     while (true) {
         _ = eatWord(ps, "only");
         const q = try ps.qname();
         const r = try ps.lookup(q, .relation);
         try ps.readSchema();
-        if (@import("../../sql/build.zig").findTable(ps.p.?.db, r.q.name.text, if (r.q.schema) |s| s.text else null) == null) {
-            return ps.c.failState(q.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{q.name.text});
-        }
+        const db = ps.p.?.db;
+        const i: i32 = if (build.findTable(db, r.q.name.text, if (r.q.schema) |s| s.text else null)) |t| prepare.schemaToIndex(db, t.schema) else -1;
+        for (dbs.items) |d| {
+            if (d.i == i) break;
+        } else try dbs.append(a, .{ .i = i, .name = q.name.text, .pos = q.name.pos });
         _ = ps.c.eatOp("*");
         if (!ps.c.eat(.comma)) break;
     }
+    // ACCESS SHARE, ROW SHARE and SHARE read; the others (ROW EXCLUSIVE,
+    // SHARE UPDATE EXCLUSIVE, SHARE ROW EXCLUSIVE, EXCLUSIVE and ACCESS
+    // EXCLUSIVE, the default) write.
+    var write = true;
     if (eatWord(ps, "in")) {
-        // ACCESS SHARE, ROW SHARE, ROW EXCLUSIVE, SHARE UPDATE EXCLUSIVE,
-        // SHARE, SHARE ROW EXCLUSIVE, EXCLUSIVE, ACCESS EXCLUSIVE.
         if (eatWord(ps, "access")) {
-            if (!eatWord(ps, "share")) try expectWord(ps, "exclusive");
+            if (eatWord(ps, "share")) write = false else try expectWord(ps, "exclusive");
         } else if (eatWord(ps, "row")) {
-            if (!eatWord(ps, "share")) try expectWord(ps, "exclusive");
+            if (eatWord(ps, "share")) write = false else try expectWord(ps, "exclusive");
         } else if (eatWord(ps, "share")) {
             if (eatWord(ps, "update")) {
                 try expectWord(ps, "exclusive");
-            } else if (eatWord(ps, "row")) try expectWord(ps, "exclusive");
+            } else if (eatWord(ps, "row")) {
+                try expectWord(ps, "exclusive");
+            } else write = false;
         } else try expectWord(ps, "exclusive");
         try expectWord(ps, "mode");
     }
-    _ = eatWord(ps, "nowait");
+    const nowait = eatWord(ps, "nowait");
     try expectEnd(ps);
-    const p = ps.p.?;
-    if (main_mod.getAutocommit(p.db)) return ps.c.failState(null, .of("25P01"), "LOCK TABLE can only be used in transaction blocks", .{});
-    _ = @import("../../sql/build.zig").getVdbe(p);
+    // Outside a transaction block, its error comes first, when the
+    // statement runs (a script of the wire server runs in an implicit
+    // block, which begins after the statement is compiled).
+    if (!main_mod.getAutocommit(ps.p.?.db)) for (dbs.items) |d| {
+        if (d.i < 0) return ps.c.failState(d.pos, .of("42P01"), "relation \"{s}\" does not exist", .{d.name});
+    };
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(a, "SELECT 1 WHERE");
+    for (dbs.items, 0..) |d, n| {
+        try text.print(a, "{s} xq_pg_lock({d}, {d}, {d}, ", .{ if (n > 0) " AND" else "", d.i, @intFromBool(write), @intFromBool(nowait) });
+        try literal(&text, a, d.name);
+        try text.appendSlice(a, ") IS NULL");
+    }
+    try lowerPg(ps, try a.dupeSentinel(u8, text.items, 0));
+}
+
+/// xq_pg_lock(db, write, nowait, name): LOCK TABLE of a table of database
+/// `db` (its index): the transaction of that database begins, the write
+/// transaction (SQLite's RESERVED lock) if `write`, else the read one
+/// (SHARED), as an OP_Transaction would. SQLite locks the whole file,
+/// not the table. A lock another connection holds is waited for by the
+/// busy handler (busy_timeout), not with `nowait`: then the error is
+/// PostgreSQL's 55P03, named after table `name`. Outside a transaction
+/// block, an error (25P01); `db` -1: table `name` does not exist.
+fn lockFunc(ctx: *Context, argv: []*Mem) void {
+    const db = api.contextDbHandle(ctx);
+    if (!@import("state.zig").inTransactionBlock(db)) return api.resultErrorState(ctx, .of("25P01"), "LOCK TABLE can only be used in transaction blocks");
+    const i = api.valueInt64(argv[0]);
+    if (i < 0) {
+        var msg: [200]u8 = undefined;
+        const name = api.valueText(argv[3]) orelse "";
+        return api.resultErrorState(ctx, .of("42P01"), std.fmt.bufPrint(&msg, "relation \"{s}\" does not exist", .{name[0..@min(name.len, 100)]}) catch "relation does not exist");
+    }
+    if (i >= db.dbs.items.len) return api.resultInt64(ctx, 0);
+    const bt = db.dbs.items[@intCast(i)].bt orelse return api.resultInt64(ctx, 0);
+    const write = api.valueInt64(argv[1]) != 0;
+    const nowait = api.valueInt64(argv[2]) != 0;
+    if (write and db.flags.QueryOnly) return api.resultErrorCode(ctx, RC.READONLY);
+    // A handler that has given up (n_busy < 0) is not called.
+    const saved = db.busy_handler.n_busy;
+    if (nowait) db.busy_handler.n_busy = -1;
+    defer db.busy_handler.n_busy = saved;
+    bt.beginTrans(if (write) .write else .read, @intCast(db.n_savepoint)) catch |err| {
+        const rc = int.errorCode(err);
+        if (rc & 0xff != RC.BUSY) return api.resultErrorCode(ctx, rc);
+        var buf: [200]u8 = undefined;
+        const name = api.valueText(argv[3]) orelse "";
+        if (nowait) {
+            api.resultErrorState(ctx, .of("55P03"), std.fmt.bufPrint(&buf, "could not obtain lock on relation \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "could not obtain lock on relation");
+        } else {
+            api.resultErrorState(ctx, .of("55P03"), "canceling statement due to lock timeout");
+        }
+        return api.resultErrorCode(ctx, rc);
+    };
+    api.resultInt64(ctx, 0);
 }
 
 // ============================================================== functions
@@ -444,7 +504,8 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_prepare", 5, .{ .unsafe = true, .direct_only = true }, prepareFunc),
     dfunc.scalar("xq_pg_deallocate", 1, .{ .unsafe = true, .direct_only = true }, deallocateFunc),
     dfunc.scalar("xq_pg_discard", 1, .{ .unsafe = true, .direct_only = true }, discardFunc),
-};
+    dfunc.scalar("xq_pg_lock", 4, .{ .unsafe = true, .direct_only = true }, lockFunc),
+} ++ setconstraints.functions;
 
 /// xq_pg_prepare(name, statement, text, types, n): keep the statement.
 fn prepareFunc(ctx: *Context, argv: []*Mem) void {
@@ -558,4 +619,53 @@ test "pg: PREPARE, EXECUTE, DEALLOCATE, DISCARD, SET CONSTRAINTS, LOCK" {
     try c.exec("SET CONSTRAINTS ALL DEFERRED; SET CONSTRAINTS ALL IMMEDIATE");
     try c.expectError("SET CONSTRAINTS nosuch DEFERRED", "constraint \"nosuch\" does not exist");
     try c.exec("ROLLBACK");
+}
+
+test "pg: LOCK TABLE takes SQLite's lock on the database file" {
+    try @import("../dialect.zig").Dialect.requireBuilt(&.{.postgres});
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    main_mod.setDialect(c.db, .postgres);
+    try c.exec("CREATE TABLE t (a int); CREATE TABLE u (b int); INSERT INTO t VALUES (1)");
+    var c2: Conn = undefined;
+    try c2.openOn(c.mem);
+    defer c2.close();
+    main_mod.setDialect(c2.db, .postgres);
+
+    // A write mode (the default, ACCESS EXCLUSIVE) takes the write lock
+    // at once: the other connection may read but not write, and its
+    // LOCK of another table of the file fails too (the lock is the
+    // file's). NOWAIT fails at once, PostgreSQL's 55P03.
+    try c.exec("BEGIN; LOCK t");
+    try c2.expectRows("SELECT a FROM t", "1\n");
+    try c2.expectError("INSERT INTO u VALUES (1)", "database is locked");
+    try c2.exec("BEGIN");
+    try c2.expectError("LOCK TABLE u IN ROW EXCLUSIVE MODE NOWAIT", "could not obtain lock on relation \"u\"");
+    try testing.expectEqualStrings("55P03", &c2.db.err_state.?.sqlstate);
+    // Without NOWAIT, the busy handler waits (none here: at once).
+    try c2.expectError("LOCK u IN EXCLUSIVE MODE", "canceling statement due to lock timeout");
+    try testing.expectEqual(RC.BUSY, c2.db.err_code & 0xff);
+    // A read mode needs no write lock.
+    try c2.exec("LOCK u IN ACCESS SHARE MODE; LOCK t IN SHARE MODE NOWAIT");
+    try c2.exec("ROLLBACK");
+    try c.exec("INSERT INTO t VALUES (2); COMMIT");
+    try c2.expectRows("SELECT count(*) FROM t", "2\n");
+
+    // A read mode starts the read transaction (SHARED) at once: a
+    // writer of the file cannot commit until it ends.
+    try c2.exec("BEGIN; LOCK u IN ROW SHARE MODE");
+    try c.expectError("INSERT INTO t VALUES (3)", "database is locked");
+    try c2.exec("COMMIT");
+    try c.exec("INSERT INTO t VALUES (3)");
+
+    // The busy timeout is waited before giving up.
+    try c.exec("BEGIN; LOCK t IN SHARE ROW EXCLUSIVE MODE");
+    _ = main_mod.busyTimeout(c2.db, 20);
+    try c2.exec("BEGIN");
+    try c2.expectError("LOCK u", "canceling statement due to lock timeout");
+    try c2.exec("ROLLBACK");
+    try c.exec("COMMIT");
+    try c2.exec("BEGIN; LOCK u NOWAIT; INSERT INTO u VALUES (4); COMMIT");
+    try c.expectRows("SELECT b FROM u", "4\n");
 }

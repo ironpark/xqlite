@@ -58,6 +58,29 @@ pub fn statement(p: *int.Parse, src: [:0]const u8, s: tree.Stmt) Error![:0]const
     };
 }
 
+const display_tag = "xq_display:";
+
+/// The display text of view text `sql` (CreateView.display); null if
+/// there is none or the query is no longer the one it was written with
+/// (a rename), and then `plain` is the text without its comment (else
+/// `sql` as it is).
+pub const ViewText = struct { display: ?[]const u8, plain: []const u8 };
+
+pub fn displayOf(a: std.mem.Allocator, sql: []const u8) error{OutOfMemory}!ViewText {
+    const start = std.mem.indexOf(u8, sql, "/*" ++ display_tag) orelse return .{ .display = null, .plain = sql };
+    const body = start + 2 + display_tag.len;
+    const close = std.mem.indexOfPos(u8, sql, body, "*/") orelse return .{ .display = null, .plain = sql };
+    var rest = close + 2;
+    if (rest < sql.len and sql[rest] == ' ') rest += 1;
+    const inner = sql[body..close];
+    if (inner.len >= 17 and inner[16] == ':') {
+        if (std.fmt.parseInt(u64, inner[0..16], 16)) |h| {
+            if (h == std.hash.Fnv1a_64.hash(sql[rest..])) return .{ .display = inner[17..], .plain = sql };
+        } else |_| {}
+    }
+    return .{ .display = null, .plain = try std.mem.concat(a, u8, &.{ sql[0..start], sql[rest..] }) };
+}
+
 pub const Renderer = struct {
     p: *int.Parse,
     /// The text the positions of the tree are offsets of.
@@ -66,6 +89,11 @@ pub const Renderer = struct {
     /// In a DEFAULT, which SQLite compiles without resolving names: `x IS
     /// TRUE` there is `x IS 1`, not a truth test (truthTest()).
     in_default: bool = false,
+    /// The query as the frontend wrote it, for a view's display text
+    /// (PostgreSQL's pg_get_viewdef()): not desugared, DISTINCT ON,
+    /// GROUPING SETS (ROLLUP, CUBE), FETCH ... WITH TIES, INTERSECT ALL,
+    /// EXCEPT ALL and LATERAL written as such. Not SQLite text.
+    keep: bool = false,
 
     fn a(r: *Renderer) std.mem.Allocator {
         return r.p.arena;
@@ -521,7 +549,7 @@ pub const Renderer = struct {
         defer r.src = saved;
         if (s_in.src) |t| r.src = t;
         var dz: desugar.Desugar = .{ .p = r.p, .src = r.src, .mode = .render };
-        const s = try dz.select(s_in);
+        const s = if (r.keep) s_in else try dz.select(s_in);
         if (s.with) |w| {
             try r.put("WITH ");
             if (w.recursive) try r.put("RECURSIVE ");
@@ -550,7 +578,15 @@ pub const Renderer = struct {
             try r.put(" ORDER BY ");
             try r.sortList(s.order_by);
         }
-        if (s.limit != null or s.offset != null) {
+        if (r.keep and s.with_ties) {
+            if (s.offset) |x| {
+                try r.put(" OFFSET ");
+                try r.expr(x);
+            }
+            try r.put(" FETCH FIRST ");
+            if (s.limit) |x| try r.expr(x) else try r.put("1");
+            try r.put(" ROWS WITH TIES");
+        } else if (s.limit != null or s.offset != null) {
             try r.put(" LIMIT ");
             if (s.limit) |x| try r.expr(x) else try r.put("-1");
             if (s.offset) |x| {
@@ -583,12 +619,12 @@ pub const Renderer = struct {
             },
             .nested => |s| try r.select(s),
             .compound => |c| {
-                if (c.all and c.op != .@"union") return r.fail(0, "{s} ALL is not supported", .{if (c.op == .except) "EXCEPT" else "INTERSECT"});
+                if (c.all and c.op != .@"union" and !r.keep) return r.fail(0, "{s} ALL is not supported", .{if (c.op == .except) "EXCEPT" else "INTERSECT"});
                 try r.operand(c.left, false);
                 try r.put(switch (c.op) {
                     .@"union" => if (c.all) " UNION ALL " else " UNION ",
-                    .except => " EXCEPT ",
-                    .intersect => " INTERSECT ",
+                    .except => if (c.all) " EXCEPT ALL " else " EXCEPT ",
+                    .intersect => if (c.all) " INTERSECT ALL " else " INTERSECT ",
                 });
                 try r.operand(c.right, true);
             },
@@ -649,7 +685,11 @@ pub const Renderer = struct {
 
     fn core(r: *Renderer, c: *const tree.Core) Error!void {
         if (c.hidden > 0) return r.fail(c.pos, "hidden result columns have no SQLite text", .{});
-        try r.put(if (c.distinct) "SELECT DISTINCT " else "SELECT ");
+        if (r.keep and c.distinct_on.len > 0) {
+            try r.put("SELECT DISTINCT ON (");
+            try r.exprList(c.distinct_on);
+            try r.put(") ");
+        } else try r.put(if (c.distinct) "SELECT DISTINCT " else "SELECT ");
         try r.targets(c.cols);
         if (c.from.len > 0) {
             try r.put(" FROM ");
@@ -659,9 +699,11 @@ pub const Renderer = struct {
             try r.put(" WHERE ");
             try r.expr(w);
         }
-        if (c.group_by.len > 0) {
+        if (c.group_by.len > 0 or (r.keep and c.grouping_sets != null)) {
             try r.put(" GROUP BY ");
-            try r.exprList(c.group_by);
+            if (r.keep and c.grouping_sets != null) {
+                try r.groupingSets(c.group_by, c.grouping_sets.?);
+            } else try r.exprList(c.group_by);
         }
         if (c.having) |h| {
             try r.put(" HAVING ");
@@ -677,6 +719,49 @@ pub const Renderer = struct {
                 try r.put(")");
             }
         }
+    }
+
+    /// The grouping sets of a GROUP BY as written (keep): ROLLUP (a, b)
+    /// or CUBE (a, b) where the sets are theirs over all of `exprs` in
+    /// order, else GROUPING SETS ((a, b), (a), ()).
+    fn groupingSets(r: *Renderer, exprs: []const *tree.Expr, sets: []const []const u32) Error!void {
+        const n = exprs.len;
+        if (sets.len == 1 and sets[0].len == n) return r.exprList(exprs);
+        const rollup = n > 0 and sets.len == n + 1 and for (sets, 0..) |set, k| {
+            if (set.len != n - k) break false;
+            const prefix = for (set, 0..) |x, j| {
+                if (x != j) break false;
+            } else true;
+            if (!prefix) break false;
+        } else true;
+        const cube = n > 0 and n < 16 and sets.len == (@as(usize, 1) << @intCast(n)) and for (sets, 0..) |set, k| {
+            // (a, b), (a), (b), (): mask 2^n-1-k, the first expression's
+            // the high bit.
+            const m = (@as(usize, 1) << @intCast(n)) - 1 - k;
+            var i: usize = 0;
+            var ok = true;
+            for (0..n) |j| if (m & (@as(usize, 1) << @intCast(n - 1 - j)) != 0) {
+                if (i >= set.len or set[i] != j) ok = false;
+                i += 1;
+            };
+            if (!ok or i != set.len) break false;
+        } else true;
+        if (rollup or cube) {
+            try r.put(if (rollup) "ROLLUP (" else "CUBE (");
+            try r.exprList(exprs);
+            return r.put(")");
+        }
+        try r.put("GROUPING SETS (");
+        for (sets, 0..) |set, k| {
+            if (k > 0) try r.put(", ");
+            try r.put("(");
+            for (set, 0..) |x, j| {
+                if (j > 0) try r.put(", ");
+                try r.expr(exprs[x]);
+            }
+            try r.put(")");
+        }
+        try r.put(")");
     }
 
     pub fn targets(r: *Renderer, cols: []const tree.ResultCol) Error!void {
@@ -728,7 +813,10 @@ pub const Renderer = struct {
                 .subquery => |s| {
                     // SQLite has no LATERAL: a subquery naming the items
                     // before it has no text (the first item names none).
-                    if (item.lateral and i > 0) return r.fail(if (item.alias) |al| al.name.pos else 0, "LATERAL in the query of a view is not supported", .{});
+                    if (item.lateral and i > 0) {
+                        if (!r.keep) return r.fail(if (item.alias) |al| al.name.pos else 0, "LATERAL in the query of a view is not supported", .{});
+                        try r.put("LATERAL ");
+                    }
                     try r.put("(");
                     if (cols.len > 0) {
                         try r.put("WITH \"xq_alias\"");
@@ -892,7 +980,9 @@ pub const Renderer = struct {
                 .none => unreachable,
             });
         };
-        if (ref.deferred) try r.put(" DEFERRABLE INITIALLY DEFERRED");
+        if (ref.deferred) {
+            try r.put(" DEFERRABLE INITIALLY DEFERRED");
+        } else if (ref.deferrable) try r.put(" DEFERRABLE");
     }
 
     pub fn createIndex(r: *Renderer, ci: *const tree.CreateIndex) Error![:0]const u8 {
@@ -935,7 +1025,16 @@ pub const Renderer = struct {
         try r.ident(v.name.name.text);
         if (v.cols.len > 0) try r.nameList(v.cols);
         try r.put(" AS ");
+        const comment_at = r.out.items.len;
         try r.select(v.select);
+        if (v.display) |d| if (std.mem.indexOf(u8, d, "*/") == null) {
+            // /*xq_display:<hash of the query's text>:<display>*/ before
+            // the query: SQLite keeps the text as it is, a rename that
+            // rewrites the query leaves the hash behind (displayOf()).
+            const h = std.hash.Fnv1a_64.hash(r.out.items[comment_at..]);
+            const comment = try std.fmt.allocPrint(r.a(), "/*{s}{x:0>16}:{s}*/ ", .{ display_tag, h, d });
+            try r.out.insertSlice(r.a(), comment_at, comment);
+        };
         return r.text();
     }
 

@@ -80,6 +80,13 @@ pub const Origins = struct {
     exprs: std.AutoHashMapUnmanaged(*const tree.Expr, *IrExpr) = .empty,
     /// By the address of the tree's items.
     sort_lists: std.AutoHashMapUnmanaged([*]const tree.SortItem, *ExprList) = .empty,
+    /// Whether from_items is filled (viewlateral.zig's).
+    want_from_items: bool = false,
+    /// The term of a SrcList each FROM item was lowered to (by the
+    /// address of the tree's item).
+    from_items: std.AutoHashMapUnmanaged(*const tree.FromItem, FromTerm) = .empty,
+
+    pub const FromTerm = struct { list: *SrcList, i: usize };
 };
 
 pub const Lowerer = struct {
@@ -944,9 +951,6 @@ pub const Lowerer = struct {
             for (item.using) |u| ou.using = try ir.list.idAppend(p, ou.using, try l.nameTok(u));
             const alias: Token = if (item.alias) |a| try l.nameTok(a.name) else .{};
             const alias_cols: []const tree.Name = if (item.alias) |a| a.cols else &.{};
-            if (item.lateral and (item.join == .right or item.join == .full)) {
-                return l.failState(if (item.alias) |a| a.name.pos else 0, .of("42601"), "the combining JOIN type must be INNER or LEFT for a LATERAL reference", .{});
-            }
             switch (item.source) {
                 .table => |q| {
                     if (alias_cols.len > 0) return l.fail(alias_cols[0].pos, "column aliases of a table are not supported", .{});
@@ -962,17 +966,12 @@ pub const Lowerer = struct {
                     // (s), not a CTE, whose copy would not see the items
                     // before it. (LATERAL (VALUES ...): its columns named
                     // column1 ..., not after a column a row names.)
-                    if (item.lateral and (alias_cols.len > 0 or s.body.* == .values)) {
+                    const sel = if (item.lateral and (alias_cols.len > 0 or s.body.* == .values)) lat: {
                         var dz: desugar.Desugar = .{ .p = p, .src = l.src, .mode = .lower };
                         const renamed = try dz.renamed(s, alias_cols) orelse
                             return l.failState(if (alias_cols.len > 0) alias_cols[0].pos else 0, .of("0A000"), "column aliases of this LATERAL subquery are not supported", .{});
-                        list = try ir.from.appendTerm(p, list, null, null, alias, try l.select(renamed), &ou);
-                        if (list) |sl| sl.at(sl.len() - 1).fg.xq_lateral = true;
-                        try l.check();
-                        continue;
-                    }
-                    var sel = try l.select(s);
-                    if (alias_cols.len > 0) sel = try l.renameColumns(sel, alias_cols);
+                        break :lat try l.select(renamed);
+                    } else if (alias_cols.len > 0) try l.renameColumns(try l.select(s), alias_cols) else try l.select(s);
                     list = try ir.from.appendTerm(p, list, null, null, alias, sel, &ou);
                     // LATERAL: the subquery may name the items before it
                     // (the core runs it as a co-routine of their rows).
@@ -985,13 +984,26 @@ pub const Lowerer = struct {
                     const args = try l.exprList(f.args);
                     list = try ir.from.appendTerm(p, list, try l.nameTok(f.name), null, alias, null, &ou);
                     ir.from.funcArgs(list, args);
+                    // A function in PostgreSQL's FROM is LATERAL: of a
+                    // RIGHT or FULL JOIN, its arguments may not name the
+                    // items before it (resolve.zig's lateralRefOk()).
+                    if ((item.join == .right or item.join == .full) and p.db.xq.lang.dialect == .postgres) if (list) |sl| {
+                        sl.at(sl.len() - 1).fg.xq_lateral = true;
+                    };
                 },
                 .nested => |inner| {
                     const inner_list = try l.fromItems(inner);
                     list = try ir.from.nested(p, list, inner_list, alias, &ou);
                 },
             }
+            // After a comma: where a LATERAL subquery of a RIGHT or FULL
+            // JOIN may not name the items before it (resolve.zig's
+            // lateralRefOk()).
+            if (item.join == .comma) if (list) |sl| {
+                sl.at(sl.len() - 1).fg.xq_comma = true;
+            };
             try l.check();
+            if (l.origins) |o| if (o.want_from_items) if (list) |sl| try o.from_items.put(l.arena(), &items[i], .{ .list = sl, .i = sl.len() - 1 });
         }
         return list;
     }
@@ -1519,3 +1531,18 @@ pub const Lowerer = struct {
         }
     }
 };
+
+test "lower: a LATERAL VALUES item after a comma is marked as one" {
+    try dialect.Dialect.requireBuilt(&.{.postgres});
+    var c: @import("../sql/sql_test.zig").Conn = undefined;
+    try c.open();
+    defer c.close();
+    @import("../sql/main.zig").setDialect(c.db, .postgres);
+    try c.exec("CREATE TABLE a (x int)");
+    // `a, v RIGHT JOIN LATERAL (...)`: the reference to a is past the
+    // comma before v, a LATERAL VALUES (fromItems()' renamed form) as a
+    // LATERAL subquery.
+    const msg = "a LATERAL reference to \"a\" before a comma from a RIGHT or FULL JOIN is not supported";
+    try c.expectError("SELECT 1 FROM a, LATERAL (SELECT 1) v RIGHT JOIN LATERAL (SELECT a.x) c ON true", msg);
+    try c.expectError("SELECT 1 FROM a, LATERAL (VALUES (1)) v RIGHT JOIN LATERAL (SELECT a.x) c ON true", msg);
+}

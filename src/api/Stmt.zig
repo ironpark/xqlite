@@ -247,6 +247,12 @@ pub fn queryOfNoColumns(s: *const Stmt) bool {
     return engine.queryOfNoColumns(s.vm);
 }
 
+/// Whether the statement's rows are to be sent in the binary format
+/// (engine.binaryRows(): a FETCH from PostgreSQL's binary cursor).
+pub fn binaryRows(s: *const Stmt) bool {
+    return engine.binaryRows(s.vm);
+}
+
 /// A message of the statement that is not an error (PostgreSQL's NOTICE:
 /// `table "t" does not exist, skipping` of DROP TABLE IF EXISTS).
 pub const Notice = engine.Notice;

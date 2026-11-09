@@ -3,8 +3,9 @@
 //! semantic node (casts, concatenation, division, collations, LIKE,
 //! functions of SQLite, of the engine and of dialects' tables, Coerce,
 //! booleans, parameters), queries (joins, subqueries, VALUES, aggregates,
-//! windows, compounds, CTEs, ORDER BY with NULLS FIRST/LAST, LIMIT and
-//! OFFSET), and tables with CHECK, DEFAULT and generated columns.
+//! grouping sets, windows, compounds, CTEs, ORDER BY with NULLS
+//! FIRST/LAST, LIMIT and OFFSET), and tables with CHECK, DEFAULT and
+//! generated columns.
 //!
 //! A tree is a function of a Config (the swarm: which kinds come up and how
 //! often) and a seed, so that a frontend can build it again from a few
@@ -751,6 +752,30 @@ pub const Gen = struct {
         return s;
     }
 
+    /// The grouping sets of `k` GROUP BY expressions: ROLLUP's, CUBE's or
+    /// a few of any (the empty one among them).
+    fn groupingSets(g: *Gen, k: u32) Oom![]const []const u32 {
+        var sets: std.ArrayList([]const u32) = .empty;
+        switch (g.rand.uintLessThan(u8, 3)) {
+            0 => for (0..k + 1) |i| {
+                const set = try g.a.alloc(u32, k - i);
+                for (set, 0..) |*x, j| x.* = @intCast(j);
+                try sets.append(g.a, set);
+            },
+            1 => for (0..@as(u32, 1) << @intCast(k)) |m| {
+                var set: std.ArrayList(u32) = .empty;
+                for (0..k) |j| if (m & (@as(u32, 1) << @intCast(j)) == 0) try set.append(g.a, @intCast(j));
+                try sets.append(g.a, set.items);
+            },
+            else => for (0..g.rand.intRangeAtMost(usize, 1, 3)) |_| {
+                var set: std.ArrayList(u32) = .empty;
+                for (0..k) |j| if (g.rand.boolean()) try set.append(g.a, @intCast(j));
+                try sets.append(g.a, set.items);
+            },
+        }
+        return sets.items;
+    }
+
     fn positions(g: *Gen, n: u32) Oom![]tree.SortItem {
         g.sort_keys = true;
         const k = g.rand.intRangeAtMost(usize, 1, n);
@@ -859,6 +884,7 @@ pub const Gen = struct {
             for (group) |*x| x.* = (try g.column(plain)) orelse try g.expr(plain);
             c.group_by = group;
             if (k > 0) g.sort_keys = true;
+            if (k > 0 and g.rand.uintLessThan(u8, 4) == 0) c.grouping_sets = try g.groupingSets(@intCast(k));
             if (k > 0 and g.rand.uintLessThan(u8, 3) == 0) c.having = try g.expr(.{ .scope = scope, .depth = g.cfg.expr_depth, .agg = true });
         }
         const rc: Ctx = .{ .scope = scope, .depth = g.cfg.expr_depth, .agg = agg, .win = true };

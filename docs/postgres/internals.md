@@ -33,7 +33,8 @@ flowchart TD
 | `enums.zig` | 열거형: `xq_catalog`의 행(`tbl ''`, `col` 타입 이름, `key 'enum'`, 값은 레이블의 JSON 배열), 열마다의 CHECK, 캐스트 `xq_pg_enum_in()`, `CREATE`/`ALTER`/`DROP TYPE`. |
 | `mathfuncs.zig` | 배정밀도의 삼각·쌍곡·특수 함수(`sind`, `erf`, `gamma` ...)와 그 오류, `round(x)`(짝수 쪽 반올림), PostgreSQL의 PRNG(xoroshiro128**, 세션의 `State.prng`)를 쓰는 `random()`·`random(min, max)`·`random_normal()`·`setseed()`. `exp`·`log`·`pow` 계열과 `erf`·`erfc`는 musl을 옮긴 `../libm.zig`. |
 | `ordered.zig` | 분수 배열의 `percentile_cont(float8[])`·`percentile_disc(float8[])`(`xq_pg_percentile_*_arr`). 통계·순서 집합·가상 집합 집계 자체는 방언 밖의 `../stats.zig`(실수)와 `../decimal_sql.zig`(numeric의 분산)에 있고, 파서가 `WITHIN GROUP`을 집계의 `ORDER BY`로 내립니다. |
-| `commands.zig` | `PREPARE`/`EXECUTE`/`DEALLOCATE`(세션의 문장 텍스트, `EXECUTE`는 인자를 넣어 `frontend.compile()`로 다시 컴파일하고 와이어 서버의 태그를 위해 `Vdbe.xq_command_sql`을 둠), `DISCARD`, `SET CONSTRAINTS`(`PRAGMA defer_foreign_keys`), `LOCK TABLE`(검사만). |
+| `commands.zig` | `PREPARE`/`EXECUTE`/`DEALLOCATE`(세션의 문장 텍스트, `EXECUTE`는 인자를 넣어 `frontend.compile()`로 다시 컴파일하고 와이어 서버의 태그를 위해 `Vdbe.xq_command_sql`을 둠), `DISCARD`, `SET CONSTRAINTS`(이름을 찾고 `xq_pg_set_constraints()`를 부름), `LOCK TABLE`(`xq_pg_lock()`: 그 데이터베이스의 b-tree 트랜잭션을 `OP_Transaction`처럼 엶, `NOWAIT`는 바쁨 처리기를 부르지 않음). |
+| `setconstraints.zig` | `SET CONSTRAINTS`의 외래 키별 모드(`State.constraints`, 세이브포인트별로 저장). `fkey.zig`가 `dialect.fkDeferred()`로 묻고, 모드가 바뀌거나 트랜잭션이 끝나면 문장을 만료시킴. `IMMEDIATE`는 `PRAGMA foreign_key_check`로 미뤄 둔 위반을 찾음. |
 | `cursor.zig` | 커서: `DECLARE`(실행할 때 질의를 돌려 행을 세션의 메모리에 둠, `xq_pg_cursor_declare()`), `FETCH`(커서의 열을 `json_each(xq_pg_cursor_fetch(...))`의 행 번호 위에서 `xq_pg_cursor_value()`로 읽는 질의, 열마다 질의가 준 타입: `tree.Func.result_type_id`), `MOVE`(`changes()`가 지나간 행 수), `CLOSE`, `WHERE CURRENT OF`(`rowid = xq_pg_cursor_rowid(...)`), `pg_cursors`(`xq_pg_cursors()`). 트랜잭션과 세이브포인트의 끝은 코어가 `dialect.transactionEnded()`·`savepointEnded()`로 알립니다. |
 | `inet.zig` | `inet`·`cidr`의 입력과 PostgreSQL의 출력 텍스트, `xq_pg_inet()`·`xq_pg_cidr()`, `host()`·`masklen()`·`family()`. |
 | `dml.zig` | `MERGE`와 데이터 변경 `WITH`: 문장이 돌 때 실행할 단계(문장들)와, 단계가 남긴 행을 읽는 바깥 질의를 만듭니다([6장](#6-merge와-데이터-변경-with)). |
@@ -140,6 +141,10 @@ SQLite에 없는 두 문장은 문장이 돌 때 차례로 실행하는 **단계
 2. 같은 대상 행을 바꾸는(`DO NOTHING`이 아닌) 조인 행이 둘이면 21000.
 3. `WHEN` 절마다 그 절을 고른 조인 행에: `UPDATE t SET ... FROM rows AS s WHERE s.xq_tag = k AND t.rowid = s.xq_target`, `DELETE FROM t WHERE rowid IN (...)`, `INSERT INTO t (cols) SELECT values FROM rows AS s WHERE s.xq_tag = k ORDER BY s.rowid`(값의 `DEFAULT`는 그 열을 빼고, `DEFAULT VALUES`는 행마다 한 번). 바뀐 행 수가 문장의 `changes()`입니다.
 4. `RETURNING`이 있으면 각 동작이 바꾼 행의 대상 열(그리고 `old.*`, `new.*`)을 남기고, 조인 순서로 정렬합니다. 바깥 질의는 `SELECT <RETURNING> FROM rows(대상) AS t LEFT JOIN rows(조인) AS s ON s.rowid = t.xq_key`입니다.
+
+대상이 뷰이면(`View`) 컴파일할 때 뷰의 질의를 `pg_get_viewdef()`의 텍스트(`catalog_funcs.viewText()`)로 다시 읽어 자동으로 갱신할 수 있는지(PostgreSQL의 `view_query_is_auto_updatable()` 순서)와 뷰의 열마다 테이블의 어느 열인지를 정합니다. 조인은 대상 대신 그 질의에 테이블의 rowid를 붙인 `(SELECT q.rowid AS "xq_rid", ...)`를 읽으므로 이름은 뷰의 열과 원본의 열로 PostgreSQL처럼 풀립니다. `DELETE`·`INSERT`는 테이블에 바로 쓰고(열 이름은 테이블의 것으로), `UPDATE`는 먼저 한 단계가 그 절을 고른 행마다 `SET`의 식을 뷰의 행과 원본 위에서 계산해 슬롯에 남기고(값의 타입은 식의 것, 상수·매개변수는 타입 없이), 다음 단계가 테이블을 rowid로 바꿉니다. `RETURNING`은 뷰의 질의의 식을 테이블의 행 위에서 계산합니다. `UPDATE`가 남기는 rowid는 `old.rowid`입니다(`INTEGER PRIMARY KEY`를 바꾸면 rowid가 바뀜).
+
+`EXPLAIN`이면 단계를 실행하는 코드 대신, 이름(`Step.label`)이 있는 단계마다 그 줄과 단계 문장의 `EXPLAIN` 결과(컴파일할 때 따로 준비해 읽은 것, `rows.explainInto()`)를 `OP_Explain`으로 붙이고 바깥 질의의 계획을 뒤에 둡니다.
 
 데이터 변경 `WITH`의 문장은 앞의 `WITH` 질의(데이터 변경 문장은 그 결과를 읽는 질의로)를 붙여 차례로 돌고, `RETURNING` 대신 대상의 모든 열과 `old.*`, `new.*`를 남깁니다. 그 CTE의 질의는 남긴 행 위의 `RETURNING` 목록입니다.
 

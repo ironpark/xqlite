@@ -1,0 +1,87 @@
+-- Differential cases of RIGHT and FULL JOIN LATERAL, LOCK TABLE's modes
+-- and DECLARE BINARY (xqt dialect-diff pg tools/dialect/pg-lock-cases.txt),
+-- in the format of pg-cases.txt: each case starts with a "-- case:" line
+-- and runs on an empty database, in PostgreSQL (psql, unaligned, with
+-- headers) and in `xqlite sql` with `.dialect postgres`; the rows, column
+-- names and error messages must be the same. A case of errors prints
+-- nothing else (psql's stderr and stdout do not keep their order through
+-- podman). The locks themselves, between two connections, are tested in
+-- src/dialect/postgres/commands.zig, the binary rows of a FETCH in
+-- src/server/pg/test.zig. The expected output is PostgreSQL 18's.
+
+-- case: RIGHT and FULL JOIN LATERAL of no reference: ordinary joins
+CREATE TABLE a (x int);
+CREATE TABLE b (y int);
+INSERT INTO a VALUES (1), (2);
+INSERT INTO b VALUES (2), (3);
+SELECT * FROM a RIGHT JOIN LATERAL (SELECT 1 AS z) s ON true ORDER BY 1, 2;
+SELECT * FROM a FULL JOIN LATERAL (SELECT b.y FROM b) s ON s.y = a.x ORDER BY 1, 2;
+SELECT * FROM a RIGHT JOIN LATERAL generate_series(1, 2) g ON true ORDER BY 1, 2;
+SELECT * FROM a FULL JOIN LATERAL (SELECT y FROM b WHERE y > 2) s ON s.y = a.x + 1 ORDER BY 1, 2;
+SELECT * FROM a RIGHT JOIN unnest(ARRAY[1, 2]) u ON u = a.x ORDER BY 1, 2;
+SELECT * FROM a LEFT JOIN LATERAL (SELECT a.x AS z) s ON true RIGHT JOIN b ON true ORDER BY 1, 2, 3;
+SELECT (SELECT count(*) FROM b RIGHT JOIN LATERAL (SELECT a.x AS z) s ON true) FROM a ORDER BY 1;
+
+-- case: RIGHT and FULL JOIN LATERAL naming an item on the left: 42P10
+CREATE TABLE a (x int);
+CREATE TABLE b (y int);
+SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.x) s ON true;
+SELECT * FROM a FULL JOIN LATERAL (SELECT a.x AS z) s ON true;
+SELECT * FROM a RIGHT JOIN LATERAL (SELECT x) s ON true;
+SELECT * FROM a t RIGHT JOIN LATERAL (SELECT t.x) s ON true;
+SELECT * FROM a CROSS JOIN b RIGHT JOIN LATERAL (SELECT a.x) s ON true;
+SELECT * FROM a JOIN b ON true FULL JOIN LATERAL (SELECT b.y) s ON true;
+SELECT * FROM a FULL JOIN LATERAL (SELECT * FROM b WHERE b.y = a.x) s ON true;
+SELECT * FROM a RIGHT JOIN generate_series(1, a.x) g ON true;
+SELECT * FROM a RIGHT JOIN unnest(ARRAY[a.x]) u ON true;
+SELECT * FROM a FULL JOIN jsonb_array_elements(jsonb_build_array(a.x)) j ON true;
+
+-- case: LOCK TABLE: every mode, NOWAIT, in a transaction block
+CREATE TABLE t (a int);
+CREATE TABLE u (b int);
+BEGIN;
+LOCK t IN ACCESS SHARE MODE;
+LOCK t IN ROW SHARE MODE NOWAIT;
+LOCK TABLE t IN SHARE MODE;
+SELECT count(*) FROM t;
+COMMIT;
+BEGIN;
+LOCK t, u IN ROW EXCLUSIVE MODE;
+LOCK t IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+LOCK ONLY t IN SHARE ROW EXCLUSIVE MODE;
+LOCK t * IN EXCLUSIVE MODE;
+LOCK t IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK u;
+INSERT INTO t VALUES (1);
+INSERT INTO u VALUES (2);
+COMMIT;
+SELECT a, b FROM t, u;
+BEGIN;
+LOCK t IN SHARE MODE;
+INSERT INTO t VALUES (3);
+ROLLBACK;
+SELECT count(*) FROM t;
+
+-- case: LOCK TABLE: errors
+CREATE TABLE t (a int);
+LOCK t;
+LOCK t IN SHARE MODE NOWAIT;
+BEGIN;
+LOCK t, nosuch IN ROW EXCLUSIVE MODE;
+ROLLBACK;
+BEGIN;
+LOCK t IN SHARE EXCLUSIVE MODE;
+ROLLBACK;
+
+-- case: DECLARE BINARY: pg_cursors.is_binary
+CREATE TABLE t (a int);
+BEGIN;
+DECLARE b BINARY CURSOR FOR SELECT a FROM t;
+DECLARE c NO SCROLL BINARY CURSOR WITH HOLD FOR SELECT a FROM t;
+DECLARE d CURSOR FOR SELECT a FROM t;
+SELECT name, is_binary, is_holdable, is_scrollable FROM pg_cursors ORDER BY name;
+MOVE ALL b;
+CLOSE b;
+COMMIT;
+SELECT name, is_binary FROM pg_cursors;
+CLOSE c;

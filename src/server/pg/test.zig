@@ -872,3 +872,51 @@ test "pg: cursors and prepared statements of SQL" {
     try testing.expectEqualStrings("C DISCARD ALL\nZ I\n", try c.query("DISCARD ALL"));
     try c.terminate();
 }
+
+test "pg: FETCH from a binary cursor sends its rows in binary" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var f: Fixture = undefined;
+    try f.start(.{});
+    defer f.stop();
+    var c: Client = .{};
+    defer c.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), try c.connect(f.srv.address(), "erin", ""));
+    defer c.close();
+    _ = try c.query("CREATE TABLE t (id int, name text, ok boolean, d date); INSERT INTO t VALUES (1, 'ab', true, '2024-01-02'), (2, NULL, false, NULL)");
+    // Format 1 in RowDescription and binary values (int4, text, bool);
+    // a type without a binary form here (date) stays in text. A cursor
+    // without BINARY, and the embedded API, are unchanged.
+    try testing.expectEqualStrings(
+        \\C BEGIN
+        \\C DECLARE CURSOR
+        \\T id:23b name:25b ok:16b d:1082
+        \\D 0x00000001 ab 0x01 2024-01-02
+        \\C FETCH 1
+        \\T id:23b name:25b ok:16b d:1082
+        \\D 0x00000002 NULL 0x00 NULL
+        \\C FETCH 1
+        \\C DECLARE CURSOR
+        \\T id:23
+        \\D 1
+        \\C FETCH 1
+        \\T name:25 is_binary:16
+        \\D b t
+        \\D c f
+        \\C SELECT 2
+        \\C COMMIT
+        \\Z I
+        \\
+    , try c.query("BEGIN; DECLARE b BINARY CURSOR FOR SELECT id, name, ok, d FROM t ORDER BY id; FETCH b; FETCH b; DECLARE c CURSOR FOR SELECT id FROM t ORDER BY id; FETCH c; SELECT name, is_binary FROM pg_cursors ORDER BY name; COMMIT"));
+    // LOCK TABLE in the implicit transaction block of a script, as in
+    // PostgreSQL; alone, outside a block, an error.
+    try testing.expectEqualStrings(
+        \\C LOCK TABLE
+        \\T id:23
+        \\D 1
+        \\C SELECT 1
+        \\Z I
+        \\
+    , try c.query("LOCK t IN SHARE MODE NOWAIT; SELECT id FROM t WHERE id = 1"));
+    try testing.expectEqualStrings("E 25P01 LOCK TABLE can only be used in transaction blocks\nZ I\n", try c.query("LOCK t"));
+    try c.terminate();
+}

@@ -1,0 +1,111 @@
+-- Differential cases of GROUPING SETS/ROLLUP/CUBE with window functions,
+-- DISTINCT ON and FETCH ... WITH TIES (xqt dialect-diff pg
+-- tools/dialect/pg-grouping-cases.txt), in the format of pg-cases.txt:
+-- each case runs on an empty database in PostgreSQL and in `xqlite sql`
+-- with `.dialect postgres`; the rows, column names and error messages
+-- must be the same. The expected output is PostgreSQL 18's (an ORDER BY
+-- wherever its order is not given, and no ties a DISTINCT ON would pick
+-- from).
+
+-- case: window functions over ROLLUP: rank, row_number, sum OVER of aggregates
+CREATE TABLE sales (region text, product text, qty int, price numeric(6,2));
+INSERT INTO sales VALUES ('east', 'pen', 10, 1.50), ('east', 'ink', 5, 3.00), ('west', 'pen', 7, 1.75), ('west', 'pad', 2, 2.00), ('north', 'ink', 20, 2.50);
+SELECT region, sum(qty) AS total, rank() OVER (ORDER BY sum(qty) DESC) AS rk FROM sales GROUP BY ROLLUP (region) ORDER BY rk, region;
+SELECT region, product, sum(qty), row_number() OVER (PARTITION BY region ORDER BY sum(qty) DESC, product NULLS FIRST) AS rn FROM sales GROUP BY ROLLUP (region, product) ORDER BY region NULLS FIRST, rn;
+SELECT region, product, sum(qty) AS s, sum(sum(qty)) OVER (PARTITION BY region) AS region_total FROM sales GROUP BY ROLLUP (region, product) ORDER BY 1, 2;
+SELECT region, count(*), rank() OVER (ORDER BY count(*)), dense_rank() OVER (ORDER BY count(*)) FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+SELECT region, sum(qty), sum(qty) * 100 / sum(sum(qty)) OVER (PARTITION BY grouping(region)) AS pct FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+SELECT region, sum(qty), lag(sum(qty)) OVER (ORDER BY region), lead(region) OVER (ORDER BY region) FROM sales GROUP BY ROLLUP (region) ORDER BY region;
+SELECT region, avg(price)::numeric(6,3), count(*) OVER () AS n_groups FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+
+-- case: window functions partitioned by GROUPING() over CUBE and GROUPING SETS
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 2), ('north', 'ink', 20);
+SELECT region, product, grouping(region, product) AS g, sum(qty), rank() OVER (PARTITION BY grouping(region, product) ORDER BY sum(qty) DESC) AS rk FROM sales GROUP BY CUBE (region, product) ORDER BY g, rk, region, product;
+SELECT region, product, sum(qty), row_number() OVER (PARTITION BY grouping(region), grouping(product) ORDER BY sum(qty), region, product) FROM sales GROUP BY GROUPING SETS ((region), (product), ()) ORDER BY 4, 1, 2;
+SELECT region, product, count(*) OVER (PARTITION BY grouping(region, product)) AS sets_rows FROM sales GROUP BY CUBE (region, product) ORDER BY 1, 2;
+SELECT grouping(region) AS g, region, max(sum(qty)) OVER (PARTITION BY grouping(region)) FROM sales GROUP BY ROLLUP (region) ORDER BY 1, 2;
+SELECT region, product, sum(qty), first_value(product) OVER (PARTITION BY region ORDER BY sum(qty) DESC, product) FROM sales GROUP BY region, ROLLUP (product) ORDER BY 1, 2;
+
+-- case: window functions with named windows, frames and ORDER BY a window function
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 2), ('north', 'ink', 20);
+SELECT region, sum(qty), rank() OVER w, sum(sum(qty)) OVER w FROM sales GROUP BY ROLLUP (region) WINDOW w AS (ORDER BY sum(qty)) ORDER BY 2;
+SELECT region, product, sum(qty), sum(sum(qty)) OVER (PARTITION BY region ORDER BY product ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales GROUP BY ROLLUP (region, product) ORDER BY 1, 2;
+SELECT region, sum(qty) FROM sales GROUP BY ROLLUP (region) ORDER BY rank() OVER (ORDER BY sum(qty) DESC);
+SELECT region, ntile(2) OVER (ORDER BY count(*), region) FROM sales GROUP BY CUBE (region) ORDER BY 1;
+
+-- case: HAVING, WHERE, DISTINCT and LIMIT with window functions over grouping sets
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 2), ('north', 'ink', 20), (NULL, 'pen', 1);
+SELECT region, sum(qty), rank() OVER (ORDER BY sum(qty)) FROM sales GROUP BY ROLLUP (region) HAVING sum(qty) > 5 ORDER BY 3;
+SELECT region, sum(qty), row_number() OVER (ORDER BY region NULLS FIRST) FROM sales WHERE qty > 2 GROUP BY ROLLUP (region) ORDER BY 3;
+SELECT region, product, sum(qty), rank() OVER (ORDER BY sum(qty) DESC) AS rk FROM sales GROUP BY ROLLUP (region, product) ORDER BY rk, 1, 2 LIMIT 3 OFFSET 1;
+SELECT DISTINCT count(*) OVER (PARTITION BY grouping(region)) FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+SELECT row_number() OVER () AS n FROM sales GROUP BY GROUPING SETS (());
+SELECT row_number() OVER () AS n FROM sales WHERE false GROUP BY GROUPING SETS ((), (region));
+SELECT region, rank() OVER (ORDER BY region) FROM sales WHERE false GROUP BY ROLLUP (region);
+SELECT region, count(*), rank() OVER (ORDER BY grouping(region), region) FROM sales GROUP BY region ORDER BY 3;
+
+-- case: NULLs of ROLLUP in window partitions and sort keys
+CREATE TABLE t (a text, b text, n int);
+INSERT INTO t VALUES ('x', 'p', 1), ('x', NULL, 2), (NULL, 'p', 4), (NULL, NULL, 8);
+SELECT a, b, grouping(a, b) AS g, sum(n), sum(sum(n)) OVER (PARTITION BY a) FROM t GROUP BY ROLLUP (a, b) ORDER BY a NULLS FIRST, b NULLS FIRST, g;
+SELECT a, b, grouping(a, b) AS g, rank() OVER (PARTITION BY a, b ORDER BY grouping(a, b)) FROM t GROUP BY CUBE (a, b) ORDER BY 1, 2, 3;
+SELECT coalesce(a, '(all)') AS a, sum(n), percent_rank() OVER (ORDER BY sum(n)) FROM t GROUP BY ROLLUP (a) ORDER BY 2;
+
+-- case: DISTINCT ON over grouping sets
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 2), ('north', 'ink', 20);
+SELECT DISTINCT ON (region) region, product, sum(qty) FROM sales GROUP BY ROLLUP (region, product) ORDER BY region, sum(qty) DESC, product DESC;
+SELECT DISTINCT ON (grouping(region, product)) grouping(region, product) AS g, region, product, sum(qty) FROM sales GROUP BY CUBE (region, product) ORDER BY grouping(region, product), sum(qty) DESC, region, product;
+SELECT DISTINCT ON (1) region, product, count(*) FROM sales GROUP BY ROLLUP (region, product) ORDER BY 1, 2 NULLS FIRST;
+SELECT DISTINCT ON (region) region, product FROM sales GROUP BY GROUPING SETS ((region, product), (region)) ORDER BY region, product DESC NULLS LAST;
+SELECT DISTINCT ON (region) region, sum(qty) AS s FROM sales GROUP BY ROLLUP (region, product) ORDER BY region, s;
+SELECT DISTINCT ON (region) region, product, sum(qty), rank() OVER (ORDER BY sum(qty) DESC) FROM sales GROUP BY ROLLUP (region, product) ORDER BY region, sum(qty) DESC, product NULLS FIRST LIMIT 3;
+SELECT DISTINCT ON (region) region FROM sales GROUP BY ROLLUP (region);
+SELECT DISTINCT ON (a) a FROM (VALUES ('x'), (NULL), ('x'), ('b')) v(a);
+
+-- case: FETCH ... WITH TIES over grouping sets
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 8), ('north', 'ink', 20);
+SELECT region, count(*) FROM sales GROUP BY ROLLUP (region) ORDER BY count(*) FETCH FIRST 1 ROW WITH TIES;
+SELECT * FROM (SELECT region, product, count(*) FROM sales GROUP BY ROLLUP (region, product) ORDER BY count(*) DESC OFFSET 1 ROWS FETCH FIRST 1 ROW WITH TIES) x ORDER BY 1, 2;
+SELECT * FROM (SELECT grouping(region, product) AS g, region, product, count(*) FROM sales GROUP BY CUBE (region, product) ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) x ORDER BY 2, 3;
+SELECT region, count(*), rank() OVER (ORDER BY count(*)) FROM sales GROUP BY ROLLUP (region) ORDER BY count(*) DESC, region FETCH FIRST 2 ROWS WITH TIES;
+
+-- case: errors with window functions over grouping sets
+CREATE TABLE sales (region text, product text, qty int);
+SELECT region, grouping(product), rank() OVER () FROM sales GROUP BY ROLLUP (region);
+SELECT DISTINCT ON (region) region, product FROM sales GROUP BY ROLLUP (region, product) ORDER BY product;
+
+-- case: views with window functions and DISTINCT ON over grouping sets
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 2);
+CREATE VIEW ranked AS SELECT region, product, sum(qty) AS total, rank() OVER (PARTITION BY grouping(region, product) ORDER BY sum(qty) DESC) AS rk FROM sales GROUP BY ROLLUP (region, product);
+SELECT * FROM ranked ORDER BY rk, region, product;
+CREATE VIEW best AS SELECT DISTINCT ON (region) region, product, sum(qty) AS total FROM sales GROUP BY ROLLUP (region, product) ORDER BY region, sum(qty) DESC, product NULLS FIRST;
+SELECT * FROM best ORDER BY 1;
+SELECT region, total FROM best WHERE product IS NULL ORDER BY 1;
+INSERT INTO sales VALUES ('east', 'cap', 30);
+SELECT * FROM ranked WHERE rk = 1 ORDER BY 1, 2;
+
+-- case: grouping sets with window functions in subqueries, CTEs and compounds
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 2);
+WITH r AS (SELECT region, sum(qty) AS s, rank() OVER (ORDER BY sum(qty) DESC) AS rk FROM sales GROUP BY ROLLUP (region)) SELECT * FROM r WHERE rk <= 2 ORDER BY rk;
+SELECT x.region, x.rk FROM (SELECT region, rank() OVER (ORDER BY count(*), region) AS rk FROM sales GROUP BY ROLLUP (region)) x ORDER BY 2;
+SELECT region, row_number() OVER (ORDER BY region) FROM sales GROUP BY ROLLUP (region) UNION ALL SELECT 'z', 0 ORDER BY 2, 1;
+SELECT (SELECT max(rk) FROM (SELECT rank() OVER (ORDER BY sum(qty)) AS rk FROM sales GROUP BY CUBE (product)) q) AS m;
+
+-- case: expressions mixing window functions, grouping keys, aggregates and GROUPING()
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7), ('west', 'pad', 2), ('north', 'ink', 20);
+SELECT CASE WHEN grouping(region) = 1 THEN 'all' ELSE region END AS r, sum(qty) - avg(sum(qty)) OVER (PARTITION BY grouping(region)) AS diff FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+SELECT region || ':' || rank() OVER (ORDER BY sum(qty) DESC) AS label, upper(region) FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+SELECT upper(region) AS u, rank() OVER (ORDER BY upper(region) DESC NULLS LAST) FROM sales GROUP BY ROLLUP (upper(region)) ORDER BY 2;
+SELECT region, sum(qty) AS total, rank() OVER (ORDER BY sum(qty)) AS rk FROM sales GROUP BY ROLLUP (1) ORDER BY rk DESC;
+SELECT region, product, string_agg(product, ',') OVER (PARTITION BY region ORDER BY product ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS ps FROM sales GROUP BY GROUPING SETS ((region, product)) ORDER BY 1, 2;
+SELECT region, count(*) FILTER (WHERE qty > 5) AS big, sum(count(*) FILTER (WHERE qty > 5)) OVER () AS all_big FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+SELECT region, (SELECT count(*) FROM sales s2 WHERE s2.qty > 6) AS c, rank() OVER (ORDER BY region) FROM sales GROUP BY ROLLUP (region) ORDER BY 3;
+SELECT pg_typeof(rank() OVER ()), pg_typeof(sum(sum(qty)) OVER ()), pg_typeof(grouping(region)) FROM sales GROUP BY ROLLUP (region) LIMIT 1;

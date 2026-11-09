@@ -723,6 +723,8 @@ pub const Ref = struct {
     on_delete: RefAction = .none,
     on_update: RefAction = .none,
     deferred: bool = false,
+    /// DEFERRABLE (INITIALLY IMMEDIATE unless `deferred`).
+    deferrable: bool = false,
 };
 
 pub const IndexItem = struct {
@@ -750,6 +752,11 @@ pub const CreateView = struct {
     name: QName,
     cols: []Name = &.{},
     select: *Select,
+    /// The query as the frontend wrote it, where the SQLite text differs
+    /// in form (render.zig's keep: PostgreSQL's DISTINCT ON, LATERAL
+    /// ...): kept in a comment of the text for the dialect's display
+    /// (render.zig's createView()).
+    display: ?[]const u8 = null,
 };
 
 pub const SeqOpts = struct {

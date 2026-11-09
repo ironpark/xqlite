@@ -117,12 +117,12 @@ for row in con.execute("SELECT * FROM doc_v"):             # 엔진 함수를 �
 
 PostgreSQL의 `jsonb` 열은 SQLite의 JSONB(BLOB)라서 값 자체는 확장 없이 읽힙니다(`json(j)`, `json_extract(j, '$.a')`, `j ->> '$.a'`). 확장이 드는 것은 jsonb의 연산자·비교·정렬이 남긴 식입니다: `xq_pg_jsonb_get()` ...과 `xq_pg_jsonb_key()`(비교와 `ORDER BY`의 정렬 키), `xq_pg_jsonb_bin()`(정준 JSONB: 상수가 아닌 DEFAULT, 생성 열), `xq_pg_jsonb_text()`(`jsonb::text`). sqlite3가 jsonb 열에 넣을 때는 `jsonb('...')`(정준이 아닐 수 있음, 방언이 읽을 때 정규화) 또는 확장의 `xq_pg_jsonb_bin('...')`을 씁니다. TEXT는 STRICT BLOB 열이 받지 않습니다.
 
-방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 839개, 빠지는 것 75개). 이 표의 수는 `src/dialect/abi.zig`의 테스트가 카탈로그와 맞춰 봅니다:
+방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 842개, 빠지는 것 77개). 이 표의 수는 `src/dialect/abi.zig`의 테스트가 카탈로그와 맞춰 봅니다:
 
 | 방언 | 엔진 함수 | 한정 이름 | 시퀀스 | 빠짐 | collation |
 | --- | --- | --- | --- | --- | --- |
-| 공통 | 79(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 46, 분산 집계 `xq_var_*`·`xq_stddev_*` 4, 통계·순서 집합·가상 집합 집계 `stats.zig` 24) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
-| PostgreSQL | 190 | 271 | 5 | 46 | 4 |
+| 공통 | 82(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 46, 분산 집계 `xq_var_*`·`xq_stddev_*` 4, 통계·순서 집합·가상 집합 집계 `stats.zig` 24, 뷰의 LATERAL `xq_lateral_col` 2·`xq_lateral_rows`) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
+| PostgreSQL | 190 | 271 | 5 | 48 | 4 |
 | MariaDB | 15 | 101 | 4 | 5 | |
 | SQL Server | 18 | 40 | 2 | 20 | |
 | Oracle | 20 | 49 | 5 | 4 | |
@@ -151,10 +151,12 @@ PostgreSQL의 `numeric` 열(`pkg/decimal`)은 값 자체가 정렬 키인 BLOB�
 | --- | --- |
 | xqlite 세션의 상태(`session`) | PostgreSQL `current_setting()`, `set_config()`, `current_schema()`, `current_schemas()`, `current_database()`, `pg_backend_pid()`; MariaDB의 시스템·사용자 변수(`xq_sysvar`, `xq_uservar`); SQL Server `SCOPE_IDENTITY()`, `@@TRANCOUNT`(`xq_tsql_trancount`), 변수(`xq_tsql_getvar`); Oracle `SYS_CONTEXT()`, `set_current_schema()`, `xq_ora_autocommit()` |
 | xqlite가 연결에 두는 카탈로그(`catalog`) | PostgreSQL의 reg 형(`xq_pg_regclass` ... `_out`), `to_regclass()` 계열, `pg_get_viewdef()`·`pg_get_indexdef()`·`pg_get_constraintdef()`·`pg_get_expr()`·`pg_get_serial_sequence()`, `obj_description()`·`col_description()`, `pg_table_is_visible()`·`pg_type_is_visible()`; SQL Server `IDENT_CURRENT()`, `SCHEMA_ID()`, `SCHEMA_NAME()`, `OBJECT_NAME()`, `OBJECT_SCHEMA_NAME()`, `xq_tsql_schema_of`, `xq_tsql_bare_name` |
-| 최상위 SQL 전용(`direct_only`) | 변수 대입, `IDENTITY_INSERT`, 트랜잭션, MERGE, `USE`, PostgreSQL 커서(`xq_pg_cursor_*`), `PREPARE`·`DISCARD`(`xq_pg_prepare` ...) 같은 frontend 내부 함수. SQLite가 스키마에서 부르지 못하게 함 |
+| 최상위 SQL 전용(`direct_only`) | 변수 대입, `IDENTITY_INSERT`, 트랜잭션, MERGE, `USE`, PostgreSQL 커서(`xq_pg_cursor_*`), `PREPARE`·`DISCARD`·`SET CONSTRAINTS`·`LOCK`(`xq_pg_prepare`, `xq_pg_set_constraints`, `xq_pg_lock` ...) 같은 frontend 내부 함수. SQLite가 스키마에서 부르지 못하게 함 |
 | 인라인 내장 함수(`inline_builtin`) | 방언이 가린 SQLite 내장 함수 중 인라인으로 컴파일되거나 VM을 읽는 것. 지금 빌드에는 없음(목록이 비어 있음) |
 
 등록하지 않는 것이 하나 더 있습니다. 엔진의 테이블 값 함수(MariaDB `JSON_TABLE`의 `xq_maria_json_table`, SQL Server `OPENJSON`, Oracle `JSON_TABLE`, `pg_catalog`의 `xq_pg_class` ...)는 엔진의 가상 테이블 인터페이스(`sql/vtab.zig`)로 짜여 있어 어댑터가 다리를 놓지 않습니다. 그것을 읽는 뷰는 sqlite3에서 `no such table`입니다.
+
+뷰의 `LATERAL`(PostgreSQL 방언, `src/dialect/lateral.zig`)은 SQLite에 내장된 `json_each()`와 보통 함수 두 개로 저장되므로 확장이 따로 다리를 놓을 것이 없습니다. `xq_lateral_rows(v1, ...)`(집계)는 행마다 값의 타입과 바이트를 16진 글자로 적은 문자열(`N`, `I`·`R` 64비트, `T`·`B` 길이와 바이트)의 JSON 배열을 만들고, `xq_lateral_col(row, i [, 타입])`은 그 행의 `i`번째 값을 그대로 돌려줍니다(세 번째 인자는 엔진의 타입 추론만 읽음). 이 형식은 두 이름의 뜻의 일부라 바꾸지 않습니다. 새 이름을 더한 것이고 옛 이름의 뜻은 그대로이므로 `xq_ext_version()`은 1 그대로입니다.
 
 ## ABI 규칙
 

@@ -31,6 +31,11 @@
 //!     columns), in the order of the join. merge_action() is the
 //!     action's column (parser.zig).
 //!
+//!  A view as the target (an automatically updatable one: View) is read
+//!  as its query with its table's rowid, and its table written; an
+//!  UPDATE's values are computed first, in a step of their own
+//!  (viewUpdate()). EXPLAIN shows each step's plan (Plan.explain()).
+//!
 //! WITH d AS (INSERT | UPDATE | DELETE ... [RETURNING ...]) ... statement
 //!
 //!  Each data-modifying statement runs before the statement, in order,
@@ -58,6 +63,9 @@ const lower = @import("../../ir/lower.zig");
 const Quoted = @import("../dialect.zig").Quoted('"');
 const parser = @import("parser.zig");
 const rows = @import("rows.zig");
+const catalog_funcs = @import("catalog_funcs.zig");
+const Violation = @import("../dialect.zig").Violation;
+const Desugar = @import("../../ir/desugar.zig").Desugar;
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -99,6 +107,8 @@ pub const Clause = struct {
         update: []const u8,
         insert: Insert,
     },
+    /// The SET list read (an UPDATE into a view: View).
+    sets: []tree.SetItem = &.{},
     pos: u32,
 };
 
@@ -156,6 +166,26 @@ pub const Plan = struct {
         if (plan.counts) aux.countChanges(v);
     }
 
+    /// EXPLAIN of the statement: the plan of each step's statement, under
+    /// a line naming the step, before the plan of the statement's query.
+    /// The steps do not run.
+    pub fn explain(plan: *Plan, ps: *Parser) Error!void {
+        const p = ps.p.?;
+        const v = build.getVdbe(p) orelse return error.OutOfMemory;
+        for (plan.steps.items) |s| {
+            if (s.label.len == 0) continue;
+            const this = v.nOp();
+            _ = aux.addOp4(v, vi.OP.Explain, this, 0, 0, .{ .z = try v.alloc().dupeSentinel(u8, s.label, 0) });
+            rows.explainInto(p, s.sql, this) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                error.Failed => {
+                    ps.err_in_parse = true;
+                    return error.ParseFailed;
+                },
+            };
+        }
+    }
+
     /// Code the freeing of the slots, after the statement's query.
     pub fn end(plan: *Plan, p: *int.Parse) Error!void {
         const v = build.getVdbe(p) orelse return error.OutOfMemory;
@@ -170,14 +200,29 @@ const Target = struct {
     tab: *int.Table,
     i_db: usize,
     cols: []rows.Col,
+    /// MERGE into a view: the view's columns are `cols`.
+    view: ?*View = null,
 };
 
-fn target(ps: *Parser, q: tree.QName) Error!Target {
+/// The target `q` of a data-modifying statement; a view only for MERGE
+/// (`view_ok`).
+fn target(ps: *Parser, q: tree.QName, view_ok: bool) Error!Target {
     const p = ps.p.?;
     const a = ps.arena;
     try ps.readSchema();
     const t = build.findTable(p.db, q.name.text, if (q.schema) |s| s.text else null) orelse
         return ps.c.failState(q.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{q.name.text});
+    if (t.isView() and view_ok) {
+        const i = prepare.schemaToIndex(p.db, t.schema);
+        const i_db: usize = if (i < 0) 0 else @intCast(i);
+        // The view's columns as a query reads them.
+        const star = try a.alloc(tree.ResultCol, 1);
+        star[0] = .{ .star = q.name.pos };
+        const from = try a.alloc(tree.FromItem, 1);
+        from[0] = .{ .source = .{ .table = q } };
+        const cols = try probe(ps, try selectOf(a, star, from, q.name.pos));
+        return .{ .tab = t, .i_db = i_db, .cols = cols, .view = try viewOf(ps, t, i_db, q.name.pos) };
+    }
     if (t.isView() or t.isVirtual()) return ps.unsupported(q.name.pos, "MERGE or a data-modifying WITH of a view");
     const m = catalog.metaOf(p.db, t) catch null;
     const cols = try a.alloc(rows.Col, t.cols.len);
@@ -190,6 +235,185 @@ fn target(ps: *Parser, q: tree.QName) Error!Target {
     }
     const i = prepare.schemaToIndex(p.db, t.schema);
     return .{ .tab = t, .i_db = if (i < 0) 0 else @intCast(i), .cols = cols };
+}
+
+/// A view MERGE writes, as PostgreSQL's automatically updatable views
+/// are written: its rows are rows of one table (`base`), each column of
+/// the view that is a column of that table is that column. Read from
+/// its query as pg_get_viewdef() prints it.
+const View = struct {
+    /// The view's name, as PostgreSQL's errors name it.
+    name: []const u8,
+    /// Why it is not automatically updatable, else null.
+    why: ?NotUpdatable = null,
+    /// The table, as the view's query names it, and the name its columns
+    /// are qualified with there (quoted).
+    base_text: []const u8 = "",
+    qual: []const u8 = "",
+    /// The view's query with the table's rowid first, as "xq_rid".
+    rows_sql: []const u8 = "",
+    /// Of each column of the view, the column of the table it is (null:
+    /// not updatable), and its expression in the view's query.
+    base_cols: []?[]const u8 = &.{},
+    exprs: [][]const u8 = &.{},
+
+    fn updatable(v: *const View) bool {
+        for (v.base_cols) |c| if (c != null) return true;
+        return false;
+    }
+};
+
+/// Why a view is not automatically updatable (PostgreSQL's
+/// view_query_is_auto_updatable()); its DETAIL is detail().
+const NotUpdatable = enum {
+    compound,
+    not_single,
+    distinct,
+    group_by,
+    having,
+    with,
+    limit,
+    aggregate,
+    window,
+    no_columns,
+
+    fn detail(why: NotUpdatable) []const u8 {
+        return switch (why) {
+            .compound => "Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.",
+            .not_single => "Views that do not select from a single table or view are not automatically updatable.",
+            .distinct => "Views containing DISTINCT are not automatically updatable.",
+            .group_by => "Views containing GROUP BY are not automatically updatable.",
+            .having => "Views containing HAVING are not automatically updatable.",
+            .with => "Views containing WITH are not automatically updatable.",
+            .limit => "Views containing LIMIT or OFFSET are not automatically updatable.",
+            .aggregate => "Views that return aggregate functions are not automatically updatable.",
+            .window => "Views that return window functions are not automatically updatable.",
+            .no_columns => "Views that have no updatable columns are not automatically updatable.",
+        };
+    }
+};
+
+fn viewOf(ps: *Parser, t: *int.Table, i_db: usize, pos: u32) Error!*View {
+    const p = ps.p.?;
+    const db = p.db;
+    const a = ps.arena;
+    const v = try a.create(View);
+    v.* = .{ .name = Violation.bare(t.name) };
+    const text = (try catalog_funcs.viewText(db, a, db.dbs.items[i_db].name, t.name)) orelse {
+        // A query deparse.zig does not print: why it is not updatable,
+        // from the query SQLite keeps.
+        v.why = storedWhy(t) orelse return ps.unsupported(pos, "MERGE into this view");
+        return v;
+    };
+    const z = try a.dupeSentinel(u8, std.mem.trim(u8, text, " \t\r\n;"), 0);
+    var sub = Parser.init(a, z, 0, null, .{}) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return ps.unsupported(pos, "MERGE into this view"),
+    };
+    sub.p = p;
+    sub.schema_read = true;
+    const sel = sub.select() catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => {
+            if (sub.err_in_parse) {
+                ps.err_in_parse = true;
+                return error.ParseFailed;
+            }
+            return ps.unsupported(pos, "MERGE into this view");
+        },
+    };
+    // view_query_is_auto_updatable(), in its order.
+    const core = switch (sel.body.*) {
+        .core => |c| c,
+        .compound => {
+            v.why = .compound;
+            return v;
+        },
+        else => {
+            v.why = .not_single;
+            return v;
+        },
+    };
+    v.why = if (core.distinct or core.distinct_on.len > 0)
+        .distinct
+    else if (core.group_by.len > 0 or core.grouping_sets != null)
+        .group_by
+    else if (core.having != null)
+        .having
+    else if (sel.with != null)
+        .with
+    else if (sel.limit != null or sel.offset != null)
+        .limit
+    else if (callsIn(p, core.cols, Desugar.aggregateCall))
+        .aggregate
+    else if (callsIn(p, core.cols, Desugar.windowCall))
+        .window
+    else if (core.from.len != 1 or core.from[0].source != .table)
+        .not_single
+    else
+        null;
+    if (v.why != null) return v;
+    const item = core.from[0];
+    const bq = item.source.table;
+    const base = build.findTable(db, bq.name.text, if (bq.schema) |s| s.text else null) orelse
+        return ps.unsupported(pos, "MERGE into this view");
+    if (base.isView()) return ps.unsupported(pos, "MERGE into a view of a view");
+    if (base.isVirtual()) {
+        v.why = .not_single;
+        return v;
+    }
+    if (core.cols.len != t.cols.len) return ps.unsupported(pos, "MERGE into this view");
+    // The text of each result column (without its alias) and of the
+    // table ([schema.]table), as the query has them.
+    v.exprs = try a.alloc([]const u8, core.cols.len);
+    v.base_cols = try a.alloc(?[]const u8, core.cols.len);
+    for (core.cols, v.exprs, v.base_cols) |rc, *x, *bc| {
+        if (rc != .expr) return ps.unsupported(pos, "MERGE into this view");
+        const e = rc.expr.e;
+        if (e.end <= e.pos or e.end > z.len) return ps.unsupported(pos, "MERGE into this view");
+        x.* = z[e.pos..e.end];
+        bc.* = null;
+        if (e.kind != .column) continue;
+        const names = e.kind.column;
+        const col = names[names.len - 1].text;
+        for (base.cols) |*c| if (std.ascii.eqlIgnoreCase(c.name(), col)) {
+            bc.* = c.name();
+            break;
+        };
+    }
+    const toks = sub.c.src.toks;
+    // The table's name token (its last part) and the text from its
+    // first part: [schema .] name (a PostgreSQL schema's table is named
+    // by its last part, the schema folded into its name).
+    const k = for (toks, 0..) |tk, i| {
+        if (tk.start == bq.name.pos) break i;
+    } else return ps.unsupported(pos, "MERGE into this view");
+    const first = if (bq.schema) |sc| sc.pos else if (k >= 2 and toks[k - 1].kind == .dot) toks[k - 2].start else bq.name.pos;
+    v.base_text = z[first..toks[k].end];
+    v.qual = try quoted(a, if (item.alias) |al| al.name.text else sub.val(toks[k]));
+    v.rows_sql = try std.fmt.allocPrint(a, "SELECT {s}.rowid AS \"xq_rid\", {s}", .{ v.qual, z[toks[1].start..] });
+    return v;
+}
+
+/// Why view `t` is not automatically updatable, from the query SQLite
+/// keeps of it (unresolved), where that tells; null otherwise.
+fn storedWhy(t: *int.Table) ?NotUpdatable {
+    const sel = t.u.view.select orelse return null;
+    if (sel.prior != null) return .compound;
+    if (sel.sel_flags.Distinct) return .distinct;
+    if (sel.group_by != null) return .group_by;
+    if (sel.having != null) return .having;
+    if (sel.with != null) return .with;
+    if (sel.limit != null) return .limit;
+    if (sel.e_list) |list| for (list.slice()) |item| if (item.expr) |e| if (e.flags.WinFunc) return .window;
+    return null;
+}
+
+/// Whether a column of `cols` calls a function `pred` says yes to (not
+/// in their subqueries).
+fn callsIn(p: *int.Parse, cols: []const tree.ResultCol, comptime pred: fn (*int.Parse, *const tree.Func) bool) bool {
+    for (cols) |rc| if (rc == .expr and Desugar.callIn(p, rc.expr.e, pred)) return true;
+    return false;
 }
 
 /// The names and types of the result columns of `s`, lowered and
@@ -389,7 +613,7 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
     const db = p.db;
     const a = ps.arena;
     const pos = m.pos;
-    const tgt = try target(ps, m.target);
+    const tgt = try target(ps, m.target, true);
     plan.write_mask |= @as(u32, 1) << @intCast(tgt.i_db);
 
     // The source's columns.
@@ -422,6 +646,24 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
     const talias = try quoted(a, m.alias);
     const salias_name = if (m.source_alias.len > 0) m.source_alias else "xq_source";
     const salias = try quoted(a, salias_name);
+    if (tgt.view) |vw| try viewChecks(ps, m, tgt, vw);
+
+    // The target as the join reads it and its rows' rowid there; as the
+    // statements of the actions write it, the name its columns have
+    // there and its rowid. A view is read as its query with its table's
+    // rowid (View.rows_sql); its table is written.
+    var tfrom = try std.fmt.allocPrint(a, "{s} AS {s}", .{ m.target_text, talias });
+    var trid = try std.fmt.allocPrint(a, "{s}.rowid", .{talias});
+    var ttext = m.target_text;
+    var tname = talias;
+    if (tgt.view) |vw| {
+        // Not automatically updatable (DO NOTHING only): no rowid.
+        const q = if (vw.why == null) vw.rows_sql else try std.fmt.allocPrint(a, "SELECT *, 0 AS \"xq_rid\" FROM {s}", .{m.target_text});
+        tfrom = try std.fmt.allocPrint(a, "({s}) AS {s}", .{ q, talias });
+        trid = try std.fmt.allocPrint(a, "{s}.\"xq_rid\"", .{talias});
+        ttext = vw.base_text;
+        tname = vw.qual;
+    }
 
     // 1. The join.
     var has_not_matched = false;
@@ -433,7 +675,7 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
     };
     var case: std.ArrayList(u8) = .empty;
     try case.appendSlice(a, "CASE");
-    const kinds = .{ .{ .matched, "{s}.rowid IS NOT NULL AND {s}.\"xq_m\" IS NOT NULL" }, .{ .not_matched, "{s}.\"xq_m\" IS NOT NULL" }, .{ .by_source, "{s}.rowid IS NOT NULL" } };
+    const kinds = .{ .{ .matched, "{s} IS NOT NULL AND {s}.\"xq_m\" IS NOT NULL" }, .{ .not_matched, "{s}.\"xq_m\" IS NOT NULL" }, .{ .by_source, "{s} IS NOT NULL" } };
     inline for (kinds) |k| {
         var inner: std.ArrayList(u8) = .empty;
         for (m.clauses, 1..) |c, n| if (c.kind == k[0]) {
@@ -442,9 +684,9 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
         if (inner.items.len > 0) {
             try case.appendSlice(a, " WHEN ");
             switch (k[0]) {
-                .matched => try case.print(a, k[1], .{ talias, salias }),
+                .matched => try case.print(a, k[1], .{ trid, salias }),
                 .not_matched => try case.print(a, k[1], .{salias}),
-                .by_source => try case.print(a, k[1], .{talias}),
+                .by_source => try case.print(a, k[1], .{trid}),
                 else => unreachable,
             }
             try case.print(a, " THEN CASE{s} END", .{inner.items});
@@ -458,9 +700,10 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
         .kind = .join,
         .a = join_slot,
         .b = @intCast(src_cols.len),
-        .sql = try std.fmt.allocPrint(a, "{s}SELECT {s}.rowid, {s}, {s}.* FROM {s} AS {s} {s} (SELECT *, true AS \"xq_m\" FROM {s}) AS {s} ON {s}", .{
-            with_text, talias, case.items, salias, m.target_text, talias, join, m.source_text, salias, m.on_text,
+        .sql = try std.fmt.allocPrint(a, "{s}SELECT {s}, {s}, {s}.* FROM {s} {s} (SELECT *, true AS \"xq_m\" FROM {s}) AS {s} ON {s}", .{
+            with_text, trid, case.items, salias, tfrom, join, m.source_text, salias, m.on_text,
         }),
+        .label = "MERGE: join of the target and the source",
     });
 
     // 2. A target's row changed twice.
@@ -473,23 +716,49 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
 
     // 3. The actions.
     const ret_slot: ?u32 = if (m.returning.len > 0) try plan.slot(a, db) else null;
-    const returning = if (ret_slot != null) try std.fmt.allocPrint(a, " RETURNING {s}, rowid", .{try capture(a, tgt.cols)}) else "";
+    // What the statements return of each row they change (the rowid an
+    // UPDATE's row had: an UPDATE of an INTEGER PRIMARY KEY moves it).
+    var returning: []const u8 = "";
+    var upd_returning: []const u8 = "";
+    if (ret_slot != null) {
+        // A view's columns of the table's row: its query's expressions,
+        // over the table named as there.
+        const cols = if (tgt.view) |vw| blk: {
+            const uses = usesOldNew(m.returning);
+            if (uses[0] or uses[1]) return ps.unsupported(m.returning_pos, "RETURNING OLD or NEW of MERGE into a view");
+            break :blk try std.mem.join(a, ", ", vw.exprs);
+        } else try capture(a, tgt.cols);
+        returning = try std.fmt.allocPrint(a, " RETURNING {s}, rowid", .{cols});
+        upd_returning = try std.fmt.allocPrint(a, " RETURNING {s}, old.rowid", .{cols});
+    }
     const join_rows = try rows.moduleName(a, src_cols);
     const join_from = try std.fmt.allocPrint(a, "{f}({d}) AS {s}", .{ Quoted{ .z = join_rows }, join_slot, salias });
     for (m.clauses, 1..) |c, n| {
         var step: rows.Step = .{ .kind = .action, .a = join_slot, .b = @intCast(n), .c = if (ret_slot) |r| r else -1 };
         switch (c.action) {
             .nothing => continue,
-            .update => |set| {
+            .update => |set| if (tgt.view) |vw| {
+                step.d = 2;
+                step.sql = try viewUpdate(ps, m, c, n, tgt, vw, plan, .{
+                    .with_text = with_text,
+                    .join_slot = join_slot,
+                    .join_from = join_from,
+                    .src_cols = src_cols,
+                    .salias = salias,
+                    .salias_name = salias_name,
+                    .talias = talias,
+                    .returning = upd_returning,
+                });
+            } else {
                 step.d = 2;
                 step.sql = try std.fmt.allocPrint(a, "{s}UPDATE {s} AS {s} SET {s} FROM {s} WHERE {s}.xq_tag = {d} AND {s}.rowid = {s}.xq_target{s}", .{
-                    with_text, m.target_text, talias, set, join_from, salias, n, talias, salias, returning,
+                    with_text, m.target_text, talias, set, join_from, salias, n, talias, salias, upd_returning,
                 });
             },
             .delete => {
                 step.d = 3;
                 step.sql = try std.fmt.allocPrint(a, "{s}DELETE FROM {s} AS {s} WHERE {s}.rowid IN (SELECT xq_target FROM {f}({d}) WHERE xq_tag = {d}){s}", .{
-                    with_text, m.target_text, talias, talias, Quoted{ .z = join_rows }, join_slot, n, returning,
+                    with_text, ttext, tname, tname, Quoted{ .z = join_rows }, join_slot, n, returning,
                 });
             },
             .insert => |ins| {
@@ -502,9 +771,17 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
                     var names: std.ArrayList([]const u8) = .empty;
                     if (ins.cols.len > 0) {
                         for (ins.cols) |x| try names.append(a, x.text);
+                    } else if (tgt.view != null) {
+                        for (tgt.cols) |vc| try names.append(a, vc.name);
                     } else for (tgt.tab.cols) |*tc| {
                         if (!tc.col_flags.intersects(int.COLFLAG.NOINSERT)) try names.append(a, tc.name());
                     }
+                    // A view's columns are its table's (viewChecks()).
+                    if (tgt.view) |vw| for (names.items) |*x| {
+                        if (viewCol(tgt, x.*)) |k| if (vw.base_cols[k]) |bc| {
+                            x.* = bc;
+                        };
+                    };
                     if (values.len > names.items.len) {
                         return ps.c.failState(c.pos, .of("42601"), "INSERT has more expressions than target columns", .{});
                     }
@@ -521,16 +798,18 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
                         try vals.appendSlice(a, v.text);
                     }
                 }
+                const into = if (tgt.view != null) try std.fmt.allocPrint(a, "{s} AS {s}", .{ ttext, tname }) else m.target_text;
                 if (cols.items.len == 0) {
                     step.e = 1;
-                    step.sql = try std.fmt.allocPrint(a, "{s}INSERT INTO {s} {s} DEFAULT VALUES{s}", .{ with_text, m.target_text, ins.overriding, returning });
+                    step.sql = try std.fmt.allocPrint(a, "{s}INSERT INTO {s} {s} DEFAULT VALUES{s}", .{ with_text, into, ins.overriding, returning });
                 } else {
                     step.sql = try std.fmt.allocPrint(a, "{s}INSERT INTO {s} ({s}) {s} SELECT {s} FROM {s} WHERE {s}.xq_tag = {d} ORDER BY {s}.rowid{s}", .{
-                        with_text, m.target_text, cols.items, ins.overriding, vals.items, join_from, salias, n, salias, returning,
+                        with_text, into, cols.items, ins.overriding, vals.items, join_from, salias, n, salias, returning,
                     });
                 }
             },
         }
+        step.label = try std.fmt.allocPrint(a, "MERGE: WHEN clause {d}: {s}", .{ n, actionWord(c.action) });
         try plan.steps.append(a, step);
     }
 
@@ -579,6 +858,167 @@ fn mergeIn(ps: *Parser, m: *Merge, plan: *Plan, scope: ?*tree.With, with_text: [
     } });
     try items.append(a, src_item);
     return .{ .select = try selectOf(a, list.items, items.items, m.returning_pos) };
+}
+
+// ======================================================= MERGE INTO view
+
+/// The place of column `name` among the target's (a view's) columns.
+fn viewCol(tgt: Target, name: []const u8) ?usize {
+    for (tgt.cols, 0..) |c, i| if (std.mem.eql(u8, c.name, name)) return i;
+    return null;
+}
+
+/// PostgreSQL's errors of a MERGE a view cannot take, in its order: the
+/// columns it has not (parse analysis), then those of rewriteTargetView():
+/// a view not automatically updatable (the first action's), one of no
+/// updatable columns (the first INSERT's or UPDATE's), the columns an
+/// INSERT assigns, then those an UPDATE does, that are not the table's.
+fn viewChecks(ps: *Parser, m: *const Merge, tgt: Target, vw: *const View) Error!void {
+    const a = ps.arena;
+    const n_cols = tgt.cols.len;
+    const ins_cols = try a.alloc(bool, n_cols);
+    const upd_cols = try a.alloc(bool, n_cols);
+    @memset(ins_cols, false);
+    @memset(upd_cols, false);
+    for (m.clauses) |c| switch (c.action) {
+        .update => for (c.sets) |si| for (si.cols) |col| {
+            upd_cols[viewCol(tgt, col.text) orelse return noViewColumn(ps, col, vw.name)] = true;
+        },
+        .insert => |ins| {
+            for (ins.cols) |col| ins_cols[viewCol(tgt, col.text) orelse return noViewColumn(ps, col, vw.name)] = true;
+            const vals = ins.values orelse continue;
+            if (ins.cols.len == 0) {
+                if (vals.len > n_cols) return ps.c.failState(c.pos, .of("42601"), "INSERT has more expressions than target columns", .{});
+                for (ins_cols[0..vals.len]) |*x| x.* = true;
+            }
+        },
+        else => {},
+    };
+    if (vw.why) |why| {
+        for (m.clauses) |c| if (c.action != .nothing) return notUpdatable(ps, c, vw.name, why);
+        return;
+    }
+    for (m.clauses) |c| if ((c.action == .insert or c.action == .update) and !vw.updatable())
+        return notUpdatable(ps, c, vw.name, .no_columns);
+    for ([_][]const bool{ ins_cols, upd_cols }) |set| for (set, vw.base_cols, tgt.cols) |used, bc, col| {
+        if (used and bc == null) return ps.failFields(null, .of("0A000"), .{
+            .message = try std.fmt.allocPrint(a, "cannot merge into column \"{s}\" of view \"{s}\"", .{ col.name, vw.name }),
+            .detail = "View columns that are not columns of their base relation are not updatable.",
+        });
+    };
+}
+
+fn noViewColumn(ps: *Parser, col: Name, view: []const u8) Error {
+    return ps.c.failState(col.pos, .of("42703"), "column \"{s}\" of relation \"{s}\" does not exist", .{ col.text, view });
+}
+
+fn notUpdatable(ps: *Parser, c: Clause, view: []const u8, why: NotUpdatable) Error {
+    const a = ps.arena;
+    const verb, const ing = switch (c.action) {
+        .insert => .{ "insert into", "inserting into" },
+        .update => .{ "update", "updating" },
+        else => .{ "delete from", "deleting from" },
+    };
+    return ps.failFields(null, .of("55000"), .{
+        .message = try std.fmt.allocPrint(a, "cannot {s} view \"{s}\"", .{ verb, view }),
+        .detail = why.detail(),
+        .hint = try std.fmt.allocPrint(a, "To enable {s} the view using MERGE, provide an INSTEAD OF {s} trigger.", .{ ing, actionWord(c.action) }),
+    });
+}
+
+/// The keyword of the statement an action (a MERGE clause's, a
+/// data-modifying CTE's) is: INSERT, UPDATE, else DELETE.
+fn actionWord(action: anytype) []const u8 {
+    return switch (action) {
+        .insert => "INSERT",
+        .update => "UPDATE",
+        else => "DELETE",
+    };
+}
+
+/// What viewUpdate() takes of mergeIn().
+const JoinInfo = struct {
+    with_text: []const u8,
+    join_slot: u32,
+    join_from: []const u8,
+    src_cols: []const rows.Col,
+    salias: []const u8,
+    salias_name: []const u8,
+    talias: []const u8,
+    returning: []const u8,
+};
+
+/// WHEN clause `n` (`c`, an UPDATE) of a MERGE into view `vw`: a step
+/// computing the new values of the rows of the join that take it (the
+/// SET list's expressions, which read the view's columns and the
+/// source's, as PostgreSQL's do), kept in a slot of their own; the
+/// statement returned updates the table's rows from them.
+fn viewUpdate(ps: *Parser, m: *const Merge, c: Clause, n: usize, tgt: Target, vw: *const View, plan: *Plan, j: JoinInfo) Error![]const u8 {
+    const a = ps.arena;
+    const db = ps.p.?.db;
+    var vcols: std.ArrayList(rows.Col) = .empty;
+    try vcols.append(a, .{ .name = "xq_rid" });
+    var exprs: std.ArrayList(*tree.Expr) = .empty;
+    var select: std.ArrayList(u8) = .empty;
+    var assigns: std.ArrayList(u8) = .empty;
+    for (c.sets) |si| {
+        const one = try a.alloc(*tree.Expr, 1);
+        one[0] = si.value;
+        const values: []*tree.Expr = if (!si.multi) one else switch (si.value.kind) {
+            .row => |r| r,
+            else => return ps.unsupported(si.value.pos, "assigning a subquery to columns of a view"),
+        };
+        if (values.len != si.cols.len) return ps.c.failState(si.value.pos, .of("42601"), "number of columns does not match number of values", .{});
+        for (si.cols, values) |col, e| {
+            const bc = vw.base_cols[viewCol(tgt, col.text).?].?;
+            if (assigns.items.len > 0) try assigns.appendSlice(a, ", ");
+            if (e.kind == .default) {
+                // The view's column has no default (PostgreSQL's
+                // rewriteTargetListIU() for an UPDATE).
+                try assigns.print(a, "{f} = NULL", .{Quoted{ .z = bc }});
+                continue;
+            }
+            // col[i] = v (parser.zig's setList(): no text of its own).
+            if (e.pos < col.pos + col.text.len) return ps.unsupported(col.pos, "assigning to an element of a column of a view");
+            try select.print(a, ", ({s})", .{ps.c.sql[e.pos..e.end]});
+            try assigns.print(a, "{f} = \"xq_u\".\"xq_v{d}\"", .{ Quoted{ .z = bc }, vcols.items.len });
+            try vcols.append(a, .{ .name = try std.fmt.allocPrint(a, "xq_v{d}", .{vcols.items.len}) });
+            try exprs.append(a, e);
+        }
+    }
+    // The types of the values: those of the expressions where they have
+    // one (an UPDATE checks them as its own), none for a literal or a
+    // parameter (stored as an UPDATE's would be).
+    if (exprs.items.len > 0) {
+        const list = try a.alloc(tree.ResultCol, exprs.items.len);
+        for (exprs.items, list) |e, *rc| rc.* = .{ .expr = .{ .e = e } };
+        const from = try a.alloc(tree.FromItem, 2);
+        from[0] = try rowsItem(a, j.src_cols, j.join_slot, j.salias_name, m.pos);
+        from[1] = .{ .join = .comma, .source = .{ .table = m.target }, .alias = .{ .name = .{ .text = m.alias, .pos = m.pos } } };
+        const literal = try a.alloc(bool, exprs.items.len);
+        for (exprs.items, literal) |e, *l| l.* = switch (e.kind) {
+            .string, .param, .null => true,
+            else => false,
+        };
+        const probed = try probe(ps, try selectOf(a, list, from, m.pos));
+        for (probed, vcols.items[1..], literal) |t, *vc, lit| {
+            if (lit or std.mem.eql(u8, t.spelling, "unknown")) continue;
+            vc.spelling = t.spelling;
+            vc.type = t.type;
+        }
+    }
+    const vslot = try plan.slot(a, db);
+    try plan.steps.append(a, .{
+        .kind = .run,
+        .a = vslot,
+        .sql = try std.fmt.allocPrint(a, "{s}SELECT {s}.xq_target{s} FROM {s} JOIN ({s}) AS {s} ON {s}.\"xq_rid\" = {s}.xq_target WHERE {s}.xq_tag = {d}", .{
+            j.with_text, j.salias, select.items, j.join_from, vw.rows_sql, j.talias, j.talias, j.salias, j.salias, n,
+        }),
+        .label = try std.fmt.allocPrint(a, "MERGE: WHEN clause {d}: new values", .{n}),
+    });
+    return std.fmt.allocPrint(a, "{s}UPDATE {s} AS {s} SET {s} FROM {f}({d}) AS \"xq_u\" WHERE {s}.rowid = \"xq_u\".\"xq_rid\"{s}", .{
+        j.with_text, vw.base_text, vw.qual, assigns.items, Quoted{ .z = try rows.moduleName(a, vcols.items) }, vslot, vw.qual, j.returning,
+    });
 }
 
 // ======================================================== WITH ... DML
@@ -673,15 +1113,16 @@ pub fn with(ps: *Parser, w: *tree.With, plan: *Plan) Error!void {
             .delete => |x| .{ x.table, x.alias, x.returning, x.returning_pos },
             else => unreachable,
         };
-        const tgt = try target(ps, q);
+        const tgt = try target(ps, q, false);
         plan.write_mask |= @as(u32, 1) << @intCast(tgt.i_db);
         const name = if (alias) |n| n.text else q.name.text;
         const pos = cte.name.pos;
+        const label = try std.fmt.allocPrint(a, "WITH {s}: {s}", .{ cte.name.text, actionWord(d.*) });
         if (returning.len == 0) {
             // Its query may not be read.
             for (w.ctes[ci + 1 ..]) |later| if (later.dml == null) if (refersTo(later.select, cte.name.text)) |at| return noReturning(ps, at, cte.name.text);
             if (try mainRefersTo(ps, w, cte.name.text)) |at| return noReturning(ps, at, cte.name.text);
-            try plan.steps.append(a, .{ .kind = .run, .sql = try std.fmt.allocPrint(a, "{s}{s}", .{ head, cte.body }) });
+            try plan.steps.append(a, .{ .kind = .run, .sql = try std.fmt.allocPrint(a, "{s}{s}", .{ head, cte.body }), .label = label });
             // Its query: no rows (PostgreSQL refuses to read it).
             const slot = try plan.slot(a, db);
             const star = try a.alloc(tree.ResultCol, 1);
@@ -703,6 +1144,7 @@ pub fn with(ps: *Parser, w: *tree.With, plan: *Plan) Error!void {
             .kind = .run,
             .a = slot,
             .sql = try std.fmt.allocPrint(a, "{s}{s} RETURNING {s}", .{ head, stmt_text, try capture(a, tgt.cols) }),
+            .label = label,
         });
         const from = try a.alloc(tree.FromItem, 1);
         from[0] = try targetItem(a, tgt.cols, slot, name, pos, @constCast(returning));
@@ -723,4 +1165,74 @@ pub fn with(ps: *Parser, w: *tree.With, plan: *Plan) Error!void {
     }
     const np = maxParam(ps);
     if (np > p.n_var) p.n_var = @intCast(np);
+}
+
+// ============================================================== tests
+
+const testing = std.testing;
+const Conn = @import("../../sql/sql_test.zig").Conn;
+
+fn openPg(c: *Conn) !void {
+    try c.open();
+    main_mod.setDialect(c.db, .postgres);
+}
+
+test "pg: MERGE into a view" {
+    try @import("../dialect.zig").Dialect.requireBuilt(&.{.postgres});
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t (id int PRIMARY KEY, a int, note text DEFAULT 'n');
+        \\INSERT INTO t VALUES (1, 10), (2, 2), (3, 30);
+        \\CREATE VIEW v (k, x, x1) AS SELECT id, a, a + 1 FROM t WHERE a > 5;
+    );
+    // The rows the view's WHERE leaves out are not the target's; the
+    // view's columns are the table's (renamed; computed ones read only).
+    try c.expectRows(
+        \\MERGE INTO v USING (VALUES (1, 5), (2, 7), (4, 40)) AS s(k, x) ON v.k = s.k
+        \\WHEN MATCHED THEN UPDATE SET x = s.x + v.x1
+        \\WHEN NOT MATCHED AND s.k = 2 THEN DO NOTHING
+        \\WHEN NOT MATCHED THEN INSERT (k, x) VALUES (s.k, s.x)
+        \\WHEN NOT MATCHED BY SOURCE THEN DELETE
+        \\RETURNING merge_action(), s.k, v.*
+    , "UPDATE|1|1|16|17\nDELETE|NULL|3|30|31\nINSERT|4|4|40|41\n");
+    try c.expectRows("SELECT * FROM t ORDER BY id", "1|16|n\n2|2|n\n4|40|n\n");
+    // An UPDATE of the key keeps RETURNING's source row.
+    try c.expectRows("MERGE INTO v USING (VALUES (4, 'four')) AS s(k, name) ON v.k = s.k WHEN MATCHED THEN UPDATE SET k = 40 RETURNING s.name, v.k", "four|40\n");
+    // PostgreSQL's errors.
+    try c.expectError("MERGE INTO v USING (VALUES (1)) AS s(k) ON v.k = s.k WHEN MATCHED THEN UPDATE SET x1 = 1", "cannot merge into column \"x1\" of view \"v\"\nDETAIL:  View columns that are not columns of their base relation are not updatable.");
+    try c.expectError("MERGE INTO v USING (VALUES (1)) AS s(k) ON v.k = s.k WHEN MATCHED THEN UPDATE SET note = 'x'", "column \"note\" of relation \"v\" does not exist");
+    try c.exec("CREATE VIEW vd AS SELECT DISTINCT id FROM t");
+    try c.expectError("MERGE INTO vd USING (VALUES (1)) AS s(k) ON vd.id = s.k WHEN MATCHED THEN DELETE", "cannot delete from view \"vd\"\nDETAIL:  Views containing DISTINCT are not automatically updatable.\nHINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.");
+    try c.exec("MERGE INTO vd USING (VALUES (1)) AS s(k) ON vd.id = s.k WHEN MATCHED THEN DO NOTHING");
+    try c.exec("CREATE VIEW vv AS SELECT k FROM v");
+    try c.expectError("MERGE INTO vv USING (VALUES (1)) AS s(k) ON vv.k = s.k WHEN MATCHED THEN DELETE", "MERGE into a view of a view is not supported");
+}
+
+test "pg: EXPLAIN MERGE and of a data-modifying WITH" {
+    try @import("../dialect.zig").Dialect.requireBuilt(&.{.postgres});
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t (id int PRIMARY KEY, a int);
+        \\INSERT INTO t VALUES (1, 1);
+        \\CREATE VIEW v AS SELECT id, a FROM t;
+    );
+    const cases = [_]struct { []const u8, []const []const u8 }{
+        .{ "EXPLAIN MERGE INTO t USING (VALUES (1, 2)) AS s(id, a) ON t.id = s.id WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.a)", &.{ "MERGE: join of the target and the source", "MERGE: WHEN clause 1: DELETE", "MERGE: WHEN clause 2: INSERT" } },
+        .{ "EXPLAIN MERGE INTO v USING (VALUES (1, 2)) AS s(id, a) ON v.id = s.id WHEN MATCHED THEN UPDATE SET a = s.a RETURNING *", &.{ "MERGE: WHEN clause 1: new values", "MERGE: WHEN clause 1: UPDATE" } },
+        .{ "EXPLAIN WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", &.{"WITH d: DELETE"} },
+    };
+    for (cases) |x| {
+        const got = try c.query(x[0]);
+        defer testing.allocator.free(got);
+        for (x[1]) |label| testing.expect(std.mem.indexOf(u8, got, label) != null) catch |err| {
+            std.debug.print("{s}\n{s}\n", .{ x[0], got });
+            return err;
+        };
+    }
+    // Nothing ran.
+    try c.expectRows("SELECT * FROM t", "1|1\n");
 }

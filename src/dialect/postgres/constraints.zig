@@ -97,9 +97,17 @@ fn name(a: Allocator, v: Violation) error{OutOfMemory}![]const u8 {
     return switch (v.kind) {
         .primary_key => std.fmt.allocPrint(a, "{s}_pkey", .{t}),
         .check => std.fmt.allocPrint(a, "{s}_check", .{t}),
-        .foreign_key, .referenced => std.fmt.allocPrint(a, "{s}_{s}_fkey", .{ t, try Violation.joined(a, v.columns, "{s}", "_") }),
+        .foreign_key, .referenced => fkeyName(a, t, v.columns),
         else => std.fmt.allocPrint(a, "{s}_{s}_key", .{ t, try Violation.joined(a, v.columns, "{s}", "_") }),
     };
+}
+
+/// PostgreSQL's name of an unnamed foreign key of table `table` (its
+/// name in its schema) on columns `cols`: <table>_<columns>_fkey
+/// (ChooseConstraintName()). pgcatalog.zig and setconstraints.zig name it
+/// so too.
+pub fn fkeyName(a: Allocator, table: []const u8, cols: []const []const u8) error{OutOfMemory}![]const u8 {
+    return std.fmt.allocPrint(a, "{s}_{s}_fkey", .{ table, try Violation.joined(a, cols, "{s}", "_") });
 }
 
 test message {

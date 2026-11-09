@@ -38,6 +38,11 @@ query: []const u8 = "",
 scratch: std.heap.ArenaAllocator,
 /// The column types of the statement of a simple query being sent.
 col_types: std.ArrayList(xqlite.types.Type) = .empty,
+/// Their OIDs, and whether each is sent in the binary format, where the
+/// rows are (Session.binary_rows: a FETCH from a binary cursor) and the
+/// type has one.
+col_oids: std.ArrayList(Oid) = .empty,
+col_binary: std.ArrayList(bool) = .empty,
 /// The values of the session's settings a client is told of
 /// (Db.reported_settings) as last sent (ParameterStatus), and the
 /// Db.settingsVersion() they were read at: one that changed is reported
@@ -101,6 +106,8 @@ fn deinit(b: *Backend) void {
     }
     b.statements.deinit(b.gpa);
     b.col_types.deinit(b.gpa);
+    b.col_oids.deinit(b.gpa);
+    b.col_binary.deinit(b.gpa);
     for (b.reported) |v| if (v) |z| b.gpa.free(z);
     b.scratch.deinit();
     b.in_buf.deinit(b.gpa);
@@ -487,7 +494,16 @@ fn simpleQuery(b: *Backend, body: *Body) !void {
     b.dropStatement("");
     b.query = sql;
     var sink: SimpleSink = .{ .b = b };
-    try b.session.run(sql, &sink);
+    b.session.run(sql, &sink) catch |err| switch (err) {
+        // A value of a binary cursor's FETCH with no binary form.
+        error.Unencodable => {
+            b.out.abandon();
+            b.session.markFailed();
+            try b.errorResponse("ERROR", "22P03", "a value of the result cannot be sent in the binary format of its column's type", null);
+            return b.readyForQuery();
+        },
+        else => return err,
+    };
     if (!sink.any) try b.out.empty('I');
     try b.readyForQuery();
 }
@@ -499,13 +515,25 @@ const SimpleSink = struct {
 
     pub fn columns(s: *SimpleSink, cols: []const Column) !void {
         s.any = true;
-        s.b.col_types.clearRetainingCapacity();
-        for (cols) |c| try s.b.col_types.append(s.b.gpa, c.type);
-        try s.b.rowDescription(cols, null);
+        const b = s.b;
+        const binary = b.session.binary_rows;
+        b.col_types.clearRetainingCapacity();
+        b.col_oids.clearRetainingCapacity();
+        b.col_binary.clearRetainingCapacity();
+        for (cols) |c| {
+            try b.col_types.append(b.gpa, c.type);
+            if (!binary) continue;
+            const o = pg_types.ofType(c.type);
+            try b.col_oids.append(b.gpa, o);
+            try b.col_binary.append(b.gpa, values.binaryOut(o));
+        }
+        try b.rowDescription(cols, if (binary) b.col_binary.items else null);
     }
 
     pub fn row(s: *SimpleSink, r: *Session.Row) !void {
-        try s.b.dataRow(r, s.b.col_types.items, null, null);
+        const b = s.b;
+        if (b.session.binary_rows) return b.dataRow(r, b.col_types.items, b.col_oids.items, b.col_binary.items);
+        try b.dataRow(r, b.col_types.items, null, null);
     }
 
     pub fn complete(s: *SimpleSink, c: Session.Complete) !void {

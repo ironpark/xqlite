@@ -1071,7 +1071,7 @@ const Parser = struct {
                 TK.DEFERRABLE => {
                     _ = try s.advance();
                     const deferred = try s.initDeferred();
-                    ir.ddl.deferForeignKey(p, deferred);
+                    ir.ddl.deferrableForeignKey(p, deferred);
                 },
                 TK.COLLATE => {
                     _ = try s.advance();
@@ -1369,6 +1369,7 @@ const Parser = struct {
                 const table = try s.nm();
                 const to = try s.eidlistOpt();
                 const actions = try s.refargs();
+                var deferrable = false;
                 const deferred = switch (s.tk()) {
                     TK.NOT => blk: {
                         _ = try s.advance();
@@ -1378,12 +1379,13 @@ const Parser = struct {
                     },
                     TK.DEFERRABLE => blk: {
                         _ = try s.advance();
+                        deferrable = true;
                         break :blk try s.initDeferred();
                     },
                     else => false,
                 };
                 ir.ddl.createForeignKey(p, from, table, to, actions);
-                ir.ddl.deferForeignKey(p, deferred);
+                if (deferrable) ir.ddl.deferrableForeignKey(p, deferred) else ir.ddl.deferForeignKey(p, deferred);
             },
             else => return s.fail(),
         }

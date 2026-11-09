@@ -26,6 +26,7 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const malloc = @import("malloc.zig");
 const dconstraint = @import("../dialect/constraint.zig");
+const dialect = @import("../dialect/dialect.zig");
 
 const Parse = int.Parse;
 const Table = int.Table;
@@ -125,17 +126,25 @@ fn fkLocateIndexImpl(p: *Parse, parent: *Table, fk: *FKey, idx_out: *?*Index, ai
     return false;
 }
 
+/// xqlite: whether `fk` counts its violations as deferred, in the
+/// connection's counter checked at COMMIT: its DEFERRABLE INITIALLY
+/// DEFERRED, unless the dialect's SET CONSTRAINTS says otherwise
+/// (dialect.fkDeferred(); never in SQLite's dialect).
+fn isDeferred(p: *Parse, fk: *const FKey) bool {
+    return dialect.fkDeferred(p, fk) orelse fk.is_deferred;
+}
+
 /// Port of fkLookupParent(): look for the parent row of the child row in
 /// the registers from `reg_data` (rowid, then the columns), adding `n_incr`
 /// to the constraint counter if it is missing. `ai_col` maps the parent
-/// key columns to child columns.
-fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, ai_col: []const i32, reg_data: i32, n_incr: i32, is_ignore: bool, is_update: bool) void {
+/// key columns to child columns. `deferred`: isDeferred(p, fk).
+fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: []const i32, reg_data: i32, n_incr: i32, is_ignore: bool, is_update: bool) void {
     const v = build.getVdbe(p) orelse return;
     const i_cur = p.n_tab - 1;
     const i_ok = aux.makeLabel(p);
 
     // When decrementing, nothing to do if the counter is already zero.
-    if (n_incr < 0) _ = aux.addOp2(v, OP.FkIfZero, @intFromBool(fk.is_deferred), i_ok);
+    if (n_incr < 0) _ = aux.addOp2(v, OP.FkIfZero, @intFromBool(deferred), i_ok);
     // A NULL in the child key never violates the constraint.
     for (0..fk.cols.len) |i| {
         const reg = build.tableColumnToStorage(fk.from, @intCast(ai_col[i])) + reg_data + 1;
@@ -188,7 +197,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, ai
         }
     }
 
-    if (!fk.is_deferred and !p.db.flags.DeferFKs and p.toplevel == null and !p.is_multi_write) {
+    if (!deferred and !p.db.flags.DeferFKs and p.toplevel == null and !p.is_multi_write) {
         // An INSERT of a single row fails at once: it runs without a
         // statement transaction.
         std.debug.assert(n_incr == 1);
@@ -198,9 +207,9 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, ai
             build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
         }
     } else {
-        if (n_incr > 0 and !fk.is_deferred) main_mod.mayAbort(p);
+        if (n_incr > 0 and !deferred) main_mod.mayAbort(p);
         const z = if (n_incr > 0) dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx, reg_data, ai_col) else null;
-        _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(fk.is_deferred), n_incr, 0, z);
+        _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(deferred), n_incr, 0, z);
     }
 
     aux.resolveLabel(v, i_ok);
@@ -234,11 +243,11 @@ fn exprTableColumn(p: *Parse, t: *Table, i_cursor: i32, i_col: i16) Oom!*Expr {
 
 /// Port of fkScanChildren(): add `n_incr` to the constraint counter for
 /// each row of the child table `src` that refers to the parent row in the
-/// registers from `reg_data`.
-fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, ai_col: ?[]const i32, reg_data: i32, n_incr: i32, is_update: bool) Oom!void {
+/// registers from `reg_data`. `deferred`: isDeferred(p, fk).
+fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: ?[]const i32, reg_data: i32, n_incr: i32, is_update: bool) Oom!void {
     const v = build.getVdbe(p) orelse return;
     var i_fk_if_zero: i32 = 0;
-    if (n_incr < 0) i_fk_if_zero = aux.addOp2(v, OP.FkIfZero, @intFromBool(fk.is_deferred), 0);
+    if (n_incr < 0) i_fk_if_zero = aux.addOp2(v, OP.FkIfZero, @intFromBool(deferred), 0);
 
     // WHERE parent.key1 = child.col1 AND ...
     var where: ?*Expr = null;
@@ -277,7 +286,7 @@ fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, 
     if (p.n_err == 0) {
         const z = if (n_incr > 0) dconstraint.foreignKey(p, .referenced, if (is_update) .update else .delete, fk, t, idx, reg_data, ai_col) else null;
         const w = where_mod.whereBegin(p, src, where, null, null, null, .{}, 0);
-        _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(fk.is_deferred), n_incr, 0, z);
+        _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(deferred), n_incr, 0, z);
         if (w) |wi| where_mod.whereEnd(wi);
     }
     if (i_fk_if_zero != 0) aux.jumpHereOrPopInst(v, i_fk_if_zero);
@@ -305,7 +314,7 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
         // zero, dropping the table changes nothing.
         var it = t.u.tab.fkey;
         while (it) |fk| : (it = fk.next_from) {
-            if (fk.is_deferred or db.flags.DeferFKs) break;
+            if (isDeferred(p, fk) or db.flags.DeferFKs) break;
         }
         if (it == null) return;
         i_skip = aux.makeLabel(p);
@@ -390,6 +399,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         if (a_change) |ac| {
             if (!ctype.eqlNoCase(t.name, fk.to) and !fkChildIsModified(t, fk, ac, chng_rowid)) continue;
         }
+        const deferred = isDeferred(p, fk);
 
         // The parent table, and its index on the parent key.
         const to = if (p.disable_triggers) build.findTable(db, fk.to, zdb) else build.locateTable(p, 0, fk.to, zdb);
@@ -408,7 +418,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
                     const reg = build.tableColumnToStorage(fk.from, @intCast(c.i_from)) + reg_old + 1;
                     _ = aux.addOp2(v, OP.IsNull, reg, i_jump);
                 }
-                _ = aux.addOp2(v, OP.FkCounter, @intFromBool(fk.is_deferred), -1);
+                _ = aux.addOp2(v, OP.FkCounter, @intFromBool(deferred), -1);
             }
             continue;
         }
@@ -429,18 +439,19 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         p.n_tab += 1;
         // A child row removed may resolve a violation; one added may
         // cause one (but not as the SET NULL action of this very key).
-        if (reg_old != 0) fkLookupParent(p, i_db, pt, idx, fk, ai_col, reg_old, -1, b_ignore, a_change != null);
-        if (reg_new != 0 and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, ai_col, reg_new, 1, b_ignore, a_change != null);
+        if (reg_old != 0) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_old, -1, b_ignore, a_change != null);
+        if (reg_new != 0 and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_new, 1, b_ignore, a_change != null);
     }
 
     // The foreign keys referring to `t` (as the parent).
     fk_it = fkReferences(t);
     while (fk_it) |fk| : (fk_it = fk.next_to) {
         if (a_change) |ac| if (!fkParentIsModified(t, fk, ac, chng_rowid)) continue;
+        const deferred = isDeferred(p, fk);
 
         // Inserting one row into a parent table cannot cause (or fix) an
         // immediate violation.
-        if (!fk.is_deferred and !db.flags.DeferFKs and p.toplevel == null and !p.is_multi_write) {
+        if (!deferred and !db.flags.DeferFKs and p.toplevel == null and !p.is_multi_write) {
             std.debug.assert(reg_old == 0 and reg_new != 0);
             continue;
         }
@@ -461,14 +472,14 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         item.i_cursor = p.n_tab;
         p.n_tab += 1;
 
-        if (reg_new != 0) try fkScanChildren(p, src, t, idx, fk, ai_col, reg_new, -1, a_change != null);
+        if (reg_new != 0) try fkScanChildren(p, src, t, idx, fk, deferred, ai_col, reg_new, -1, a_change != null);
         if (reg_old != 0) {
             var e_action = fk.a_action[@intFromBool(a_change != null)];
             if (db.flags.FkNoAction) e_action = OE.None;
-            try fkScanChildren(p, src, t, idx, fk, ai_col, reg_old, 1, a_change != null);
+            try fkScanChildren(p, src, t, idx, fk, deferred, ai_col, reg_old, 1, a_change != null);
             // A CASCADE or SET NULL action (or the check at COMMIT) fixes
             // what removing the parent breaks.
-            if (!fk.is_deferred and e_action != OE.Cascade and e_action != OE.SetNull) main_mod.mayAbort(p);
+            if (!deferred and e_action != OE.Cascade and e_action != OE.SetNull) main_mod.mayAbort(p);
         }
     }
 }

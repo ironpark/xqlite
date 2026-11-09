@@ -131,6 +131,7 @@ const pg: Spec = .{
     \\CREATE VIEW doc_v AS SELECT id, body -> 'kind' AS kind_json, body @> '{"kind":"a"}' AS is_a, tags[1] AS tag1, array_length(nums, 1) AS n, (span * 2)::text AS span2, (price / 3)::text AS third, left(name, 2) AS l2, seen + interval '1 month' AS next_month, jsonb_typeof(body) AS t, 7 / 2 AS idiv, name ILIKE 'A%' AS ia, jsonb_set(body, '{z}', '5') AS z5 FROM doc;
     \\CREATE VIEW doc_order AS SELECT id FROM doc ORDER BY body, span, tags, nums, id;
     \\CREATE VIEW kinds AS SELECT kind, count(*) AS n, array_agg(id ORDER BY id) AS ids, jsonb_agg(body ORDER BY id) AS bodies, string_agg(name, ',' ORDER BY name) AS names FROM doc GROUP BY kind;
+    \\CREATE VIEW doc_lat AS SELECT d.id, x.note, x.n, x.at FROM doc d LEFT JOIN LATERAL (SELECT i.note, d.price * 2 AS n, d.at FROM item i WHERE i.doc_id = d.id ORDER BY i.id DESC LIMIT 1) x ON true;
     \\INSERT INTO doc (k, body, tags, nums, span, price, name, title, seen, at, pat) VALUES
     \\ (1, '{"kind":"a","a":{"b":"x"},"z":[1,2]}', '{x,y}', '{3,1,2}', '1 day 2 hours', 10.5, 'abc', 'first', '2024-02-29', '2024-02-29 10:00:00+00', 'p1'),
     \\ (2, '{"kind":"b","n":1.50}', '{"a b",NULL}', '{10}', '-1 mon', 0, 'zed', 'second', '2023-12-31', '2023-12-31 23:59:59+02', 'Qx'),
@@ -146,6 +147,7 @@ const pg: Spec = .{
     \\PRAGMA integrity_check;
     \\SELECT id, json(kind_json), is_a, tag1, n, span2, third, l2, next_month, t, idiv, ia, json(z5) FROM doc_v ORDER BY id;
     \\SELECT * FROM kinds ORDER BY kind;
+    \\SELECT id, note, hex(n), quote(at) FROM doc_lat ORDER BY id;
     \\SELECT id, kind, half, tags, active FROM doc ORDER BY id;
     \\SELECT id FROM doc INDEXED BY doc_span2 WHERE xq_pg_iv_interval_pl(span, xq_pg_iv('1 day')) > xq_pg_iv_high('1 day') ORDER BY id;
     \\SELECT id FROM doc INDEXED BY doc_kind WHERE xq_pg_jsonb_get_text(body, 'kind') = 'a' ORDER BY id;

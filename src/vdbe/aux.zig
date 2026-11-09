@@ -877,6 +877,7 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.xq_param_types = @import("../sql/typing.zig").paramTypes(p, a, n_var) catch return oom(v);
     v.xq_exact_numeric = p.xq_exact_numeric;
     v.xq_no_columns = p.xq_no_columns and p.explain == 0;
+    v.xq_binary_rows = p.xq_binary_rows and p.explain == 0;
     v.xq_notices = copyNotices(a, p.xq_notices.items) catch return oom(v);
     initMemArray(v.vars, db, .{ .Null = true });
     initMemArray(v.mem, db, MEM.Undefined);

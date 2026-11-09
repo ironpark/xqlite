@@ -346,6 +346,16 @@ const Parser = struct {
         return p.orExpr();
     }
 
+    /// One or more expressions separated by commas.
+    fn exprsSep(p: *Parser) Error![]*Node {
+        var xs: std.ArrayList(*Node) = .empty;
+        while (true) {
+            try xs.append(p.a, try p.expr());
+            if (!p.punct(",")) break;
+        }
+        return xs.items;
+    }
+
     fn orExpr(p: *Parser) Error!*Node {
         var l = try p.andExpr();
         while (p.word("OR")) {
@@ -1844,6 +1854,14 @@ const Printer = struct {
         try pr.put(")");
     }
 
+    /// sortItem() of each of `xs` as `f` fixes it, separated by ", ".
+    fn sortItems(pr: *Printer, f: *Fixer, xs: []const *Node) Error!void {
+        for (xs, 0..) |x, i| {
+            if (i > 0) try pr.put(", ");
+            try pr.sortItem(try f.fix(x));
+        }
+    }
+
     /// A string constant as PostgreSQL's simple_quote_literal() writes
     /// it with standard_conforming_strings on (its default): each quote
     /// doubled, a backslash as it is, never E''.
@@ -1963,6 +1981,15 @@ const FromItem = struct {
 
 const OrderItem = struct { e: *Node, dir: []const u8 };
 
+/// A GROUP BY item of a view's display text (render.zig's keep): an
+/// expression, ROLLUP (...), CUBE (...) or GROUPING SETS ((...), ...).
+const GroupItem = struct {
+    kind: enum { expr, rollup, cube, sets },
+    e: ?*Node = null,
+    /// ROLLUP's and CUBE's expressions; each set of GROUPING SETS.
+    sets: []const []const *Node = &.{},
+};
+
 fn viewDefErr(
     a: Allocator,
     sql: []const u8,
@@ -1995,6 +2022,13 @@ fn viewDefErr(
     try p.expectWord("AS");
     try p.expectWord("SELECT");
     const distinct = p.word("DISTINCT");
+    // DISTINCT ON (exprs), of a view's display text.
+    var distinct_on: []const *Node = &.{};
+    if (distinct and p.word("ON")) {
+        try p.expect("(");
+        distinct_on = try p.exprsSep();
+        try p.expect(")");
+    }
     _ = p.word("ALL");
     // The result columns.
     var targets: std.ArrayList(*Node) = .empty;
@@ -2071,11 +2105,34 @@ fn viewDefErr(
     const scope: Scope = .{ .items = items.items, .qualify = items.items.len > 1 };
     var where: ?*Node = null;
     if (p.word("WHERE")) where = try p.expr();
-    var group: std.ArrayList(*Node) = .empty;
+    var group: std.ArrayList(GroupItem) = .empty;
     if (p.word("GROUP")) {
         try p.expectWord("BY");
         while (true) {
-            try group.append(a, try p.expr());
+            const t = p.peek();
+            if ((Parser.isWord(t, "ROLLUP") or Parser.isWord(t, "CUBE")) and Parser.isPunct(p.peekAt(1), "(")) {
+                p.i += 2;
+                const one = try a.alloc([]const *Node, 1);
+                one[0] = try p.exprsSep();
+                try p.expect(")");
+                try group.append(a, .{ .kind = if (Parser.isWord(t, "CUBE")) .cube else .rollup, .sets = one });
+            } else if (Parser.isWord(t, "GROUPING") and Parser.isWord(p.peekAt(1), "SETS")) {
+                p.i += 2;
+                try p.expect("(");
+                var sets: std.ArrayList([]const *Node) = .empty;
+                while (true) {
+                    try p.expect("(");
+                    var xs: []const *Node = &.{};
+                    if (!p.punct(")")) {
+                        xs = try p.exprsSep();
+                        try p.expect(")");
+                    }
+                    try sets.append(a, xs);
+                    if (!p.punct(",")) break;
+                }
+                try p.expect(")");
+                try group.append(a, .{ .kind = .sets, .sets = sets.items });
+            } else try group.append(a, .{ .kind = .expr, .e = try p.expr() });
             if (!p.punct(",")) break;
         }
     }
@@ -2103,11 +2160,24 @@ fn viewDefErr(
     }
     var limit: ?*Node = null;
     var offset: ?*Node = null;
+    var ties = false;
     if (p.word("LIMIT")) {
         limit = try p.expr();
         if (p.word("OFFSET")) offset = try p.expr() else if (p.punct(",")) {
             offset = limit;
             limit = try p.expr();
+        }
+    } else {
+        // [OFFSET o] FETCH FIRST n ROWS WITH TIES, of a view's display
+        // text.
+        if (p.word("OFFSET")) offset = try p.expr();
+        if (p.word("FETCH")) {
+            try p.expectWord("FIRST");
+            limit = try p.expr();
+            try p.expectWord("ROWS");
+            try p.expectWord("WITH");
+            try p.expectWord("TIES");
+            ties = true;
         }
     }
     _ = p.punct(";");
@@ -2122,6 +2192,11 @@ fn viewDefErr(
     pr.indent += 8;
     try pr.put(" SELECT");
     if (distinct) try pr.put(" DISTINCT");
+    if (distinct_on.len > 0) {
+        try pr.put(" ON (");
+        try pr.sortItems(&f, distinct_on);
+        try pr.put(")");
+    }
     // * and t.*: the columns.
     var exp: std.ArrayList(*Node) = .empty;
     for (targets.items) |t| {
@@ -2205,7 +2280,25 @@ fn viewDefErr(
         try pr.keyword(" GROUP BY ", -8, 8, 1);
         for (group.items, 0..) |g, i| {
             if (i > 0) try pr.put(", ");
-            try pr.sortItem(try f.fix(try position(&f, g, exp.items)));
+            switch (g.kind) {
+                .expr => try pr.sortItem(try f.fix(try position(&f, g.e.?, exp.items))),
+                .rollup, .cube, .sets => {
+                    // get_rule_groupingset(): ROLLUP(a, b), GROUPING
+                    // SETS ((a), ()).
+                    try pr.put(switch (g.kind) {
+                        .rollup => "ROLLUP(",
+                        .cube => "CUBE(",
+                        else => "GROUPING SETS (",
+                    });
+                    for (g.sets, 0..) |set, k| {
+                        if (k > 0) try pr.put(", ");
+                        if (g.kind == .sets) try pr.put("(");
+                        try pr.sortItems(&f, set);
+                        if (g.kind == .sets) try pr.put(")");
+                    }
+                    try pr.put(")");
+                },
+            }
         }
     }
     if (having) |h| {
@@ -2225,8 +2318,15 @@ fn viewDefErr(
         try pr.expr(try f.fix(o));
     }
     if (limit) |l| {
-        try pr.keyword(" LIMIT ", -8, 8, 0);
-        try pr.expr(try f.fix(l));
+        if (ties) {
+            try pr.keyword(" FETCH FIRST ", -8, 8, 0);
+            try pr.put("(");
+            try pr.expr(try f.fix(l));
+            try pr.put(") ROWS WITH TIES");
+        } else {
+            try pr.keyword(" LIMIT ", -8, 8, 0);
+            try pr.expr(try f.fix(l));
+        }
     }
     try pr.put(";");
     return text.written();
@@ -2242,7 +2342,7 @@ fn position(f: *Fixer, n: *Node, targets: []const *Node) Error!*Node {
 }
 
 fn isClause(t: Tok) bool {
-    const words = [_][]const u8{ "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "UNION", "EXCEPT", "INTERSECT", "WINDOW", "ON", "USING" };
+    const words = [_][]const u8{ "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "UNION", "EXCEPT", "INTERSECT", "WINDOW", "ON", "USING", "FETCH" };
     for (words) |w| if (Parser.isWord(t, w)) return true;
     return false;
 }

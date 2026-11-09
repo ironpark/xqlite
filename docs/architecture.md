@@ -178,11 +178,13 @@ SQLite에 문법이 없는 질의 모양은 lower와 render가 둘 다 먼저 **
 `FromItem.lateral`(앞 항목을 쓰는 FROM 서브쿼리)은 코어가 실행합니다. lower만 세우는 `SrcItem.fg.xq_lateral` 때문에 SQLite 프론트엔드의 바이트코드는 그대로입니다.
 
 - 이름 해석: LATERAL 서브쿼리는 앞 항목만 보이는 이름 문맥(`NameContext.xq_n_src`)에서 해석합니다. 그 문맥에서 찾은 항목은 `xq_lateral_ref`가 됩니다.
+  - `RIGHT`/`FULL JOIN`의 LATERAL 항목이 앞 항목을 쓰면 PostgreSQL의 `check_lateral_ref_ok()`처럼 `42P10`입니다(`lateralRefOk()`). lower는 쉼표 뒤의 항목에 `xq_comma`를 세우고, 쉼표 앞의 항목을 쓰는 것은 `0A000`입니다. PostgreSQL의 `RIGHT`/`FULL JOIN` 안 함수도 LATERAL이므로 lower가 `xq_lateral`을 세우고, 그 인자를 같은 문맥에서 해석합니다.
 - 실행: 앞 항목을 쓰면(`is_correlated`) 언제나 co-routine이고, 앞 항목 뒤의 루프에 놓입니다(`whereLoopAddAll()`의 선행 조건). co-routine은 그 루프가 시작할 때마다 `OP_InitCoroutine`으로 처음부터 다시 돕니다.
 - `xq_lateral_ref` 항목은 co-routine 코드가 그 행을 직접 읽으므로 커버링 인덱스 루프와 자동 인덱스를 쓰지 않습니다. 그 항목이 co-routine이면 `whereEnd()`가 LATERAL co-routine의 코드 범위에서도 열 읽기를 레지스터 복사로 바꿉니다.
 - 평탄화: 상관된 LATERAL 서브쿼리는 FROM에 서브쿼리나 함수가 있으면 바깥 질의로 평탄화하지 않습니다(그 서브쿼리가 앞 항목의 루프보다 먼저 코딩되므로). 평탄화되는 항목의 `xq_lateral_ref`는 그 안의 항목에 넘깁니다.
 - lower는 `LATERAL (s) AS x(a, b)`와 `LATERAL (VALUES ...)`를 CTE(`xq_alias`)가 아니라 `SELECT c1 AS a ... FROM (s)`(VALUES는 행마다의 `UNION ALL`)로 내립니다(`Desugar.renamed()`). CTE의 복사본은 앞 항목을 보지 못하기 때문입니다.
-- SQLite 텍스트에는 LATERAL이 없으므로 render는 첫 항목이 아닌 LATERAL 항목에서 실패합니다(첫 항목은 앞 항목이 없어 보통 서브쿼리와 같음).
+- SQLite 텍스트에는 LATERAL이 없으므로 render는 첫 항목이 아닌 LATERAL 항목에서 실패합니다(첫 항목은 앞 항목이 없어 보통 서브쿼리와 같음). PostgreSQL 방언은 뷰의 트리를 render 전에 고칩니다(`src/dialect/postgres/viewlateral.zig`). 질의를 따로 내리고 이름을 해석해(ddltype.zig의 probe처럼) 각 열 참조가 어느 FROM 항목의 것인지 알아낸 뒤, LATERAL 항목은 `json_each((SELECT xq_lateral_rows(c1, ...) FROM (s) AS xq_lateral(c1, ...)))`로, 그 열은 `xq_lateral_col(b.value, i, '타입')`(`src/dialect/lateral.zig`)으로, 다른 항목의 한정되지 않은 열은 한정한 이름으로, `*`는 열 목록으로 바꿉니다. 고칠 수 없는 것(CTE나 열 별칭이 붙은 서브쿼리 안의 LATERAL: 복사본으로 해석되어 참조를 알 수 없음)은 그대로 두어 render가 실패합니다.
+- 뷰의 SQLite 텍스트가 쓴 모양과 다르면(desugar 또는 LATERAL) PostgreSQL 방언은 `render.Renderer.keep`으로 쓴 그대로의 질의를 만들어 `CreateView.display`에 두고, render는 그것을 `/*xq_display:<뒤 질의 텍스트의 FNV-1a 해시>:<질의>*/`로 질의 앞에 넣습니다. SQLite는 텍스트를 그대로 저장하고 sqlite3는 주석을 무시합니다. `pg_get_viewdef()`는 `render.displayOf()`로 해시가 맞을 때만 그 질의를 deparse.zig에 넘기고, `ALTER TABLE ... RENAME`이 질의를 고쳐 해시가 어긋나면 주석을 뺀 텍스트를 씁니다.
 
 검증은 두 곳에서 합니다.
 

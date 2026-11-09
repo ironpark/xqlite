@@ -543,6 +543,9 @@ pub const Step = struct {
     d: i64 = -1,
     e: i64 = 0,
     sql: []const u8 = "",
+    /// What EXPLAIN calls the step (dml.zig's Plan.explain()); not
+    /// encoded. A step without one is not shown.
+    label: []const u8 = "",
 };
 
 /// The text of OP_SqlExec's 0x0008 of `steps`.
@@ -818,6 +821,45 @@ fn runStatementTimes(db: *Sqlite3, v: *Vdbe, sql: []const u8, f: *Failure, sink:
         if (rc != RC.OK) return failFromDb(db, f, rc);
         if (counted) v.n_change += api.changes(db);
     }
+}
+
+/// The lines of EXPLAIN of `sql` (a statement of the dialect, as a step
+/// runs it), added to the plan of the statement `p` compiles under its
+/// line `parent` (dml.zig's Plan.explain()). The statement's error is
+/// `p`'s.
+pub fn explainInto(p: *int.Parse, sql: []const u8, parent: i32) error{ OutOfMemory, Failed }!void {
+    const db = p.db;
+    const v = p.vdbe orelse return error.OutOfMemory;
+    const z = try std.fmt.allocPrintSentinel(db.gpa, "EXPLAIN {s}", .{sql}, 0);
+    defer db.gpa.free(z);
+    var stmt_opt: ?*Vdbe = null;
+    var rc = prepare.prepareV3Z(db, z, 0, &stmt_opt, null);
+    if (rc != RC.OK) return explainFailed(p, rc);
+    const stmt = stmt_opt orelse return;
+    defer _ = aux.finalize(stmt);
+    // The ids of its lines are the addresses of ours.
+    var ids: std.AutoHashMapUnmanaged(i64, i32) = .empty;
+    defer ids.deinit(db.gpa);
+    while (true) {
+        rc = api.step(stmt);
+        if (rc != RC.ROW) break;
+        const id = api.columnInt64(stmt, 0);
+        const up = api.columnInt64(stmt, 1);
+        const detail = api.columnText(stmt, 3) orelse "";
+        const msg = try v.alloc().dupeSentinel(u8, detail, 0);
+        const this = v.nOp();
+        _ = aux.addOp4(v, vi.OP.Explain, this, ids.get(up) orelse parent, 0, .{ .z = msg });
+        try ids.put(db.gpa, id, this);
+    }
+    if (rc != RC.DONE) return explainFailed(p, rc);
+}
+
+fn explainFailed(p: *int.Parse, rc: i32) error{ OutOfMemory, Failed } {
+    const db = p.db;
+    if (rc == RC.NOMEM or db.malloc_failed) return error.OutOfMemory;
+    const msg = try p.arena.dupe(u8, main_mod.errmsg(db));
+    util.errorMsgState(p, null, db.err_state, "{s}", .{msg});
+    return error.Failed;
 }
 
 fn failFromDb(db: *Sqlite3, f: *Failure, rc: i32) RunError {

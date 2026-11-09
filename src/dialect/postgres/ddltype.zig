@@ -20,6 +20,7 @@
 const std = @import("std");
 const tree = @import("../../ir/tree.zig");
 const lower = @import("../../ir/lower.zig");
+const render = @import("../../ir/render.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const build = @import("../../sql/build.zig");
 const select_mod = @import("../../sql/select.zig");
@@ -41,7 +42,23 @@ pub fn statement(ps: *Parser, stmt: tree.Stmt) Error!void {
     const p = ps.p orelse return;
     const a = ps.arena;
     switch (stmt) {
-        .create_view => |v| try probe(p, ps.c.sql, a, v.select, null),
+        .create_view => |v| {
+            try probe(p, ps.c.sql, a, v.select, null);
+            const viewlateral = @import("viewlateral.zig");
+            // The query as written, for pg_get_viewdef(), where its SQLite
+            // text is desugared or LATERAL rewritten (tree.CreateView.display).
+            const forms = viewlateral.forms(v.select);
+            if (forms.lateral or forms.desugared) {
+                var r: render.Renderer = .{ .p = p, .src = ps.c.sql, .keep = true };
+                r.select(v.select) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.Failed => error.ParseFailed,
+                };
+                v.display = r.out.items;
+            }
+            // LATERAL, which SQLite has no syntax for (viewlateral.zig).
+            if (forms.lateral) try viewlateral.rewrite(p, ps.c.sql, a, v.select);
+        },
         .create_table => |ct| {
             if (ct.as_select) |s| try probe(p, ps.c.sql, a, s, null);
             var exprs: std.ArrayList(*Expr) = .empty;
@@ -102,7 +119,19 @@ fn probeKeyed(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tr
     return probeWith(outer, src, a, s, null, keyed);
 }
 
-fn probeWith(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tree.Select, own_with: ?*tree.With, keyed: []const *Expr) Error!void {
+/// Lower and resolve `s` in a Parse of its own (no code, no authorizer;
+/// its errors stay in it, `outer`'s are not touched), filling `origins`
+/// (its want_from_items asks for the FROM items too), then
+/// `then(ctx, q)` with that Parse. Nothing is called if `s` does not
+/// lower.
+pub fn resolveApart(
+    outer: *int.Parse,
+    src: [:0]const u8,
+    s: *tree.Select,
+    origins: *lower.Origins,
+    ctx: anytype,
+    comptime then: fn (@TypeOf(ctx), *int.Parse) Error!void,
+) Error!void {
     const db = outer.db;
     var q: int.Parse = .{ .db = db, .arena = outer.arena, .tail = outer.tail, .outer_parse = outer };
     defer build.releaseTableRefs(&q);
@@ -112,17 +141,41 @@ fn probeWith(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tre
     const saved_parse = db.parse;
     db.parse = &q;
     defer db.parse = saved_parse;
-    var origins: lower.Origins = .{};
     var l: lower.Lowerer = .init(&q, src);
-    l.origins = &origins;
+    l.origins = origins;
     const x = l.select(s) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.Failed => return,
     };
     select_mod.selectPrep(&q, x, null);
     if (db.malloc_failed) return error.OutOfMemory;
-    var b: Back = .{ .o = &origins, .a = a, .p = &q, .outer = outer, .own_with = own_with };
-    try b.select(s);
+    return then(ctx, &q);
+}
+
+const Probe = struct {
+    outer: *int.Parse,
+    src: [:0]const u8,
+    a: std.mem.Allocator,
+    s: *tree.Select,
+    own_with: ?*tree.With,
+    keyed: []const *Expr,
+    origins: lower.Origins = .{},
+};
+
+fn probeWith(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tree.Select, own_with: ?*tree.With, keyed: []const *Expr) Error!void {
+    var pr: Probe = .{ .outer = outer, .src = src, .a = a, .s = s, .own_with = own_with, .keyed = keyed };
+    return resolveApart(outer, src, s, &pr.origins, &pr, probed);
+}
+
+/// probeWith() once `pr.s` is resolved in `q`.
+fn probed(pr: *Probe, q: *int.Parse) Error!void {
+    const outer = pr.outer;
+    const src = pr.src;
+    const a = pr.a;
+    const keyed = pr.keyed;
+    const db = outer.db;
+    var b: Back = .{ .o = &pr.origins, .a = a, .p = q, .outer = outer, .own_with = pr.own_with };
+    try b.select(pr.s);
     // A string literal the probe's core could not read as the boolean it
     // met (`coalesce(b, 'maybe')`, `VALUES (true), ('bad')`): the
     // statement's error, at the literal, as PostgreSQL's CREATE VIEW and

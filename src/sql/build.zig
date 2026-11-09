@@ -2027,6 +2027,16 @@ pub fn deferForeignKey(p: *Parse, is_deferred: bool) void {
     fk.is_deferred = is_deferred;
 }
 
+/// xqlite: deferForeignKey() of a DEFERRABLE clause, which the foreign
+/// key keeps (FKey.is_deferrable).
+pub fn deferrableForeignKey(p: *Parse, is_deferred: bool) void {
+    deferForeignKey(p, is_deferred);
+    const t = p.new_table orelse return;
+    if (!t.isOrdinary()) return;
+    const fk = t.u.tab.fkey orelse return;
+    fk.is_deferrable = true;
+}
+
 /// Port of sqlite3AllocateIndexObject(): an index with room for `n_col`
 /// columns, `n_col - 1` of them key columns.
 pub fn allocateIndexObject(a: Allocator, n_col: usize, table: *Table, name: []const u8) Oom!*Index {

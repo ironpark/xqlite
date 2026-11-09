@@ -10,7 +10,10 @@
 //!    (OFFSET o: row_number() > o AND rank() <= o + n);
 //!  - GROUPING SETS (ROLLUP, CUBE, as the frontend expanded them): a
 //!    UNION ALL of one grouped query per set, the expressions of the
-//!    other sets NULL and GROUPING() a constant in each;
+//!    other sets NULL and GROUPING() a constant in each; with window
+//!    functions, DISTINCT ON or WITH TIES, that union a derived table
+//!    whose columns are the grouped expressions the outer query's window
+//!    functions, DISTINCT ON and ORDER BY read;
 //!  - INTERSECT ALL / EXCEPT ALL: INTERSECT / EXCEPT of the operands'
 //!    rows numbered within their duplicates (row_number() OVER
 //!    (PARTITION BY every column)).
@@ -81,14 +84,13 @@ pub const Desugar = struct {
         x.body = try d.body(s.body, true);
         if (x.body.* == .core) {
             const c = x.body.core;
+            if (c.grouping_sets != null) {
+                if (x.with_ties or c.distinct_on.len > 0 or d.hasWindow(&x, c)) return d.groupedWindows(&x, c);
+                return d.groupingSets(&x, c);
+            }
             if (c.distinct_on.len > 0) {
-                if (c.grouping_sets != null) return d.unsupported(c.pos, "DISTINCT ON with GROUPING SETS");
                 if (x.with_ties) return d.unsupported(c.pos, "DISTINCT ON with FETCH ... WITH TIES");
                 return d.distinctOn(&x, c);
-            }
-            if (c.grouping_sets != null) {
-                if (x.with_ties) return d.unsupported(c.pos, "GROUPING SETS with FETCH ... WITH TIES");
-                return d.groupingSets(&x, c);
             }
         }
         if (x.with_ties) return d.withTies(&x);
@@ -322,12 +324,16 @@ pub const Desugar = struct {
         return e;
     }
 
-    /// Whether `f` is an aggregate call (not a window function).
     fn isAggregate(d: *Desugar, f: *const tree.Func) bool {
+        return aggregateCall(d.p, f);
+    }
+
+    /// Whether `f` is an aggregate call (not a window function).
+    pub fn aggregateCall(p: *int.Parse, f: *const tree.Func) bool {
         if (f.over != null) return false;
         if (f.distinct or f.filter != null or f.order_by.len > 0 or f.star) return true;
-        const name = lower.functionName(d.p, f.name.text, f.dialect, false) catch return false;
-        const def = callback.findFunction(d.p.db, name, @intCast(f.args.len), d.p.db.enc, false) orelse return false;
+        const name = lower.functionName(p, f.name.text, f.dialect, false) catch return false;
+        const def = callback.findFunction(p.db, name, @intCast(f.args.len), p.db.enc, false) orelse return false;
         return def.x_finalize != null;
     }
 
@@ -335,16 +341,25 @@ pub const Desugar = struct {
         return f.dialect == null and f.over == null and std.ascii.eqlIgnoreCase(f.name.text, "grouping");
     }
 
-    /// Whether `e` has a call that `pred` says yes to (not looking into
-    /// subqueries).
     fn hasCall(d: *Desugar, e: *const Expr, comptime pred: fn (*Desugar, *const tree.Func) bool) bool {
-        if (e.kind == .func and pred(d, e.kind.func)) return true;
+        return callIn(d, e, pred);
+    }
+
+    /// Whether `e` has a call that `pred` (given `ctx`) says yes to (not
+    /// looking into subqueries).
+    pub fn callIn(ctx: anytype, e: *const Expr, comptime pred: fn (@TypeOf(ctx), *const tree.Func) bool) bool {
+        if (e.kind == .func and pred(ctx, e.kind.func)) return true;
         var it = tree.Children.of(e);
-        while (it.next()) |x| if (d.hasCall(x, pred)) return true;
+        while (it.next()) |x| if (callIn(ctx, x, pred)) return true;
         return false;
     }
 
-    fn isWindow(_: *Desugar, f: *const tree.Func) bool {
+    fn isWindow(d: *Desugar, f: *const tree.Func) bool {
+        return windowCall(d.p, f);
+    }
+
+    /// Whether `f` is a window function call.
+    pub fn windowCall(_: *int.Parse, f: *const tree.Func) bool {
         return f.over != null;
     }
 
@@ -377,7 +392,8 @@ pub const Desugar = struct {
                 if (sameExpr(it.expr, e)) break;
             } else {
                 if (skipped) return d.fail(c.distinct_on[k].pos, .of("42P10"), "SELECT DISTINCT ON expressions must match initial ORDER BY expressions", .{});
-                try w_order.append(ar, .{ .expr = e });
+                // (Ascending, NULLs last: PostgreSQL's default order.)
+                try w_order.append(ar, .{ .expr = e, .nulls = .last });
             }
         }
         const spec = try tree.new(ar, tree.WindowSpec, .{ .partition = on, .order_by = w_order.items });
@@ -470,9 +486,7 @@ pub const Desugar = struct {
 
     fn groupingSets(d: *Desugar, s: *const tree.Select, c: *tree.Core) Error!*tree.Select {
         const ar = d.a();
-        const sets = c.grouping_sets.?;
         if (!named(c.cols)) return d.unsupported(c.pos, "* with GROUPING SETS");
-        for (c.cols) |rc| if (d.hasCall(rc.expr.e, isWindow)) return d.unsupported(rc.expr.e.pos, "a window function with GROUPING SETS");
         const groups = try ar.alloc(*Expr, c.group_by.len);
         for (c.group_by, groups) |g, *x| x.* = try d.resultRef(c, g, "GROUP BY", false);
         const order = try ar.alloc(tree.SortItem, s.order_by.len);
@@ -480,46 +494,12 @@ pub const Desugar = struct {
             o.* = it;
             o.expr = try d.resultRef(c, it.expr, "ORDER BY", true);
         }
-        var all: ?*tree.Body = null;
-        for (sets) |set| {
-            const in_set = try ar.alloc(bool, groups.len);
-            @memset(in_set, false);
-            for (set) |i| in_set[i] = true;
-            var sub: Subst = .{ .d = d, .groups = groups, .in_set = in_set };
-            const cols = try ar.alloc(tree.ResultCol, c.cols.len + order.len);
-            var has_agg = false;
-            for (c.cols, 0..) |rc, i| {
-                cols[i] = .{ .expr = .{ .e = try sub.expr(rc.expr.e), .alias = .{ .text = try d.label("xq_c", i), .pos = nowhere } } };
-                if (d.hasCall(rc.expr.e, isAggregate)) has_agg = true;
-            }
-            for (order, 0..) |it, j| {
-                cols[c.cols.len + j] = .{ .expr = .{ .e = try sub.expr(it.expr), .alias = .{ .text = try d.label("xq_o", j), .pos = nowhere } } };
-            }
-            const gb = try ar.alloc(*Expr, set.len);
-            for (set, gb) |i, *g| g.* = groups[i];
-            const having: ?*Expr = if (c.having) |h| try sub.expr(h) else null;
-            if (having) |h| if (d.hasCall(h, isAggregate)) {
-                has_agg = true;
-            };
-            // The empty set is one group of all rows, even of none: an
-            // aggregate query (CASE WHEN count(*) >= 0 THEN col END).
-            if (set.len == 0 and !has_agg) {
-                const count = try tree.new(ar, tree.Func, .{ .name = .{ .text = "count", .pos = nowhere }, .star = true });
-                const cond = try d.compare(.ge, try tree.expr(ar, nowhere, nowhere, .{ .func = count }), try d.intConst(0));
-                const whens = try ar.alloc(*Expr, 2);
-                whens[0] = cond;
-                whens[1] = cols[0].expr.e;
-                cols[0].expr.e = try tree.expr(ar, nowhere, nowhere, .{ .case = .{ .operand = null, .whens = whens, .@"else" = null } });
-            }
-            var branch = c.*;
-            branch.distinct = false;
-            branch.cols = cols;
-            branch.group_by = gb;
-            branch.grouping_sets = null;
-            branch.having = having;
-            const b = try d.coreBody(branch);
-            all = if (all) |prev| try tree.new(ar, tree.Body, .{ .compound = .{ .op = .@"union", .all = !c.distinct, .left = prev, .right = b } }) else b;
-        }
+        // The result columns xq_c<n> (whether the set's query is an
+        // aggregate by them), the sort keys xq_o<n>.
+        const cols = try ar.alloc(tree.ResultCol, c.cols.len + order.len);
+        for (c.cols, 0..) |rc, i| cols[i] = .{ .expr = .{ .e = rc.expr.e, .alias = .{ .text = try d.label("xq_c", i), .pos = nowhere } } };
+        for (order, 0..) |it, j| cols[c.cols.len + j] = .{ .expr = .{ .e = it.expr, .alias = .{ .text = try d.label("xq_o", j), .pos = nowhere } } };
+        const all = try d.setsUnion(c.*, groups, cols, c.cols.len, !c.distinct);
         const outer = try ar.alloc(tree.ResultCol, c.cols.len);
         for (c.cols, outer, 0..) |rc, *o, i| {
             o.* = .{ .expr = .{ .e = try d.colRef(try d.label("xq_c", i)), .alias = .{ .text = outName(rc).?, .pos = nowhere } } };
@@ -529,10 +509,139 @@ pub const Desugar = struct {
             o.* = it;
             o.expr = try d.colRef(try d.label("xq_o", j));
         }
-        const sub = try d.selectOf(all.?, c.pos);
+        const sub = try d.selectOf(all, c.pos);
         const body_ = try d.coreBody(.{ .cols = outer, .from = try d.subqueryItem(sub, "xq_g", &.{}), .pos = c.pos });
         return tree.new(ar, tree.Select, .{ .with = s.with, .body = body_, .order_by = outer_order, .limit = s.limit, .offset = s.offset, .pos = s.pos, .src = s.src });
     }
+
+    /// The UNION [ALL] of the queries of `base`'s grouping sets: each
+    /// `base` grouped by its set, result columns `cols` and HAVING as
+    /// Subst makes them. The empty set is one group of all rows, even of
+    /// none: unless one of the first `n_agg` columns or HAVING calls an
+    /// aggregate, its query is made one (CASE WHEN count(*) >= 0 THEN col
+    /// END).
+    fn setsUnion(d: *Desugar, base: tree.Core, groups: []const *Expr, cols: []const tree.ResultCol, n_agg: usize, all: bool) Error!*tree.Body {
+        const ar = d.a();
+        var out: ?*tree.Body = null;
+        for (base.grouping_sets.?) |set| {
+            const in_set = try ar.alloc(bool, groups.len);
+            @memset(in_set, false);
+            for (set) |i| in_set[i] = true;
+            var sub: Subst = .{ .d = d, .groups = groups, .in_set = in_set };
+            const set_cols = try ar.dupe(tree.ResultCol, cols);
+            var has_agg = false;
+            for (cols, set_cols, 0..) |rc, *o, i| {
+                o.expr.e = try sub.expr(rc.expr.e);
+                if (i < n_agg and d.hasCall(rc.expr.e, isAggregate)) has_agg = true;
+            }
+            const gb = try ar.alloc(*Expr, set.len);
+            for (set, gb) |i, *g| g.* = groups[i];
+            const having: ?*Expr = if (base.having) |h| try sub.expr(h) else null;
+            if (having) |h| if (d.hasCall(h, isAggregate)) {
+                has_agg = true;
+            };
+            if (set.len == 0 and !has_agg) {
+                const whens = try ar.alloc(*Expr, 2);
+                whens[0] = try d.compare(.ge, try d.countStar(), try d.intConst(0));
+                whens[1] = set_cols[0].expr.e;
+                set_cols[0].expr.e = try tree.expr(ar, nowhere, nowhere, .{ .case = .{ .operand = null, .whens = whens, .@"else" = null } });
+            }
+            var branch = base;
+            branch.distinct = false;
+            branch.cols = set_cols;
+            branch.group_by = gb;
+            branch.grouping_sets = null;
+            branch.having = having;
+            const b = try d.coreBody(branch);
+            out = if (out) |prev| try tree.new(ar, tree.Body, .{ .compound = .{ .op = .@"union", .all = all, .left = prev, .right = b } }) else b;
+        }
+        return out.?;
+    }
+
+    /// count(*).
+    fn countStar(d: *Desugar) Error!*Expr {
+        const ar = d.a();
+        const count = try tree.new(ar, tree.Func, .{ .name = .{ .text = "count", .pos = nowhere }, .star = true });
+        return tree.expr(ar, nowhere, nowhere, .{ .func = count });
+    }
+
+    /// Whether the result columns or the ORDER BY of `c` call a window
+    /// function.
+    fn hasWindow(d: *Desugar, s: *const tree.Select, c: *const tree.Core) bool {
+        for (c.cols) |rc| if (rc == .expr and d.hasCall(rc.expr.e, isWindow)) return true;
+        for (s.order_by) |it| if (d.hasCall(it.expr, isWindow)) return true;
+        return false;
+    }
+
+    /// GROUPING SETS with window functions, DISTINCT ON or WITH TIES:
+    /// SELECT cols FROM (the UNION ALL of the sets' queries) AS xq_g ...,
+    /// the grouped query's expressions that are not in a window function
+    /// call (the operands of the calls, the result columns and sort keys
+    /// without one) columns xq_v<n> of the union (HAVING applied there);
+    /// the window functions, DISTINCT [ON], ORDER BY and LIMIT those of
+    /// the outer query, desugared as such.
+    fn groupedWindows(d: *Desugar, s: *const tree.Select, c: *tree.Core) Error!*tree.Select {
+        const ar = d.a();
+        if (!named(c.cols)) return d.unsupported(c.pos, "* with GROUPING SETS");
+        const groups = try ar.alloc(*Expr, c.group_by.len);
+        for (c.group_by, groups) |g, *x| x.* = try d.resultRef(c, g, "GROUP BY", false);
+        var lift: Lift = .{ .d = d };
+        const cols = try ar.alloc(tree.ResultCol, c.cols.len);
+        for (c.cols, cols) |rc, *o| {
+            o.* = .{ .expr = .{ .e = try lift.expr(rc.expr.e), .alias = .{ .text = outName(rc).?, .pos = nowhere } } };
+        }
+        // A position or a result column's name stays one (of the outer
+        // query's same result columns).
+        const order = try ar.alloc(tree.SortItem, s.order_by.len);
+        for (s.order_by, order) |it, *o| {
+            o.* = it;
+            if (try d.resultRef(c, it.expr, "ORDER BY", true) == it.expr) o.expr = try lift.expr(it.expr);
+        }
+        const on = try ar.alloc(*Expr, c.distinct_on.len);
+        for (c.distinct_on, on) |e, *o| {
+            o.* = if (try d.resultRef(c, e, "DISTINCT ON", true) == e) try lift.expr(e) else e;
+        }
+        const windows = try ar.alloc(tree.NamedWindow, c.windows.len);
+        for (c.windows, windows) |w, *o| {
+            var spec = w.spec.*;
+            spec.partition = try ar.dupe(*Expr, spec.partition);
+            for (spec.partition) |*e| e.* = try lift.expr(e.*);
+            spec.order_by = try ar.dupe(tree.SortItem, spec.order_by);
+            for (spec.order_by) |*it| it.expr = try lift.expr(it.expr);
+            o.* = .{ .name = w.name, .spec = try tree.new(ar, tree.WindowSpec, spec) };
+        }
+        // A union of no columns has one: count(*), an aggregate for the
+        // empty set too.
+        if (lift.items.items.len == 0) try lift.items.append(ar, try d.countStar());
+        const items = lift.items.items;
+        const inner = try ar.alloc(tree.ResultCol, items.len);
+        for (items, inner, 0..) |e, *o, j| o.* = .{ .expr = .{ .e = e, .alias = .{ .text = try d.label("xq_v", j), .pos = nowhere } } };
+        var base = c.*;
+        base.distinct_on = &.{};
+        base.windows = &.{};
+        const all = try d.setsUnion(base, groups, inner, inner.len, true);
+        const sub = try d.selectOf(all, c.pos);
+        const body_ = try d.coreBody(.{ .distinct = c.distinct, .distinct_on = on, .cols = cols, .from = try d.subqueryItem(sub, "xq_g", &.{}), .windows = windows, .pos = c.pos });
+        const outer = try tree.new(ar, tree.Select, .{ .with = s.with, .body = body_, .order_by = order, .limit = s.limit, .offset = s.offset, .with_ties = s.with_ties, .pos = s.pos, .src = s.src });
+        return @constCast(try d.select(outer));
+    }
+
+    /// The expressions of a grouped query as the outer query's of
+    /// groupedWindows(): each operand without a window function call a
+    /// column xq_v<n> of the grouped query, `items` (once each).
+    const Lift = struct {
+        d: *Desugar,
+        items: std.ArrayList(*Expr) = .empty,
+
+        fn expr(x: *Lift, e: *Expr) Error!*Expr {
+            if (x.d.hasCall(e, isWindow)) return mapChildren(x.d.a(), e, x, Lift.expr);
+            const j = indexOf(x.items.items, e) orelse blk: {
+                try x.items.append(x.d.a(), e);
+                break :blk x.items.items.len - 1;
+            };
+            return x.d.colRef(try x.d.label("xq_v", j));
+        }
+    };
 
     /// The expressions of a query of one grouping set: those of the other
     /// sets NULL (but in aggregates' arguments), GROUPING() its value.
@@ -703,6 +812,11 @@ fn mapChildren(ar: std.mem.Allocator, e: *Expr, ctx: anytype, comptime f: anytyp
             var nf = fp.*.*;
             nf.args = try M.list(ar, ctx, nf.args, &changed);
             nf.filter = try M.opt(ctx, nf.filter, &changed);
+            if (nf.order_by.len > 0) {
+                const aob = try ar.dupe(tree.SortItem, nf.order_by);
+                for (aob) |*it| it.expr = try M.one(ctx, it.expr, &changed);
+                nf.order_by = aob;
+            }
             if (nf.over) |w| {
                 var nw = w.*;
                 nw.partition = try M.list(ar, ctx, nw.partition, &changed);

@@ -411,7 +411,19 @@ const core_functions = std.StaticStringMap(Ret).initComptime(.{
     // boolean, as the IR's LIKE is (lower.zig's typeOf()).
     .{ "like", Ret{ .rule = isBoolean } },
     .{ "glob", Ret{ .rule = isBoolean } },
+    // A column of a LATERAL subquery in a view's text
+    // (dialect/lateral.zig): of the type its third argument spells.
+    .{ "xq_lateral_col", Ret{ .rule = spelledType } },
 });
+
+/// The type the constant string of a call's third argument spells in
+/// the dialect.
+fn spelledType(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len < 3) return unknown;
+    const e = args[2].e;
+    if (e.op != TK.STRING or !e.useUToken()) return unknown;
+    return c.named(e.u.token orelse return unknown);
+}
 
 fn isBoolean(_: *Ctx, _: []const Operand) Oom!TypeId {
     return boolean;

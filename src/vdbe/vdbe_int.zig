@@ -625,6 +625,10 @@ pub const Vdbe = struct {
     /// A query of no result columns (Parse.xq_no_columns): its rows are
     /// its result, though it has no column.
     xq_no_columns: bool = false,
+    /// Parse.xq_binary_rows: the rows of a FETCH from a binary cursor,
+    /// which a wire protocol sends in the binary format
+    /// (engine.binaryRows()).
+    xq_binary_rows: bool = false,
     /// xqlite: the notices the statement reports each time it runs
     /// (Parse.xq_notices, int.Notice), in the program's memory.
     xq_notices: []const int.Notice = &.{},

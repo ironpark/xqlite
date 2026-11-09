@@ -601,13 +601,30 @@ pub fn transactionEnded(db: *Sqlite3, committed: bool) void {
     if (comptime Dialect.postgres.built()) {
         @import("postgres/cursor.zig").ended(db, committed);
         @import("postgres/session.zig").transactionEnded(db, committed);
+        @import("postgres/setconstraints.zig").transactionEnded(db);
     }
 }
 
 /// A RELEASE or ROLLBACK TO of a savepoint ran (OP_Savepoint): what
-/// PostgreSQL's cursors declared after the savepoint do.
+/// PostgreSQL's cursors declared after the savepoint do, and its SET
+/// CONSTRAINTS.
 pub fn savepointEnded(db: *Sqlite3, rolled_back: bool) void {
-    if (comptime Dialect.postgres.built()) @import("postgres/cursor.zig").savepointEnded(db, rolled_back);
+    if (comptime Dialect.postgres.built()) {
+        @import("postgres/cursor.zig").savepointEnded(db, rolled_back);
+        @import("postgres/setconstraints.zig").savepointEnded(db, rolled_back);
+    }
+}
+
+/// Whether foreign key `fk` counts its violations as deferred in the
+/// statement `p` compiles (fkey.zig), when the dialect decides it:
+/// PostgreSQL's SET CONSTRAINTS of the open transaction. Null: its own
+/// DEFERRABLE INITIALLY clause decides (FKey.is_deferred), as always in
+/// SQLite's dialect, whose programs do not change.
+pub fn fkDeferred(p: *Parse, fk: *const int.FKey) ?bool {
+    if (comptime Dialect.postgres.built()) {
+        if (p.db.xq.lang.dialect == .postgres) return @import("postgres/setconstraints.zig").deferred(p, fk);
+    }
+    return null;
 }
 
 /// The hooks of the dialect the connection compiles in.
@@ -766,6 +783,7 @@ pub const common_engine_functions = [_][]const FuncDef{
     &@import("decimal_sql.zig").engine_functions,
     &@import("variance.zig").engine_functions,
     &@import("stats.zig").engine_functions,
+    &@import("lateral.zig").engine_functions,
 };
 
 const engine_function_map = blk: {
@@ -813,7 +831,7 @@ pub fn qualifiedFunctionName(arena: std.mem.Allocator, d: Dialect, name: []const
 /// The overloads of each name of `defs`, which are next to each other
 /// (func.checkTable()).
 fn functionMap(comptime defs: []const FuncDef) FunctionMap {
-    @setEvalBranchQuota(100_000);
+    @setEvalBranchQuota(200_000);
     var kvs: [defs.len]struct { []const u8, []const FuncDef } = undefined;
     var n: usize = 0;
     var i: usize = 0;
@@ -853,6 +871,7 @@ test {
     _ = @import("like.zig");
     _ = @import("decimal_sql.zig");
     _ = @import("stats.zig");
+    _ = @import("lateral.zig");
     _ = @import("libm.zig");
     _ = @import("abi.zig");
     _ = @import("test.zig");

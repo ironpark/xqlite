@@ -31,3 +31,6 @@ SELECT xq_corr(column2, column1), xq_covar_pop(column2, column1), xq_covar_samp(
 SELECT xq_any_value(column1), xq_percentile_cont(0.3, column1 ORDER BY column1), xq_percentile_disc(0.3, column1 ORDER BY column1), xq_mode(column1 ORDER BY column1) FROM (VALUES (NULL), (5), (2), (2), (1));
 SELECT xq_hypo_rank(0, 2, column1, column1 < 2, column1 > 2), xq_hypo_dense_rank(0, 2, column1, column1 < 2, column1 > 2), xq_hypo_percent_rank(0, 2, column1, column1 < 2, column1 > 2), xq_hypo_cume_dist(1, 2, column1, column1 < 2, column1 > 2) FROM (VALUES (1), (1), (2), (5));
 SELECT xq_percentile_cont(1.5, column1 ORDER BY column1) FROM (VALUES (1));
+SELECT xq_lateral_rows(a, b, c), quote(xq_lateral_rows(a) FILTER (WHERE 0)) FROM (SELECT 1 AS a, 1.5 AS b, 'é' AS c UNION ALL SELECT NULL, x'00ff', -9223372036854775808);
+SELECT quote(xq_lateral_col(value, 0)), quote(xq_lateral_col(value, 1)), quote(xq_lateral_col(value, 2, 'bigint')), quote(xq_lateral_col(value, 3)), quote(xq_lateral_col(NULL, 0)) FROM json_each((SELECT xq_lateral_rows(a, b, c) FROM (SELECT 1 AS a, 1.5 AS b, 'é' AS c UNION ALL SELECT NULL, x'00ff', -9223372036854775808)));
+SELECT xq_lateral_col('I00', 0);

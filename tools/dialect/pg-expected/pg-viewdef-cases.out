@@ -1,0 +1,107 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-viewdef-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case e5adc3204b85d0ca LATERAL view: a column of the subquery by an item before it
+id|n
+1|11
+2|31
+3|21
+4|21
+5|6
+(5 rows)
+pg_typeof
+integer
+(1 row)
+==== case 8e1313127b5ae04a LEFT JOIN LATERAL ... ON true in a view: the next row of each group
+id|nid|big
+1|2|t
+2||
+3|4|t
+4||
+5||
+(5 rows)
+id
+2
+4
+5
+(3 rows)
+==== case 366c294471fdef6d LEFT JOIN LATERAL with a condition on the subquery's column
+id|m
+1|30
+2|30
+3|
+4|
+5|
+(5 rows)
+==== case cfb0203238294197 LATERAL view of several rows per row, with types kept
+id|n2|bb|xx|ff|tt
+1|1.50|f||0.01|
+1|3.00|t|2|0.1|é!
+2||f||-2.5e+300|
+2||t||-2.5e+299|
+(4 rows)
+pg_typeof|pg_typeof|pg_typeof|pg_typeof|pg_typeof
+numeric|boolean|integer|double precision|text
+(1 row)
+==== case f04eb44366e48a7b LATERAL view: SELECT * and an unqualified column next to json_each()'s names
+id|value|key|v2|k2
+1|10|a|20|a!
+2|20|b|40|b!
+(2 rows)
+id|value|v2
+2|20|40
+(1 row)
+==== case 4225a5a91a667a0b LATERAL view over a set-returning function and a later LATERAL
+id|k|sq
+1|1|1
+1|2|4
+2|1|1
+(3 rows)
+==== case f04b61827b4c18ae pg_get_viewdef() of a DISTINCT ON view
+pg_get_viewdef
+ SELECT DISTINCT ON (d) id,
+    d
+   FROM e
+  ORDER BY d, id DESC;
+(1 row)
+pg_get_viewdef
+ SELECT DISTINCT ON (d) id,
+    d
+   FROM e
+  ORDER BY d, id DESC;
+(1 row)
+==== case 5b18a6f546d8cf16 pg_get_viewdef() of GROUPING SETS, ROLLUP and CUBE views
+pg_get_viewdef
+ SELECT d,
+    s,
+    count(*) AS count
+   FROM e
+  GROUP BY GROUPING SETS ((d), (s), ());
+(1 row)
+pg_get_viewdef
+ SELECT d,
+    sum(s) AS sum
+   FROM e
+  GROUP BY ROLLUP(d);
+(1 row)
+pg_get_viewdef
+ SELECT d,
+    s,
+    count(*) AS count
+   FROM e
+  GROUP BY CUBE(d, s);
+(1 row)
+==== case 09901626829009bc pg_get_viewdef() of a WITH TIES view
+pg_get_viewdef
+ SELECT id,
+    d
+   FROM e
+  ORDER BY d
+ FETCH FIRST (2) ROWS WITH TIES;
+(1 row)
+pg_get_viewdef
+ SELECT id
+   FROM e
+  ORDER BY d
+ OFFSET 1
+ FETCH FIRST (2) ROWS WITH TIES;
+(1 row)

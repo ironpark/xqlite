@@ -1,0 +1,170 @@
+-- Differential cases of MERGE into a view (PostgreSQL 17 and later):
+-- automatically updatable views written through their table, and the
+-- errors of the views that are not (xqt dialect-diff pg
+-- tools/dialect/pg-merge-view-cases.txt), in the format of
+-- pg-cases.txt: each case starts with a "-- case:" line and runs on an
+-- empty database, in PostgreSQL (psql, unaligned, with headers) and in
+-- `xqlite sql` with `.dialect postgres`; the rows, column names and
+-- error messages must be the same. A case of errors prints nothing else
+-- (psql's stderr and stdout do not keep their order through podman).
+-- The expected output is PostgreSQL 18's.
+
+-- case: MERGE into a view: every action, RETURNING merge_action()
+CREATE TABLE t (id int PRIMARY KEY, a int, b text DEFAULT 'd');
+INSERT INTO t VALUES (1, 10, 'x'), (2, 2, 'y'), (3, 30, 'z'), (5, 50, 'w');
+CREATE VIEW v AS SELECT id, a FROM t WHERE a > 5;
+MERGE INTO v USING (VALUES (1, 11), (3, 0), (4, 40)) AS s(id, a) ON v.id = s.id
+WHEN MATCHED AND s.a = 0 THEN DELETE
+WHEN MATCHED THEN UPDATE SET a = s.a + v.a
+WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.a)
+WHEN NOT MATCHED BY SOURCE THEN UPDATE SET a = v.a + 100
+RETURNING merge_action(), v.*, s.*;
+SELECT * FROM t ORDER BY id;
+
+-- case: MERGE into a view: the rows its WHERE leaves out are not matched
+CREATE TABLE t (id int PRIMARY KEY, a int);
+INSERT INTO t VALUES (1, 1), (2, 20);
+CREATE VIEW v AS SELECT id, a FROM t WHERE a > 5;
+MERGE INTO v USING (VALUES (1), (2)) AS s(id) ON v.id = s.id
+WHEN MATCHED THEN UPDATE SET a = v.a + 1
+WHEN NOT MATCHED THEN DO NOTHING
+WHEN NOT MATCHED BY SOURCE THEN DELETE
+RETURNING merge_action(), v.id, v.a;
+SELECT * FROM t ORDER BY id;
+
+-- case: MERGE into a view: renamed columns, an alias, no RETURNING
+CREATE TABLE t (id int PRIMARY KEY, a int, note text DEFAULT 'none');
+INSERT INTO t VALUES (1, 10), (2, 20);
+CREATE VIEW vr AS SELECT a AS x, id AS k FROM t;
+MERGE INTO vr AS r USING (VALUES (1, 5), (9, 7)) AS s(k, x) ON r.k = s.k
+WHEN MATCHED THEN UPDATE SET x = s.x + r.x
+WHEN NOT MATCHED THEN INSERT (k, x) VALUES (s.k, s.x);
+SELECT * FROM t ORDER BY id;
+MERGE INTO vr USING (VALUES (2, 1)) AS s(k, x) ON vr.k = s.k
+WHEN MATCHED THEN UPDATE SET (x, k) = (s.x, 20)
+RETURNING *;
+SELECT * FROM t ORDER BY id;
+
+-- case: MERGE into a view: columns that are not the table's are read, not written
+CREATE TABLE t (id int PRIMARY KEY, a int);
+INSERT INTO t VALUES (1, 10);
+CREATE VIEW ve AS SELECT id, a + 1 AS a1, a, 'k' || id AS label FROM t;
+MERGE INTO ve USING (VALUES (1, 4), (7, 2)) AS s(id, a) ON ve.id = s.id
+WHEN MATCHED AND ve.a1 > 5 THEN UPDATE SET a = s.a * ve.a1
+WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.id, s.a)
+RETURNING merge_action(), ve.*;
+MERGE INTO ve USING (VALUES (1)) AS s(id) ON ve.id = s.id
+WHEN MATCHED THEN DELETE
+RETURNING ve.label, ve.a1;
+SELECT * FROM t ORDER BY id;
+
+-- case: MERGE into a view: DEFAULT, DEFAULT VALUES, literals and parameters' types
+CREATE TABLE t (id int DEFAULT 99, a int DEFAULT 5, n numeric(6,2), s varchar(3));
+INSERT INTO t VALUES (1, 10, 1.5, 'abc');
+CREATE VIEW v AS SELECT s, n, a, id FROM t;
+MERGE INTO v USING (VALUES (1)) AS x(id) ON v.id = x.id
+WHEN MATCHED THEN UPDATE SET a = DEFAULT, n = '2.345', s = 'xy';
+MERGE INTO v USING (VALUES (2)) AS x(id) ON v.id = x.id
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+SELECT * FROM t ORDER BY id;
+
+-- case: MERGE into a view: a value too long for the column
+CREATE TABLE t (id int PRIMARY KEY, a int, s varchar(3));
+INSERT INTO t VALUES (1, 10, 'abc');
+CREATE VIEW v AS SELECT id, a, s FROM t;
+MERGE INTO v USING (VALUES (1)) AS x(id) ON v.id = x.id WHEN MATCHED THEN UPDATE SET s = 'abcd';
+
+-- case: MERGE into a view: the table's constraints
+CREATE TABLE t (id int PRIMARY KEY, a int CHECK (a > 0));
+INSERT INTO t VALUES (1, 10), (2, 20);
+CREATE VIEW v AS SELECT id, a FROM t;
+MERGE INTO v USING (VALUES (1, -1)) AS s(id, a) ON v.id = s.id WHEN MATCHED THEN UPDATE SET a = s.a;
+MERGE INTO v USING (VALUES (3, 1)) AS s(id, a) ON v.id = s.id + 10 WHEN NOT MATCHED THEN INSERT VALUES (2, s.a);
+MERGE INTO v USING (VALUES (1), (1)) AS s(id) ON v.id = s.id WHEN MATCHED THEN DELETE;
+
+-- case: MERGE into a view: several rows, the view's values in SET
+CREATE TABLE t (id int PRIMARY KEY, a int);
+INSERT INTO t VALUES (1, 10), (2, 20);
+CREATE VIEW v AS SELECT id, a FROM t;
+MERGE INTO v USING (VALUES (1, 1), (2, 2)) AS s(id, a) ON v.id = s.id
+WHEN MATCHED THEN UPDATE SET a = v.a + s.a
+RETURNING merge_action(), v.*;
+SELECT * FROM t ORDER BY id;
+
+-- case: MERGE into a view of a table of a schema, in a data-modifying WITH
+CREATE SCHEMA app;
+CREATE TABLE app.items (id int PRIMARY KEY, qty int);
+INSERT INTO app.items VALUES (1, 1);
+CREATE VIEW app.big AS SELECT i.id, i.qty FROM app.items i WHERE i.qty < 100;
+WITH m AS (MERGE INTO app.big b USING (VALUES (1, 5), (2, 6)) AS s(id, qty) ON b.id = s.id
+  WHEN MATCHED THEN UPDATE SET qty = b.qty + s.qty
+  WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.qty)
+  RETURNING merge_action() AS act, b.*)
+SELECT * FROM m ORDER BY id;
+SELECT * FROM app.items ORDER BY id;
+
+-- case: MERGE into a view: views that are not automatically updatable
+CREATE TABLE t (id int PRIMARY KEY, a int);
+CREATE VIEW vd AS SELECT DISTINCT id, a FROM t;
+CREATE VIEW vg AS SELECT a, count(*) AS n FROM t GROUP BY a;
+CREATE VIEW vj AS SELECT t.id, x.a FROM t JOIN t x ON x.id = t.id;
+CREATE VIEW vl AS SELECT id FROM t LIMIT 3;
+CREATE VIEW vu AS SELECT id FROM t UNION SELECT a FROM t;
+CREATE VIEW vw AS SELECT id, row_number() OVER () AS r FROM t;
+CREATE VIEW vc AS WITH q AS (SELECT id FROM t) SELECT id FROM q;
+CREATE VIEW va AS SELECT max(a) AS m FROM t;
+MERGE INTO vd USING (VALUES (1, 1)) AS s(id, a) ON vd.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (1, 1) WHEN MATCHED THEN DELETE;
+MERGE INTO vd USING (VALUES (1, 1)) AS s(id, a) ON vd.id = s.id WHEN MATCHED AND false THEN DO NOTHING WHEN MATCHED THEN UPDATE SET a = 1;
+MERGE INTO vg USING (VALUES (1)) AS s(a) ON vg.a = s.a WHEN MATCHED THEN DELETE;
+MERGE INTO vj USING (VALUES (1)) AS s(a) ON vj.a = s.a WHEN MATCHED THEN DELETE;
+MERGE INTO vl USING (VALUES (1)) AS s(a) ON vl.id = s.a WHEN MATCHED THEN DELETE;
+MERGE INTO vu USING (VALUES (1)) AS s(a) ON vu.id = s.a WHEN MATCHED THEN DELETE;
+MERGE INTO vw USING (VALUES (1)) AS s(a) ON vw.id = s.a WHEN MATCHED THEN UPDATE SET id = 3;
+MERGE INTO vc USING (VALUES (1)) AS s(a) ON vc.id = s.a WHEN MATCHED THEN DELETE;
+MERGE INTO va USING (VALUES (1)) AS s(a) ON va.m = s.a WHEN NOT MATCHED THEN INSERT VALUES (1);
+
+-- case: MERGE into a view that is not automatically updatable: DO NOTHING only
+CREATE TABLE t (id int PRIMARY KEY, a int);
+INSERT INTO t VALUES (1, 1);
+CREATE VIEW vd AS SELECT DISTINCT id, a FROM t;
+MERGE INTO vd USING (VALUES (1), (2)) AS s(id) ON vd.id = s.id WHEN MATCHED THEN DO NOTHING WHEN NOT MATCHED THEN DO NOTHING;
+SELECT * FROM t;
+
+-- case: MERGE into a view: the columns it cannot write
+CREATE TABLE t (id int PRIMARY KEY, a int, b text);
+CREATE VIEW ve AS SELECT id, a + 1 AS a1, a FROM t;
+CREATE VIEW vk AS SELECT 1 AS one, a + 1 AS b FROM t;
+CREATE VIEW vb AS SELECT id, a FROM t;
+MERGE INTO ve USING (VALUES (1, 1)) AS s(id, a) ON ve.id = s.id WHEN MATCHED THEN UPDATE SET a1 = s.a;
+MERGE INTO ve USING (VALUES (1, 1)) AS s(id, a) ON ve.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.a);
+MERGE INTO ve USING (VALUES (1, 1)) AS s(id, a) ON ve.id = s.id WHEN MATCHED THEN UPDATE SET nope = s.a;
+MERGE INTO vb USING (VALUES (1, 1)) AS s(id, a) ON vb.id = s.id WHEN MATCHED THEN UPDATE SET b = 'x';
+MERGE INTO vb USING (VALUES (1, 1)) AS s(id, a) ON vb.id = s.id WHEN NOT MATCHED THEN INSERT (id, b) VALUES (1, 'x');
+MERGE INTO vb USING (VALUES (1, 1)) AS s(id, a) ON vb.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (1, 2, 3);
+MERGE INTO vk USING (VALUES (1)) AS s(a) ON vk.b = s.a WHEN MATCHED THEN UPDATE SET b = 3;
+MERGE INTO vk USING (VALUES (1)) AS s(a) ON vk.b = s.a WHEN MATCHED THEN DELETE;
+
+-- case: MERGE into a view: a subquery and a parameterless function in SET, a view of a schema's table renamed
+CREATE TABLE t (id int PRIMARY KEY, a int, tag text);
+CREATE TABLE prices (id int, p int);
+INSERT INTO t VALUES (1, 1, 'a'), (2, 2, 'b');
+INSERT INTO prices VALUES (1, 100), (2, 200);
+CREATE VIEW v (key, amount) AS SELECT id, a FROM t WHERE tag <> 'z';
+MERGE INTO v USING (VALUES (1), (2), (3)) AS s(k) ON v.key = s.k
+WHEN MATCHED AND v.key = 1 THEN UPDATE SET amount = (SELECT p FROM prices WHERE prices.id = v.key) + v.amount
+WHEN MATCHED THEN UPDATE SET amount = length(pi()::text)
+WHEN NOT MATCHED THEN INSERT (amount, key) VALUES (s.k * 10, s.k)
+RETURNING merge_action(), s.k, v.key, v.amount;
+SELECT * FROM t ORDER BY id;
+
+-- case: MERGE: an UPDATE of the primary key, RETURNING the source's columns
+CREATE TABLE t (id int PRIMARY KEY, a int);
+INSERT INTO t VALUES (1, 10), (2, 20);
+CREATE VIEW v AS SELECT id, a FROM t;
+MERGE INTO t USING (VALUES (1, 'one')) AS s(id, name) ON t.id = s.id
+WHEN MATCHED THEN UPDATE SET id = 10
+RETURNING s.name, t.*;
+MERGE INTO v USING (VALUES (2, 'two')) AS s(id, name) ON v.id = s.id
+WHEN MATCHED THEN UPDATE SET id = 20
+RETURNING s.name, v.*;
+SELECT * FROM t ORDER BY id;

@@ -286,7 +286,10 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
             if (match) |m| {
                 e.i_table = m.i_cursor;
                 e.y = .{ .tab = m.s_tab };
-                if (n.xq_n_src != null) m.fg.xq_lateral_ref = true;
+                if (n.xq_n_src) |k| {
+                    if (!lateralRefOk(p, src_list, k, m, e)) return WRC.Abort;
+                    m.fg.xq_lateral_ref = true;
+                }
                 if (m.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true })) e.flags.CanBeNull = true;
                 schema = m.s_tab.?.schema;
             }
@@ -585,6 +588,47 @@ fn lookupNameEnd(p: *Parse, top: *NameContext, matched: *NameContext, cnt: i32, 
         it = it.next.?;
     }
     return WRC.Prune;
+}
+
+/// Resolve the arguments of table-valued function `item`, term `i` of
+/// the FROM of `nc`. xqlite: one marked LATERAL (fg.xq_lateral: a function of a
+/// RIGHT or FULL JOIN in PostgreSQL's FROM) sees only the terms before
+/// it, which lateralRefOk() checks.
+fn resolveTabFuncArgs(nc: *NameContext, item: *SrcItem, i: usize) error{ParseFailed}!void {
+    if (!item.fg.xq_lateral) return resolveExprListNames(nc, item.u1.func_arg);
+    var lateral = nc.*;
+    lateral.xq_n_src = i;
+    defer {
+        lateral.xq_n_src = nc.xq_n_src;
+        nc.* = lateral;
+    }
+    return resolveExprListNames(&lateral, item.u1.func_arg);
+}
+
+/// xqlite: whether the LATERAL subquery (or function) of term `k` of
+/// `src` may name term `m` before it (PostgreSQL's
+/// check_lateral_ref_ok()): not if term `k` is the right side of a
+/// RIGHT or FULL JOIN that `m` is on the left side of. Past a comma (`a, b RIGHT JOIN LATERAL (...)`,
+/// whose RIGHT JOIN PostgreSQL joins to `b` alone and SQLite's flat
+/// FROM to both) the reference is not supported. Records the error.
+fn lateralRefOk(p: *Parse, src: *SrcList, k: usize, m: *const SrcItem, e: *const Expr) bool {
+    const items = src.slice();
+    if (!items[k].fg.jointype.RIGHT) return true;
+    const j = (@intFromPtr(m) - @intFromPtr(items.ptr)) / @sizeOf(SrcItem);
+    const name = m.alias orelse m.s_tab.?.name;
+    const across = for (items[j + 1 .. k]) |it| {
+        if (it.fg.xq_comma) break true;
+    } else false;
+    if (across) {
+        util.errorMsgState(p, null, .of("0A000"), "a LATERAL reference to \"{s}\" before a comma from a RIGHT or FULL JOIN is not supported", .{name});
+    } else {
+        util.errorFieldsAt(p, null, .of("42P10"), .{
+            .message = std.fmt.allocPrint(p.arena, "invalid reference to FROM-clause entry for table \"{s}\"", .{name}) catch "invalid reference to FROM-clause entry",
+            .detail = "The combining JOIN type must be INNER or LEFT for a LATERAL reference.",
+        });
+    }
+    expr_mod.recordErrorOffsetOfExpr(p, e);
+    return false;
 }
 
 /// Port of sqlite3CreateColumnExpr(): a TK_COLUMN for column `i_col` of
@@ -1273,6 +1317,9 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
                 // subquery is correlated.
                 if (outer_nc) |o| item.fg.is_correlated = o.n_ref > n_ref;
                 if (item.fg.xq_lateral and lateral.n_ref > 0) item.fg.is_correlated = true;
+                // Of a RIGHT or FULL JOIN, it names no term before it
+                // (lateralRefOk()): an ordinary subquery.
+                if (item.fg.jointype.RIGHT) item.fg.xq_lateral = false;
             }
         }
         if (outer_nc) |o| if (o.n_nested_select > 0) {
@@ -1287,8 +1334,8 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
         // before the select list: the types of the functions' columns
         // come from them (postgres/srftype.zig). No aggregate there.
         const args_first = typing.active(p.db);
-        if (args_first) for (s.src.?.slice()) |*item| {
-            if (item.fg.is_tab_func) resolveExprListNames(&nc, item.u1.func_arg) catch return WRC.Abort;
+        if (args_first) for (s.src.?.slice(), 0..) |*item, i| {
+            if (item.fg.is_tab_func) resolveTabFuncArgs(&nc, item, i) catch return WRC.Abort;
         };
         nc.nc_flags = .{ .AllowAgg = true, .AllowWin = true };
 
@@ -1322,8 +1369,8 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
         nc.nc_flags.Where = false;
 
         // Arguments of table-valued functions.
-        if (!args_first) for (s.src.?.slice()) |*item| {
-            if (item.fg.is_tab_func) resolveExprListNames(&nc, item.u1.func_arg) catch return WRC.Abort;
+        if (!args_first) for (s.src.?.slice(), 0..) |*item, i| {
+            if (item.fg.is_tab_func) resolveTabFuncArgs(&nc, item, i) catch return WRC.Abort;
         };
 
         if (p.inRenameObject()) {

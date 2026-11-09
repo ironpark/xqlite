@@ -399,13 +399,19 @@ pub const SrcItem = struct {
         from_exists: bool = false,
         /// xqlite: a LATERAL subquery, which may name the terms before it
         /// (set by the IR's lowering only); with is_correlated it is a
-        /// co-routine run for each row of those terms, after them.
+        /// co-routine run for each row of those terms, after them. Of a
+        /// table-valued function (PostgreSQL's, of a RIGHT or FULL JOIN):
+        /// its arguments see only the terms before it.
         xq_lateral: bool = false,
         /// xqlite: a term a LATERAL subquery names: its columns are read
         /// in the code of that co-routine, outside the loop of the term,
         /// so it has no covering-index or automatic-index loop and, if a
         /// co-routine itself, its columns are copied there too.
         xq_lateral_ref: bool = false,
+        /// xqlite: a term after a comma, not a JOIN (set by the IR's
+        /// lowering only): a LATERAL subquery of a RIGHT or FULL JOIN
+        /// after it may not name the terms before it.
+        xq_comma: bool = false,
     } = .{},
     i_cursor: i32 = -1,
     col_used: Bitmask = 0,
@@ -1038,6 +1044,10 @@ pub const FKey = struct {
     next_to: ?*FKey = null,
     prev_to: ?*FKey = null,
     is_deferred: bool = false,
+    /// xqlite: DEFERRABLE, INITIALLY DEFERRED or IMMEDIATE (SQLite keeps
+    /// only is_deferred): what PostgreSQL's SET CONSTRAINTS may change
+    /// (dialect.fkDeferred()).
+    is_deferrable: bool = false,
     /// OE_ actions for ON DELETE and ON UPDATE.
     a_action: [2]OE = .{ .None, .None },
     trigger: [2]?*Trigger = .{ null, null },
@@ -1965,6 +1975,9 @@ pub const Parse = struct {
     /// `SELECT;`), lowered with one: finishCoding() hides it (its rows
     /// have none).
     xq_no_columns: bool = false,
+    /// xqlite: the rows are those of a FETCH from PostgreSQL's binary
+    /// cursor (DECLARE BINARY): Vdbe.xq_binary_rows at makeReady().
+    xq_binary_rows: bool = false,
     /// xqlite: the notices of the statement (util.notice()), in the
     /// arena; Vdbe.xq_notices at makeReady().
     xq_notices: std.ArrayList(Notice) = .empty,

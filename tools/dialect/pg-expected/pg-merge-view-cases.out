@@ -1,0 +1,154 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-merge-view-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case a6d20a40e6df2250 MERGE into a view: every action, RETURNING merge_action()
+merge_action|id|a|id|a
+UPDATE|1|21|1|11
+DELETE|3|30|3|0
+UPDATE|5|150||
+INSERT|4|40|4|40
+(4 rows)
+id|a|b
+1|21|x
+2|2|y
+4|40|d
+5|150|w
+(4 rows)
+==== case 10c04cd5d6884ace MERGE into a view: the rows its WHERE leaves out are not matched
+merge_action|id|a
+UPDATE|2|21
+(1 row)
+id|a
+1|1
+2|21
+(2 rows)
+==== case 7d7dae3e0a87ab51 MERGE into a view: renamed columns, an alias, no RETURNING
+id|a|note
+1|15|none
+2|20|none
+9|7|none
+(3 rows)
+k|x|x|k
+2|1|1|20
+(1 row)
+id|a|note
+1|15|none
+9|7|none
+20|1|none
+(3 rows)
+==== case a68968fc8fb18124 MERGE into a view: columns that are not the table's are read, not written
+merge_action|id|a1|a|label
+UPDATE|1|45|44|k1
+INSERT|7|3|2|k7
+(2 rows)
+label|a1
+k1|45
+(1 row)
+id|a
+7|2
+(1 row)
+==== case d91b3ce07dcf072f MERGE into a view: DEFAULT, DEFAULT VALUES, literals and parameters' types
+id|a|n|s
+1||2.35|xy
+99|5||
+(2 rows)
+==== case da1b7c74ead0ef87 MERGE into a view: a value too long for the column
+ERROR:  value too long for type character varying(3)
+==== case 164ba8aefb6acd54 MERGE into a view: the table's constraints
+ERROR:  new row for relation "t" violates check constraint "t_a_check"
+DETAIL:  Failing row contains (1, -1).
+ERROR:  duplicate key value violates unique constraint "t_pkey"
+DETAIL:  Key (id)=(2) already exists.
+ERROR:  MERGE command cannot affect row a second time
+HINT:  Ensure that not more than one source row matches any one target row.
+==== case aea05eebb55d3dd2 MERGE into a view: several rows, the view's values in SET
+merge_action|id|a
+UPDATE|1|11
+UPDATE|2|22
+(2 rows)
+id|a
+1|11
+2|22
+(2 rows)
+==== case 1de9bb67e5a33866 MERGE into a view of a table of a schema, in a data-modifying WITH
+act|id|qty
+UPDATE|1|6
+INSERT|2|6
+(2 rows)
+id|qty
+1|6
+2|6
+(2 rows)
+==== case 62d8ca3ef3ed663b MERGE into a view: views that are not automatically updatable
+ERROR:  cannot insert into view "vd"
+DETAIL:  Views containing DISTINCT are not automatically updatable.
+HINT:  To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT trigger.
+ERROR:  cannot update view "vd"
+DETAIL:  Views containing DISTINCT are not automatically updatable.
+HINT:  To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger.
+ERROR:  cannot delete from view "vg"
+DETAIL:  Views containing GROUP BY are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot delete from view "vj"
+DETAIL:  Views that do not select from a single table or view are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot delete from view "vl"
+DETAIL:  Views containing LIMIT or OFFSET are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot delete from view "vu"
+DETAIL:  Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot update view "vw"
+DETAIL:  Views that return window functions are not automatically updatable.
+HINT:  To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger.
+ERROR:  cannot delete from view "vc"
+DETAIL:  Views containing WITH are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot insert into view "va"
+DETAIL:  Views that return aggregate functions are not automatically updatable.
+HINT:  To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT trigger.
+==== case d1d34fe84f397a06 MERGE into a view that is not automatically updatable: DO NOTHING only
+id|a
+1|1
+(1 row)
+==== case 37c34ed8037cfa76 MERGE into a view: the columns it cannot write
+ERROR:  cannot merge into column "a1" of view "ve"
+DETAIL:  View columns that are not columns of their base relation are not updatable.
+ERROR:  cannot merge into column "a1" of view "ve"
+DETAIL:  View columns that are not columns of their base relation are not updatable.
+ERROR:  column "nope" of relation "ve" does not exist
+LINE 1: ..., a) ON ve.id = s.id WHEN MATCHED THEN UPDATE SET nope = s.a...
+                                                             ^
+ERROR:  column "b" of relation "vb" does not exist
+LINE 1: ...id, a) ON vb.id = s.id WHEN MATCHED THEN UPDATE SET b = 'x';
+                                                               ^
+ERROR:  column "b" of relation "vb" does not exist
+LINE 1: ...ON vb.id = s.id WHEN NOT MATCHED THEN INSERT (id, b) VALUES ...
+                                                             ^
+ERROR:  INSERT has more expressions than target columns
+LINE 1: ... vb.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (1, 2, 3);
+                                                                    ^
+ERROR:  cannot update view "vk"
+DETAIL:  Views that have no updatable columns are not automatically updatable.
+HINT:  To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger.
+==== case d12b6b97f3250caf MERGE into a view: a subquery and a parameterless function in SET, a view of a schema's table renamed
+merge_action|k|key|amount
+UPDATE|1|1|101
+UPDATE|2|2|17
+INSERT|3|3|30
+(3 rows)
+id|a|tag
+1|101|a
+2|17|b
+3|30|
+(3 rows)
+==== case c83c16cdf5e48986 MERGE: an UPDATE of the primary key, RETURNING the source's columns
+name|id|a
+one|10|10
+(1 row)
+name|id|a
+two|20|20
+(1 row)
+id|a
+10|10
+20|20
+(2 rows)

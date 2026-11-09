@@ -1,0 +1,365 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-grouping-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 22f7efb56518d9c6 window functions over ROLLUP: rank, row_number, sum OVER of aggregates
+region|total|rk
+|44|1
+north|20|2
+east|15|3
+west|9|4
+(4 rows)
+region|product|sum|rn
+||44|1
+east||15|1
+east|pen|10|2
+east|ink|5|3
+north||20|1
+north|ink|20|2
+west||9|1
+west|pen|7|2
+west|pad|2|3
+(9 rows)
+region|product|s|region_total
+east|ink|5|30
+east|pen|10|30
+east||15|30
+north|ink|20|40
+north||20|40
+west|pad|2|18
+west|pen|7|18
+west||9|18
+||44|44
+(9 rows)
+region|count|rank|dense_rank
+east|2|2|2
+north|1|1|1
+west|2|2|2
+|5|4|3
+(4 rows)
+region|sum|pct
+east|15|34.0909090909090909
+north|20|45.4545454545454545
+west|9|20.4545454545454545
+|44|100.0000000000000000
+(4 rows)
+region|sum|lag|lead
+east|15||north
+north|20|15|west
+west|9|20|
+|44|9|
+(4 rows)
+region|avg|n_groups
+east|2.250|4
+north|2.500|4
+west|1.875|4
+|2.150|4
+(4 rows)
+==== case 9b7873b2b39d12a1 window functions partitioned by GROUPING() over CUBE and GROUPING SETS
+region|product|g|sum|rk
+north|ink|0|20|1
+east|pen|0|10|2
+west|pen|0|7|3
+east|ink|0|5|4
+west|pad|0|2|5
+north||1|20|1
+east||1|15|2
+west||1|9|3
+|ink|2|25|1
+|pen|2|17|2
+|pad|2|2|3
+||3|44|1
+(12 rows)
+region|product|sum|row_number
+west||9|1
+|pad|2|1
+||44|1
+east||15|2
+|pen|17|2
+north||20|3
+|ink|25|3
+(7 rows)
+region|product|sets_rows
+east|ink|5
+east|pen|5
+east||3
+north|ink|5
+north||3
+west|pad|5
+west|pen|5
+west||3
+|ink|3
+|pad|3
+|pen|3
+||1
+(12 rows)
+g|region|max
+0|east|20
+0|north|20
+0|west|20
+1||44
+(4 rows)
+region|product|sum|first_value
+east|ink|5|
+east|pen|10|
+east||15|
+north|ink|20|ink
+north||20|ink
+west|pad|2|
+west|pen|7|
+west||9|
+(8 rows)
+==== case 189a29a7704c3685 window functions with named windows, frames and ORDER BY a window function
+region|sum|rank|sum
+west|9|1|9
+east|15|2|24
+north|20|3|44
+|44|4|88
+(4 rows)
+region|product|sum|sum
+east|ink|5|5
+east|pen|10|15
+east||15|30
+north|ink|20|20
+north||20|40
+west|pad|2|2
+west|pen|7|9
+west||9|18
+||44|44
+(9 rows)
+region|sum
+|44
+north|20
+east|15
+west|9
+(4 rows)
+region|ntile
+east|1
+north|1
+west|2
+|2
+(4 rows)
+==== case 16312857a37f139a HAVING, WHERE, DISTINCT and LIMIT with window functions over grouping sets
+region|sum|rank
+west|9|1
+east|15|2
+north|20|3
+|45|4
+(4 rows)
+region|sum|row_number
+|42|1
+east|15|2
+north|20|3
+west|7|4
+(4 rows)
+region|product|sum|rk
+north|ink|20|2
+north||20|2
+east||15|4
+(3 rows)
+count
+1
+4
+(2 rows)
+n
+1
+(1 row)
+n
+1
+(1 row)
+region|rank
+|1
+(1 row)
+region|count|rank
+east|2|1
+north|1|2
+west|2|3
+|1|4
+(4 rows)
+==== case cfdfff5bc879f470 NULLs of ROLLUP in window partitions and sort keys
+a|b|g|sum|sum
+||0|8|39
+||1|12|39
+||3|15|39
+|p|0|4|39
+x||0|2|6
+x||1|3|6
+x|p|0|1|6
+(7 rows)
+a|b|g|rank
+x|p|0|1
+x||0|1
+x||1|2
+|p|0|1
+|p|2|2
+||0|1
+||1|2
+||2|3
+||3|4
+(9 rows)
+a|sum|percent_rank
+x|3|0
+(all)|12|0.5
+(all)|15|1
+(3 rows)
+==== case 98cdf99980fec751 DISTINCT ON over grouping sets
+region|product|sum
+east||15
+north||20
+west||9
+||44
+(4 rows)
+g|region|product|sum
+0|north|ink|20
+1|north||20
+2||ink|25
+3|||44
+(4 rows)
+region|product|count
+east||2
+north||1
+west||2
+||5
+(4 rows)
+region|product
+east|pen
+north|ink
+west|pen
+(3 rows)
+region|s
+east|5
+north|20
+west|2
+|44
+(4 rows)
+region|product|sum|rank
+east||15|4
+north||20|2
+west||9|6
+(3 rows)
+region
+east
+north
+west
+
+(4 rows)
+a
+b
+x
+
+(3 rows)
+==== case c1bfd6bdf5de1df9 FETCH ... WITH TIES over grouping sets
+region|count
+north|1
+(1 row)
+region|product|count
+east||2
+west||2
+(2 rows)
+g|region|product|count
+0|east|ink|1
+0|east|pen|1
+0|north|ink|1
+0|west|pad|1
+0|west|pen|1
+(5 rows)
+region|count|rank
+|5|4
+east|2|2
+(2 rows)
+==== case dfd611bd46ce8e7c errors with window functions over grouping sets
+ERROR:  arguments to GROUPING must be grouping expressions of the associated query level
+LINE 1: SELECT region, grouping(product), rank() OVER () FROM sales ...
+                                ^
+ERROR:  SELECT DISTINCT ON expressions must match initial ORDER BY expressions
+LINE 1: SELECT DISTINCT ON (region) region, product FROM sales GROUP...
+                            ^
+==== case cf5218437a8e99ae views with window functions and DISTINCT ON over grouping sets
+region|product|total|rk
+east|pen|10|1
+east||15|1
+||24|1
+west|pen|7|2
+west||9|2
+east|ink|5|3
+west|pad|2|4
+(7 rows)
+region|product|total
+east||15
+west||9
+||24
+(3 rows)
+region|total
+east|15
+west|9
+|24
+(3 rows)
+region|product|total|rk
+east|cap|30|1
+east||45|1
+||54|1
+(3 rows)
+==== case 84ac83d2fa6b19c3 grouping sets with window functions in subqueries, CTEs and compounds
+region|s|rk
+|24|1
+east|15|2
+(2 rows)
+region|rk
+east|1
+west|2
+|3
+(3 rows)
+region|row_number
+z|0
+east|1
+west|2
+|3
+(4 rows)
+m
+4
+(1 row)
+==== case dc8bf3922ca15f13 expressions mixing window functions, grouping keys, aggregates and GROUPING()
+r|diff
+all|0.0000000000000000
+east|0.3333333333333333
+north|5.3333333333333333
+west|-5.6666666666666667
+(4 rows)
+label|upper
+east:3|EAST
+north:2|NORTH
+west:4|WEST
+|
+(4 rows)
+u|rank
+WEST|1
+NORTH|2
+EAST|3
+|4
+(4 rows)
+region|total|rk
+|44|4
+north|20|3
+east|15|2
+west|9|1
+(4 rows)
+region|product|ps
+east|ink|ink,pen
+east|pen|ink,pen
+north|ink|ink
+west|pad|pad,pen
+west|pen|pad,pen
+(5 rows)
+region|big|all_big
+east|1|6
+north|1|6
+west|1|6
+|3|6
+(4 rows)
+region|c|rank
+east|3|1
+north|3|2
+west|3|3
+|3|4
+(4 rows)
+pg_typeof|pg_typeof|pg_typeof
+bigint|numeric|integer
+(1 row)

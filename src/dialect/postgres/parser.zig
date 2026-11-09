@@ -4087,7 +4087,7 @@ pub const Parser = struct {
             } else if (cl.kind != .not_matched and p.c.eatKw("update")) {
                 try p.c.expectKw("set");
                 const s_at = p.c.peek().start;
-                _ = try p.setList();
+                cl.sets = try p.setList();
                 cl.action = .{ .update = sql[s_at..p.c.prev().end] };
             } else if (cl.kind == .not_matched and p.c.eatKw("insert")) {
                 var ins: dml.Insert = .{};
@@ -4508,7 +4508,9 @@ pub const Parser = struct {
                 const del = p.c.advance().isKw("delete");
                 const act = try p.refAction();
                 if (del) r.on_delete = act else r.on_update = act;
-            } else if (p.c.eatKws(&.{ "not", "deferrable" })) {} else if (p.c.eatKw("deferrable")) {} else if (p.c.eatKw("initially")) {
+            } else if (p.c.eatKws(&.{ "not", "deferrable" })) {} else if (p.c.eatKw("deferrable")) {
+                r.deferrable = true;
+            } else if (p.c.eatKw("initially")) {
                 if (p.c.eatKw("deferred")) r.deferred = true else try p.c.expectKw("immediate");
             } else break;
         }

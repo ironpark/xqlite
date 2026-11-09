@@ -208,6 +208,24 @@ fn groupingSets(b: B) Oom!*tree.Select {
     return s;
 }
 
+/// GROUP BY ROLLUP (x) with window functions of its aggregates and
+/// GROUPING(x): rank() OVER (ORDER BY count(*)), max(count(*)) OVER
+/// (PARTITION BY grouping(x)).
+fn groupedWindows(b: B) Oom!*tree.Select {
+    const from = try b.values(&.{ &.{try b.int_("1")}, &.{try b.int_("1")}, &.{try b.int_("2")} }, "t", &.{"x"});
+    const x = try b.col("x");
+    const count = try b.e(.{ .func = try tree.new(b.a, tree.Func, .{ .name = .{ .text = "count" }, .star = true }) });
+    const by_count = try tree.new(b.a, tree.WindowSpec, .{ .order_by = try b.a.dupe(tree.SortItem, &.{.{ .expr = count }}) });
+    const rank = try b.e(.{ .func = try tree.new(b.a, tree.Func, .{ .name = .{ .text = "rank" }, .over = by_count }) });
+    const by_set = try tree.new(b.a, tree.WindowSpec, .{ .partition = try b.list(&.{try b.call("grouping", null, &.{x})}) });
+    const max = try b.e(.{ .func = try tree.new(b.a, tree.Func, .{ .name = .{ .text = "max" }, .args = try b.list(&.{count}), .over = by_set }) });
+    var s = try b.select(&.{ x, count, rank, max }, &.{from});
+    s.body.core.group_by = try b.list(&.{x});
+    s.body.core.grouping_sets = try b.a.dupe([]const u32, &.{ &.{0}, &.{} });
+    s.order_by = try b.a.dupe(tree.SortItem, &.{.{ .expr = try b.col("c0"), .nulls = .last }});
+    return s;
+}
+
 /// INTERSECT ALL, then FETCH FIRST 2 ROWS WITH TIES of it.
 fn setsAndTies(b: B) Oom!*tree.Select {
     const l = try b.select(&.{try b.col("x")}, &.{try b.values(&.{ &.{try b.int_("1")}, &.{try b.int_("1")}, &.{try b.int_("2")}, &.{try b.int_("3")}, &.{try b.int_("3")} }, "t", &.{"x"})});
@@ -221,7 +239,7 @@ fn setsAndTies(b: B) Oom!*tree.Select {
     return s;
 }
 
-const cases = [_]*const fn (B) Oom!*tree.Select{ divisions, strings, likes, casts, functions, predicates, queries, distinctOn, groupingSets, setsAndTies };
+const cases = [_]*const fn (B) Oom!*tree.Select{ divisions, strings, likes, casts, functions, predicates, queries, distinctOn, groupingSets, setsAndTies, groupedWindows };
 
 /// Test frontends: the SQL text is the number of a case, whose tree is
 /// lowered (lower.zig), or rendered (render.zig) and compiled by the
@@ -283,6 +301,7 @@ test "ir: lowering and the rendered text mean the same, in every dialect" {
         "1|b\n2|c\nNULL|d\n",
         "1|2|0\n2|1|0\nNULL|3|1\n",
         "1\n1\n3\n3\n",
+        "1|2|2|2\n2|1|1|2\nNULL|3|3|3\n",
     };
     for (0..cases.len) |i| {
         for (std.enums.values(dialect.Dialect)) |d| {

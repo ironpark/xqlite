@@ -928,3 +928,11 @@ xq_postgres_xq_pg_cursors 0 qualified unsafe direct xqlite-only:direct_only
 xq_postgres_xq_pg_prepare 5 qualified unsafe direct xqlite-only:direct_only
 xq_postgres_xq_pg_deallocate 1 qualified unsafe direct xqlite-only:direct_only
 xq_postgres_xq_pg_discard 1 qualified unsafe direct xqlite-only:direct_only
+# PostgreSQL LOCK TABLE (postgres/commands.zig)
+xq_postgres_xq_pg_lock 4 qualified unsafe direct xqlite-only:direct_only
+# PostgreSQL SET CONSTRAINTS (postgres/setconstraints.zig)
+xq_postgres_xq_pg_set_constraints -1 qualified unsafe direct xqlite-only:direct_only
+# LATERAL subqueries in a view's text (src/dialect/lateral.zig)
+xq_lateral_col 2 engine deterministic
+xq_lateral_col 3 engine deterministic
+xq_lateral_rows -1 engine aggregate deterministic

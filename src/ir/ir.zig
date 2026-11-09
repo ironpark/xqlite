@@ -703,6 +703,7 @@ pub const ddl = struct {
     pub const createForeignKey = build.createForeignKey;
     /// sqlite3DeferForeignKey().
     pub const deferForeignKey = build.deferForeignKey;
+    pub const deferrableForeignKey = build.deferrableForeignKey;
     /// sqlite3EndTable(): the table options (TF: .Strict = true for a
     /// STRICT table, .WithoutRowid) or AS SELECT.
     pub const endTable = build.endTable;

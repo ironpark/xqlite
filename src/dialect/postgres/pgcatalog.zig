@@ -1739,16 +1739,7 @@ const Builder = struct {
                     }
                 }
             }
-            const name = recorded(m, "foreign_key", cols.items) orelse blk: {
-                var out: std.ArrayList(u8) = .empty;
-                try out.appendSlice(a, r.name);
-                for (cols.items) |c| {
-                    try out.append(a, '_');
-                    try out.appendSlice(a, c);
-                }
-                try out.appendSlice(a, "_fkey");
-                break :blk out.items;
-            };
+            const name = recorded(m, "foreign_key", cols.items) orelse try @import("constraints.zig").fkeyName(a, r.name, cols.items);
             try b.addCon(key, .{
                 .oid = 0,
                 .name = try a.dupe(u8, name),
@@ -1760,7 +1751,7 @@ const Builder = struct {
                 .fkeys = fkeys,
                 .upd = action(f.a_action[1]),
                 .del = action(f.a_action[0]),
-                .deferrable = f.is_deferred,
+                .deferrable = f.is_deferred or f.is_deferrable,
                 .deferred = f.is_deferred,
             });
         }

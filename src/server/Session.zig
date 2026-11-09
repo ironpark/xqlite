@@ -43,6 +43,10 @@ aborted: bool = false,
 /// The open transaction is one the session began itself
 /// (implicit_transactions), to end at the end of the script or at sync().
 implicit: bool = false,
+/// The rows of the statement whose columns run() last gave its sink are
+/// to be sent in the binary format, where the protocol has one for the
+/// type (Stmt.binaryRows(): a FETCH from PostgreSQL's binary cursor).
+binary_rows: bool = false,
 /// The columns of the statement being described.
 scratch: std.heap.ArenaAllocator,
 /// The declared types of the table columns described so far.
@@ -375,6 +379,7 @@ fn runOne(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, sink: anytype) 
     try s.statementNotices(stmt, sink);
     if (hasResult(stmt, cmd)) {
         defer _ = s.scratch.reset(.retain_capacity);
+        s.binary_rows = stmt.binaryRows();
         try sink.columns(try s.describe(s.scratch.allocator(), stmt, has_row));
     } else if (has_row) {
         // A SET the dialect makes a query of (set_config()): no result.

@@ -2244,9 +2244,9 @@ test "pg: RIGHT and FULL JOIN LATERAL" {
     try c.expectRows("SELECT * FROM a FULL JOIN LATERAL (SELECT y FROM b) s ON s.y = a.x ORDER BY 1, 2", "1|NULL\n2|2\nNULL|3\n");
     try c.expectRows("SELECT (SELECT count(*) FROM b RIGHT JOIN LATERAL (SELECT a.x AS z) s ON s.z = b.y) FROM a ORDER BY x", "1\n1\n");
     // A reference to an item on the left: PostgreSQL's error, at the
-    // column; past a comma, not supported.
+    // column. Past a comma, the chain is grouped (a LATERAL group).
     try expectErrorState(&c, "SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.x) s ON true", "invalid reference to FROM-clause entry for table \"a\"\nDETAIL:  The combining JOIN type must be INNER or LEFT for a LATERAL reference.", "42P10");
     try testing.expectEqual(@as(i32, 43), main_mod.errorOffset(c.db));
     try expectErrorState(&c, "SELECT * FROM a RIGHT JOIN unnest(ARRAY[a.x]) u ON true", "invalid reference to FROM-clause entry for table \"a\"\nDETAIL:  The combining JOIN type must be INNER or LEFT for a LATERAL reference.", "42P10");
-    try expectErrorState(&c, "SELECT * FROM a, b RIGHT JOIN LATERAL (SELECT a.x) s ON true", "a LATERAL reference to \"a\" before a comma from a RIGHT or FULL JOIN is not supported", "0A000");
+    try c.expectRows("SELECT * FROM a, b RIGHT JOIN LATERAL (SELECT a.x) s ON true ORDER BY 1, 2", "1|2|1\n1|3|1\n2|2|2\n2|3|2\n");
 }

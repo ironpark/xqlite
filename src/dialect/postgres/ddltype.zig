@@ -57,7 +57,11 @@ pub fn statement(ps: *Parser, stmt: tree.Stmt) Error!void {
                 v.display = r.out.items;
             }
             // LATERAL, which SQLite has no syntax for (viewlateral.zig).
-            if (forms.lateral) try viewlateral.rewrite(p, ps.c.sql, a, v.select);
+            if (forms.lateral) viewlateral.rewrite(p, ps.c.sql, a, v.select) catch |err| {
+                // Its error is in the Parse (Rewriter.fail()).
+                if (p.n_err > 0) ps.err_in_parse = true;
+                return err;
+            };
         },
         .create_table => |ct| {
             if (ct.as_select) |s| try probe(p, ps.c.sql, a, s, null);
@@ -288,6 +292,7 @@ const Back = struct {
         if (c.group_by.len > 0) {
             for (c.group_by) |*g| if (b.isInterval(g.*)) {
                 g.* = try b.wrap(g.*, "xq_pg_iv_key");
+                g.*.kind.func.group_key = true;
             };
             return;
         }
@@ -537,6 +542,9 @@ const Back = struct {
                 // A string literal met by a boolean, read as one
                 // (overload.zig's compare(): b = 't').
                 if (try b.boolLiteral(&c.l, x.left, x.right) or try b.boolLiteral(&c.r, x.right, x.left)) return;
+                // A string literal met by a number, read as its type
+                // (overload.zig's compare(): 10 > '7').
+                if (try b.numberLiteral(&c.l, x.left) or try b.numberLiteral(&c.r, x.right)) return;
                 // Intervals: keys, a BLOB column's bounds.
                 const wl = try b.wrapped(&c.l, x.left);
                 const wr = try b.wrapped(&c.r, x.right);
@@ -670,6 +678,30 @@ const Back = struct {
         const list = w.x.list orelse return false;
         if (list.len() != 1 or list.at(0).expr != b.of(t.*)) return false;
         t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = "boolean", .mode = .{ .func = "xq_pg_bool" } } });
+        return true;
+    }
+
+    /// A string literal operand `t` the core read as the type of a number
+    /// it is compared with (`w`: xq_pg_cast_int4('7'), overload.zig's
+    /// numberInput()): that cast, so that the view's text compares
+    /// numbers too; whether it was.
+    fn numberLiteral(b: *Back, t: **Expr, w_: ?*IrExpr) Error!bool {
+        const w = w_ orelse return false;
+        if (t.*.kind != .string or !isCall(w)) return false;
+        const list = w.x.list orelse return false;
+        if (list.len() != 1 or list.at(0).expr != b.of(t.*)) return false;
+        const target: []const u8 = if (integer.castOf(w.token())) |width| switch (width) {
+            .int2 => "smallint",
+            .int4 => "integer",
+            .int8 => "bigint",
+        } else if (std.ascii.eqlIgnoreCase(w.token(), "xq_pg_cast_float8"))
+            "double precision"
+        else if (std.ascii.eqlIgnoreCase(w.token(), "xq_pg_cast_float4"))
+            "real"
+        else
+            return false;
+        const name = try b.a.dupe(u8, w.token());
+        t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = target, .mode = .{ .func = name } } });
         return true;
     }
 

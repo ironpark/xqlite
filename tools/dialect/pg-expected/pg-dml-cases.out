@@ -297,10 +297,23 @@ id|j|u|iv|tags
 1|{"a": 1}|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|1 day|{x}
 2|{"a": 1}|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|2 days|{x,y,x}
 (2 rows)
-==== case 1298e5529810e081 UPDATE ... FROM a table of text columns
+==== case 929f4d6e47ff1ef3 UPDATE ... FROM a table of text columns
 k|v|n|c|b
 2|TWO|5|TWO|t
 (1 row)
 k|v|n|c|b
 2|true|5|x2|t
+(1 row)
+==== case 46d003c7c5707055 the DEFAULT of an integer primary key
+ERROR:  duplicate key value violates unique constraint "pk_pkey"
+DETAIL:  Key (id)=(99) already exists.
+id|v
+99|upd
+(1 row)
+id|v
+7|a
+(1 row)
+ERROR:  integer out of range
+id|v
+99|upd
 (1 row)

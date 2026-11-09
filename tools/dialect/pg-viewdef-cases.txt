@@ -72,3 +72,75 @@ CREATE VIEW v1 AS SELECT id, d FROM e ORDER BY d FETCH FIRST 2 ROWS WITH TIES;
 CREATE VIEW v2 AS SELECT id FROM e ORDER BY d OFFSET 1 FETCH FIRST 2 ROWS WITH TIES;
 SELECT pg_get_viewdef('v1');
 SELECT pg_get_viewdef('v2');
+
+-- case: pg_get_viewdef() of ROLLUP, CUBE and GROUPING SETS as written
+CREATE TABLE t (a int, b int, c int);
+CREATE VIEW v1 AS SELECT a, b, count(*) FROM t GROUP BY ROLLUP (a, b);
+CREATE VIEW v2 AS SELECT a, b, count(*) FROM t GROUP BY CUBE (a, b);
+CREATE VIEW v3 AS SELECT a, b, count(*) FROM t GROUP BY GROUPING SETS ((a, b), (a), ());
+CREATE VIEW v4 AS SELECT a, b, count(*) FROM t GROUP BY GROUPING SETS ((a, b), (a), (b), ());
+CREATE VIEW v5 AS SELECT a, b, count(*) FROM t GROUP BY a, ROLLUP (b);
+CREATE VIEW v6 AS SELECT a, b, count(*) FROM t GROUP BY CUBE (a), ROLLUP (b);
+SELECT pg_get_viewdef('v1');
+SELECT pg_get_viewdef('v2');
+SELECT pg_get_viewdef('v3');
+SELECT pg_get_viewdef('v4');
+SELECT pg_get_viewdef('v5');
+SELECT pg_get_viewdef('v6', true);
+
+-- case: pg_get_viewdef() of nested grouping sets and composite elements
+CREATE TABLE t (a int, b int, c int);
+CREATE VIEW v1 AS SELECT a, b, c, count(*) FROM t GROUP BY GROUPING SETS (ROLLUP (a, b), c, (), (a, c), CUBE (c));
+CREATE VIEW v2 AS SELECT a, b, c, count(*) FROM t GROUP BY ROLLUP ((a, b), c);
+CREATE VIEW v3 AS SELECT a, b, c, count(*) FROM t GROUP BY CUBE ((a, b), (c)), ();
+CREATE VIEW v4 AS SELECT a, b, count(*) FROM t GROUP BY GROUPING SETS (a, (b), GROUPING SETS ((a), ()), ((a)));
+CREATE VIEW v5 AS SELECT a, b, count(*) FROM t GROUP BY GROUPING SETS (ROLLUP (a), GROUPING SETS (b, ROLLUP (b)));
+CREATE VIEW v6 AS SELECT a, count(*) FROM t GROUP BY ROLLUP ((a, a), a);
+CREATE VIEW v7 AS SELECT a + 1, count(*) FROM t GROUP BY ROLLUP (a + 1, b * 2);
+CREATE VIEW v8 AS SELECT count(*) FROM t GROUP BY GROUPING SETS ((a + 1), (a, b + 1));
+CREATE VIEW v9 AS SELECT count(*) FROM t GROUP BY ROLLUP ((a) + 1, b);
+SELECT pg_get_viewdef('v1');
+SELECT pg_get_viewdef('v2');
+SELECT pg_get_viewdef('v3');
+SELECT pg_get_viewdef('v4');
+SELECT pg_get_viewdef('v5');
+SELECT pg_get_viewdef('v6');
+SELECT pg_get_viewdef('v7');
+SELECT pg_get_viewdef('v8');
+SELECT pg_get_viewdef('v9');
+
+-- case: pg_get_viewdef() of GROUP BY DISTINCT, (), one grouping set
+CREATE TABLE t (a int, b int, c int);
+CREATE VIEW v1 AS SELECT a, b, count(*) FROM t GROUP BY DISTINCT ROLLUP (a, b), CUBE (a);
+CREATE VIEW v2 AS SELECT a, count(*) FROM t GROUP BY DISTINCT a;
+CREATE VIEW v3 AS SELECT count(*) FROM t GROUP BY (), ();
+CREATE VIEW v4 AS SELECT a, count(*) FROM t GROUP BY ALL a, ();
+CREATE VIEW v5 AS SELECT a, b, count(*) FROM t GROUP BY GROUPING SETS ((a, a, b));
+CREATE VIEW v6 AS SELECT a, b, count(*) FROM t GROUP BY a, a, ROLLUP (b);
+CREATE VIEW v7 AS SELECT a, b, count(*), grouping(a, b) AS g FROM t GROUP BY GROUPING SETS ((a, b)), ROLLUP (a);
+CREATE VIEW v8 AS SELECT a, count(*) FROM t GROUP BY 1, ROLLUP (b);
+SELECT pg_get_viewdef('v1');
+SELECT pg_get_viewdef('v2');
+SELECT pg_get_viewdef('v3');
+SELECT pg_get_viewdef('v4');
+SELECT pg_get_viewdef('v5');
+SELECT pg_get_viewdef('v6');
+SELECT pg_get_viewdef('v7');
+SELECT pg_get_viewdef('v8');
+
+-- case: grouping sets with a window function in a view
+CREATE TABLE t (a int, b int, c int);
+INSERT INTO t VALUES (1, 1, 10), (1, 2, 20), (2, 1, 30), (2, NULL, 5);
+CREATE VIEW v AS SELECT a, b, sum(c) AS s, rank() OVER (ORDER BY sum(c) DESC) AS r FROM t GROUP BY GROUPING SETS ((a), (a, b));
+SELECT pg_get_viewdef('v') LIKE '% GROUP BY GROUPING SETS ((a), (a, b));' AS shown;
+SELECT * FROM v ORDER BY r, a, b;
+CREATE VIEW w AS SELECT a, b, sum(c) AS s FROM t GROUP BY DISTINCT ROLLUP (a, b), ROLLUP (a);
+SELECT * FROM w ORDER BY a, b;
+
+-- case: a view comparing numbers with string literals reads them as numbers
+CREATE TABLE nums (i int, s smallint, b bigint, f float8, r real);
+INSERT INTO nums VALUES (10, 2, 7, 7.5, 1.5);
+CREATE VIEW nv AS SELECT i > '7' AS a, i >= '-0' AS b, s = '2' AS c, '10' > b AS d, f > '1e0' AS e, r < '2' AS g FROM nums;
+SELECT * FROM nv;
+CREATE VIEW nv2 AS SELECT i FROM nums WHERE i > '9';
+SELECT * FROM nv2;

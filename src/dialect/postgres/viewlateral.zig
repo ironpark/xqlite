@@ -54,7 +54,8 @@ pub const Forms = struct {
     /// A LATERAL item after the first of its FROM.
     lateral: bool = false,
     /// What desugar.zig rewrites (DISTINCT ON, GROUPING SETS, WITH TIES,
-    /// INTERSECT ALL, EXCEPT ALL).
+    /// INTERSECT ALL, EXCEPT ALL), or GROUP BY DISTINCT, which the SQLite
+    /// text has not.
     desugared: bool = false,
 };
 
@@ -73,6 +74,7 @@ const Finder = struct {
 
     fn enter(x: *Finder, c: *tree.Core) Error!void {
         if (hasLaterItem(c.from)) x.f.lateral = true;
+        if (c.group_distinct) x.f.desugared = true;
     }
 
     fn leave(_: *Finder, _: *tree.Core) Error!void {}
@@ -84,6 +86,9 @@ fn hasLaterItem(items: []const tree.FromItem) bool {
     for (items, 0..) |it, i| {
         if (it.lateral and i > 0) return true;
         if (it.source == .nested and hasLaterItem(it.source.nested)) return true;
+        // A group whose function may name the items before it (checked
+        // by collectCore()).
+        if (it.source == .nested and i > 0) for (it.source.nested) |x| if (x.source == .func) return true;
     }
     return false;
 }
@@ -225,8 +230,23 @@ const Rewriter = struct {
 
     /// The items of core `c` (the queries in it are walked after).
     fn collectCore(r: *Rewriter, c: *tree.Core) Error!void {
+        // A parenthesized group naming the items before it (`a, b RIGHT
+        // JOIN LATERAL (SELECT a.x) s ON true`, which the parser groups):
+        // a subquery in SQLite, whose FROM cannot see them.
+        for (c.from) |*fi| if (fi.source == .nested) if (r.srcItem(fi)) |it| {
+            if (it.fg.xq_lateral and it.fg.is_correlated) return r.fail(groupPos(fi.source.nested));
+        };
         var leaves: std.ArrayList(*tree.FromItem) = .empty;
         try flatten(r.a, c.from, &leaves);
+        // A LATERAL item in a group: one naming nothing before it is a
+        // plain subquery; one naming the group's items is not rewritten
+        // (the names of the query outside the group name the group's
+        // subquery, not json_each()).
+        for (leaves.items) |fi| if (fi.lateral and isLaterRef(c.from, fi) and !topLevel(c.from, fi)) {
+            const it = r.srcItem(fi) orelse continue;
+            if (it.fg.is_correlated) return r.fail(if (fi.alias) |al| al.name.pos else 0);
+            fi.lateral = false;
+        };
         // A core whose LATERAL items can all be rewritten: each item's
         // term known, a subquery's columns known.
         var any = false;
@@ -494,6 +514,22 @@ fn isLaterRef(items: []tree.FromItem, fi: *const tree.FromItem) bool {
         if (x.source == .nested) if (isLaterRef(x.source.nested, fi)) return true;
     }
     return false;
+}
+
+/// Whether `fi` is an item of `items` itself, not of a group in it.
+fn topLevel(items: []tree.FromItem, fi: *const tree.FromItem) bool {
+    for (items) |*x| if (x == fi) return true;
+    return false;
+}
+
+/// Where the first LATERAL item (or function) of group `items` is.
+fn groupPos(items: []const tree.FromItem) u32 {
+    for (items) |it| switch (it.source) {
+        .subquery, .func => if (it.lateral or it.source == .func) if (it.alias) |al| return al.name.pos,
+        .nested => |n| if (groupPos(n) > 0) return groupPos(n),
+        .table => {},
+    };
+    return 0;
 }
 
 /// The items of a FROM, nested ones' items in their place.

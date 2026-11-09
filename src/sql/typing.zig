@@ -956,7 +956,7 @@ const Common = struct {
     string: ?Operand = null,
 
     fn add(m: *Common, c: *Ctx, e: *const Expr) Oom!void {
-        if (m.failed or e.op == TK.NULL) return;
+        if (m.failed or isNull(e)) return;
         const o = c.operand(e);
         if (c.rules.unknown_strings and e.op == TK.STRING) {
             if (m.string == null) m.string = o;
@@ -983,6 +983,20 @@ const Common = struct {
         return if (m.string) |o| o.id else unknown;
     }
 };
+
+/// Whether `e` is NULL whatever the row: NULL, or a CASE whose values
+/// are all such (`CASE WHEN count(*) >= 0 THEN NULL END`, desugar.zig's
+/// empty grouping set), which leaves the common type to the others.
+fn isNull(e: *const Expr) bool {
+    if (e.op == TK.NULL) return true;
+    if (e.op != TK.CASE or !e.useXList()) return false;
+    const list = e.x.list orelse return false;
+    const items = list.slice();
+    var i: usize = 1;
+    while (i < items.len) : (i += 2) if (!isNull(items[i].expr.?)) return false;
+    // No ELSE: NULL.
+    return items.len % 2 == 0 or isNull(items[items.len - 1].expr.?);
+}
 
 /// The common type of `args` (Common).
 pub fn commonOf(c: *Ctx, args: []const Operand) Oom!TypeId {

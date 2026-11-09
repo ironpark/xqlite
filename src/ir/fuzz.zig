@@ -371,7 +371,9 @@ const Db = struct {
     /// is true, as are `coalesce(NULL, 'on')`, `greatest(false, 'yes')`,
     /// `true BETWEEN 'f' AND 't'` and the column of `VALUES (true),
     /// ('no')` booleans), which the untyped SQLite text of a view or a
-    /// CHECK, and a parameter bound as text, compare as text. And so is
+    /// CHECK, and a parameter bound as text, compare as text; and a
+    /// string literal read as the number it is compared with (`7 >= '-0'`
+    /// is true, overload.zig's numberInput(): Parse.xq_exact_numeric). And so is
     /// a value the dialect writes by its type: a boolean made text
     /// (`'x' || true` is 'xtrue', concat(false) 'f': xq_pg_bool_text(),
     /// xq_pg_bool_out()), pg_typeof() of a type known (xq_pg_typeof_as()),

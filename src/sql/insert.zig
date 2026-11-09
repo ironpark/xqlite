@@ -758,6 +758,9 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     }
 
     var append_flag = false;
+    // xqlite: the rowid is the INTEGER PRIMARY KEY's DEFAULT (ipkDefault()),
+    // checked as a given one.
+    var ipk_default = false;
     if (!is_view) {
         // The row xUpdate deletes: none.
         if (t.isVirtual()) _ = aux.addOp2(v, OP.Null, 0, reg_ins);
@@ -791,6 +794,17 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             }
         } else if (t.isVirtual() or without_rowid) {
             _ = aux.addOp2(v, OP.Null, 0, reg_rowid);
+        } else if (ipkDefault(p, t)) |dflt| {
+            ipk_default = true;
+            // xqlite: a typed dialect's INTEGER PRIMARY KEY left out takes
+            // its DEFAULT (PostgreSQL's `id int PRIMARY KEY DEFAULT 99`;
+            // SQLite gives a new rowid), a new rowid where it is NULL.
+            ec.exprCode(p, dflt, reg_rowid);
+            const addr1 = aux.addOp1(v, OP.NotNull, reg_rowid);
+            _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
+            aux.jumpHere(v, addr1);
+            _ = aux.addOp1(v, OP.MustBeInt, reg_rowid);
+            main_mod.mayAbort(p);
         } else {
             _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
             append_flag = true;
@@ -807,7 +821,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             main_mod.mayAbort(p);
         } else {
             var is_replace = false;
-            generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0, on_error, end_of_loop, &is_replace, null, upsert);
+            generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0 or ipk_default, on_error, end_of_loop, &is_replace, null, upsert);
             if (db.flags.ForeignKeys) fkey.fkCheck(p, t, 0, reg_ins, null, false);
             // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
             // trigger programs (a REPLACE delete then resets the seek
@@ -1716,4 +1730,12 @@ pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, i_base_arg:
     }
     if (i_base > p.n_tab) p.n_tab = i_base;
     return i;
+}
+
+/// xqlite: the DEFAULT of the INTEGER PRIMARY KEY of `t` when a statement
+/// of a typed dialect (typing.active()) leaves the column out; null for
+/// SQLite's dialect, whose bytecode gives a new rowid.
+fn ipkDefault(p: *Parse, t: *Table) ?*Expr {
+    if (!typing.active(p.db) or t.i_pkey < 0) return null;
+    return build.columnExprAuth(t, &t.cols[@intCast(t.i_pkey)], p);
 }

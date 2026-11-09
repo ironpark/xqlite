@@ -975,16 +975,21 @@ pub const Parser = struct {
     /// GROUP BY [ALL | DISTINCT] items: plain expressions, or with ROLLUP,
     /// CUBE, GROUPING SETS and () the grouping sets they expand to (the
     /// product of the items' sets), each a list of the indexes of its
-    /// expressions in `c.group_by` (every expression once).
+    /// expressions in `c.group_by` (every expression once), and the items
+    /// as written (`c.group_written`).
     fn groupBy(p: *Parser, c: *tree.Core) Error!void {
         const distinct = p.c.eatKw("distinct");
         if (!distinct) _ = p.c.eatKw("all");
+        c.group_distinct = distinct;
         var items: std.ArrayList([]const []const *Expr) = .empty;
+        var written: std.ArrayList(tree.GroupItem) = .empty;
         var plain = true;
         while (true) {
             const t = p.c.peek();
             if (p.atGroupingConstruct() or (t.kind == .lparen and p.c.peekAt(1).kind == .rparen)) plain = false;
-            try items.append(p.arena, try p.groupItem(false));
+            var w: tree.GroupItem = undefined;
+            try items.append(p.arena, try p.groupItem(false, &w));
+            try written.append(p.arena, w);
             if (!p.c.eat(.comma)) break;
         }
         if (plain) {
@@ -1026,6 +1031,34 @@ pub const Parser = struct {
         }
         c.group_by = exprs.items;
         c.grouping_sets = out.items;
+        // The written items' expressions those of `group_by` (what later
+        // passes change in place).
+        for (written.items) |*w| try p.groupWrittenOf(w, exprs.items);
+        c.group_written = written.items;
+    }
+
+    /// GROUP BY item `w` with each of its expressions the one of `exprs`
+    /// the same.
+    fn groupWrittenOf(p: *Parser, w: *tree.GroupItem, exprs: []const *Expr) Error!void {
+        const same = struct {
+            fn of(e: *Expr, xs: []const *Expr) *Expr {
+                for (xs) |x| if (desugar.sameExpr(x, e)) return x;
+                return e;
+            }
+        };
+        switch (w.*) {
+            .expr => |e| w.* = .{ .expr = same.of(e, exprs) },
+            .list => |l| {
+                const out = try p.arena.alloc(*Expr, l.len);
+                for (l, out) |e, *x| x.* = same.of(e, exprs);
+                w.* = .{ .list = out };
+            },
+            inline .rollup, .cube, .sets => |items, tag| {
+                const out = try p.arena.dupe(tree.GroupItem, items);
+                for (out) |*x| try p.groupWrittenOf(x, exprs);
+                w.* = @unionInit(tree.GroupItem, @tagName(tag), out);
+            },
+        }
     }
 
     fn atGroupingConstruct(p: *const Parser) bool {
@@ -1033,19 +1066,23 @@ pub const Parser = struct {
         return p.c.isKw("grouping") and p.c.isKwAt(1, "sets");
     }
 
-    /// The grouping sets of a GROUP BY item; `nested`: in GROUPING SETS,
-    /// where `(a, b)` is one set.
-    fn groupItem(p: *Parser, nested: bool) Error![]const []const *Expr {
+    /// The grouping sets of a GROUP BY item, and in `written` the item;
+    /// `nested`: in GROUPING SETS, where `(a, b)` is one set.
+    fn groupItem(p: *Parser, nested: bool, written: *tree.GroupItem) Error![]const []const *Expr {
         const t = p.c.peek();
         if ((t.isKw("rollup") or t.isKw("cube")) and p.c.peekAt(1).kind == .lparen) {
             const cube = t.isKw("cube");
             p.c.skipN(2);
             var elems: std.ArrayList([]const *Expr) = .empty;
+            var ws: std.ArrayList(tree.GroupItem) = .empty;
             while (true) {
-                try elems.append(p.arena, try p.groupElement());
+                var w: tree.GroupItem = undefined;
+                try elems.append(p.arena, try p.groupElement(&w));
+                try ws.append(p.arena, w);
                 if (!p.c.eat(.comma)) break;
             }
             _ = try p.c.expect(.rparen);
+            written.* = if (cube) .{ .cube = ws.items } else .{ .rollup = ws.items };
             const n = elems.items.len;
             var out: std.ArrayList([]const *Expr) = .empty;
             if (cube) {
@@ -1072,39 +1109,69 @@ pub const Parser = struct {
             p.c.skipN(2);
             _ = try p.c.expect(.lparen);
             var out: std.ArrayList([]const *Expr) = .empty;
+            var ws: std.ArrayList(tree.GroupItem) = .empty;
             while (true) {
-                try out.appendSlice(p.arena, try p.groupItem(true));
+                var w: tree.GroupItem = undefined;
+                try out.appendSlice(p.arena, try p.groupItem(true, &w));
+                try ws.append(p.arena, w);
                 if (!p.c.eat(.comma)) break;
             }
             _ = try p.c.expect(.rparen);
+            written.* = .{ .sets = ws.items };
             return out.items;
         }
         const out = try p.arena.alloc([]const *Expr, 1);
         if (t.kind == .lparen and p.c.peekAt(1).kind == .rparen) {
             p.c.skipN(2);
             out[0] = &.{};
+            written.* = .{ .list = &.{} };
         } else if (nested and t.kind == .lparen and !p.parenStartsSelect()) {
-            out[0] = try p.groupElement();
+            out[0] = try p.groupElement(written);
         } else {
             const one = try p.arena.alloc(*Expr, 1);
             one[0] = try p.expr0();
             out[0] = one;
+            written.* = .{ .expr = one[0] };
         }
         return out;
     }
 
     /// An element of ROLLUP or CUBE (or a set of GROUPING SETS): an
-    /// expression, or a parenthesized list of them.
-    fn groupElement(p: *Parser) Error![]const *Expr {
-        if (p.c.peek().kind == .lparen and !p.parenStartsSelect()) {
+    /// expression, or a parenthesized list of them; in `written` the
+    /// element (.list where parenthesized).
+    fn groupElement(p: *Parser, written: *tree.GroupItem) Error![]const *Expr {
+        if (p.c.peek().kind == .lparen and !p.parenStartsSelect() and p.parenEndsElement()) {
             p.c.skip();
             const exprs = try p.exprList();
             _ = try p.c.expect(.rparen);
+            written.* = .{ .list = exprs };
             return exprs;
         }
         const one = try p.arena.alloc(*Expr, 1);
         one[0] = try p.expr0();
+        written.* = .{ .expr = one[0] };
         return one;
+    }
+
+    /// Whether the parenthesis here closes before a `,` or `)`: a list
+    /// (a, b) of ROLLUP, CUBE or GROUPING SETS, not an expression
+    /// starting with one, (a) + 1.
+    fn parenEndsElement(p: *const Parser) bool {
+        var depth: usize = 0;
+        var k: usize = 0;
+        while (true) : (k += 1) {
+            switch (p.c.peekAt(k).kind) {
+                .lparen => depth += 1,
+                .rparen => {
+                    depth -= 1;
+                    if (depth == 0) break;
+                },
+                .eof => return true,
+                else => {},
+            }
+        }
+        const next = p.c.peekAt(k + 1).kind;
+        return next == .comma or next == .rparen;
     }
 
     /// A query calling GROUPING(): with a plain GROUP BY, one grouping set
@@ -1267,11 +1334,24 @@ pub const Parser = struct {
         return items.items;
     }
 
+    /// The FROM of an UPDATE or the USING of a DELETE, which the target
+    /// is joined to as by a comma: its first chain grouped as one after
+    /// a comma (groupChain()).
+    fn targetFromList(p: *Parser) Error![]tree.FromItem {
+        var items: std.ArrayList(tree.FromItem) = .empty;
+        try p.tableRef(&items, .comma);
+        items.items[0].join = .none;
+        while (p.c.eat(.comma)) try p.tableRef(&items, .comma);
+        return items.items;
+    }
+
     /// A FROM item and the joins that follow it, appended to `items`
     /// (SQLite's FROM is a flat list, each item joined to those before).
     fn tableRef(p: *Parser, items: *std.ArrayList(tree.FromItem), join: tree.JoinKind) Error!void {
+        const start = items.items.len;
         var first = try p.fromPrimary();
         first.join = join;
+        try p.groupOnRefs(first, items.items);
         try items.append(p.arena, first);
         while (true) {
             var natural = false;
@@ -1298,6 +1378,7 @@ pub const Parser = struct {
             var item = try p.fromPrimary();
             item.join = kind;
             item.natural = natural;
+            try p.groupOnRefs(item, items.items);
             if (kind != .cross and !natural) {
                 if (p.c.eatKw("on")) {
                     item.on = try p.expr0();
@@ -1310,6 +1391,70 @@ pub const Parser = struct {
             }
             try items.append(p.arena, item);
         }
+        if (join == .comma) try groupChain(p, items, start);
+    }
+
+    /// `a, b RIGHT JOIN c ON ...`: PostgreSQL joins c to b alone (the
+    /// comma binds loosest), SQLite's flat FROM to both a and b. A chain
+    /// after a comma (items `start`..) with a RIGHT or FULL JOIN becomes
+    /// one parenthesized item, `a, (b RIGHT JOIN c ON ...)`; one of only
+    /// inner, LEFT and cross joins gives the same rows flat and stays so.
+    fn groupChain(p: *Parser, items: *std.ArrayList(tree.FromItem), start: usize) Error!void {
+        const chain = items.items[start..];
+        // The ON of a join after the comma sees only the chain's items
+        // (PostgreSQL's 42P01 for `a, b JOIN c ON a.x = c.z`; the text
+        // of a catalog view keeps SQLite's flat FROM).
+        if (!p.no_path) for (chain[1..]) |it| if (it.on) |on| try p.onRefs(on, items.items[0..start], chain);
+        const outer = for (chain[1..]) |it| {
+            if (it.join == .right or it.join == .full) break true;
+        } else false;
+        if (!outer) return;
+        const inner = try p.arena.dupe(tree.FromItem, chain);
+        inner[0].join = .none;
+        items.shrinkRetainingCapacity(start);
+        try items.append(p.arena, .{ .join = .comma, .source = .{ .nested = inner } });
+    }
+
+    /// Fail on an ON in parenthesized group `it` naming an item of
+    /// `before` (PostgreSQL's 42P01 for `a, (b JOIN c ON a.x = c.z)`).
+    fn groupOnRefs(p: *Parser, it: tree.FromItem, before: []const tree.FromItem) Error!void {
+        if (it.source != .nested or before.len == 0 or p.no_path) return;
+        const inner = it.source.nested;
+        for (inner) |x| {
+            if (x.on) |on| try p.onRefs(on, before, inner);
+            try p.groupOnRefs(x, before);
+        }
+    }
+
+    /// Fail on a qualified column of `on` (not in a subquery) naming an
+    /// item of `before` and none of `chain`.
+    fn onRefs(p: *Parser, e: *const Expr, before: []const tree.FromItem, chain: []const tree.FromItem) Error!void {
+        switch (e.kind) {
+            .column => |parts| if (parts.len >= 2) {
+                const t = parts[parts.len - 2];
+                if (!itemNamed(chain, t.text) and itemNamed(before, t.text)) return p.failFields(t.pos, .of("42P01"), .{
+                    .message = try std.fmt.allocPrint(p.arena, "invalid reference to FROM-clause entry for table \"{s}\"", .{t.text}),
+                    .detail = try std.fmt.allocPrint(p.arena, "There is an entry for table \"{s}\", but it cannot be referenced from this part of the query.", .{t.text}),
+                });
+            },
+            .subquery, .exists, .in_select => return,
+            else => {},
+        }
+        var it = Children.of(e);
+        while (it.next()) |x| try p.onRefs(x, before, chain);
+    }
+
+    /// Whether an item of `items` (or of a nested item's) is named `name`.
+    fn itemNamed(items: []const tree.FromItem, name: []const u8) bool {
+        for (items) |it| {
+            const n: ?[]const u8 = if (it.alias) |al| al.name.text else switch (it.source) {
+                .table => |q| q.name.text,
+                .nested => |inner| if (itemNamed(inner, name)) return true else null,
+                else => null,
+            };
+            if (n) |x| if (std.ascii.eqlIgnoreCase(x, name)) return true;
+        }
+        return false;
     }
 
     /// A FROM item naming a table, or a catalog view.
@@ -3974,7 +4119,7 @@ pub const Parser = struct {
         try p.c.expectKw("set");
         u.sets = try p.setList();
         try p.setColumns(u.table, rel.alias orelse u.table.name, u.sets);
-        if (p.c.eatKw("from")) u.from = try p.fromList();
+        if (p.c.eatKw("from")) u.from = try p.targetFromList();
         if (p.c.eatKw("where")) {
             u.where = if (p.c.isKw("current") and p.c.isKwAt(1, "of")) try @import("cursor.zig").currentOf(p, rel.q, u.alias) else try p.expr0();
         }
@@ -4001,7 +4146,7 @@ pub const Parser = struct {
                 d.alias = .{ .text = p.val(a), .pos = a.start };
             }
         }
-        if (p.c.eatKw("using")) d.using = try p.fromList();
+        if (p.c.eatKw("using")) d.using = try p.targetFromList();
         if (p.c.eatKw("where")) {
             d.where = if (p.c.isKw("current") and p.c.isKwAt(1, "of")) try @import("cursor.zig").currentOf(p, rel.q, d.alias) else try p.expr0();
         }

@@ -240,6 +240,11 @@ pub const Func = struct {
     /// a type a frontend kept from a statement it ran (PostgreSQL's
     /// cursors). 0 for none. Metadata only.
     result_type_id: u16 = 0,
+    /// A GROUP BY term the frontend made the key of its one argument
+    /// (PostgreSQL's xq_pg_iv_key() of an interval): it groups by that
+    /// argument, which the select list names (desugar.zig's grouping
+    /// sets match the argument). Metadata only.
+    group_key: bool = false,
 };
 
 pub const InList = struct { e: *Expr, not: bool, items: []*Expr };
@@ -488,6 +493,14 @@ pub const Core = struct {
     /// names, once. Also a plain GROUP BY whose query calls GROUPING():
     /// one set of all.
     grouping_sets: ?[]const []const u32 = null,
+    /// The GROUP BY of `grouping_sets` as written (ROLLUP, CUBE, GROUPING
+    /// SETS, () and expressions), for render.zig's keep (a view's
+    /// pg_get_viewdef()); lower.zig and render.zig otherwise go by
+    /// `grouping_sets`. Null where the frontend gives none.
+    group_written: ?[]const GroupItem = null,
+    /// GROUP BY DISTINCT (each grouping set once, `grouping_sets`
+    /// already so): render.zig's keep only.
+    group_distinct: bool = false,
     having: ?*Expr = null,
     windows: []NamedWindow = &.{},
     /// The last `hidden` result columns are not columns of the query to
@@ -496,6 +509,21 @@ pub const Core = struct {
     /// lower.zig only (render.zig cannot say it).
     hidden: u16 = 0,
     pos: u32 = 0,
+};
+
+/// A GROUP BY item as written (Core.group_written).
+pub const GroupItem = union(enum) {
+    /// An expression: at the top, an item; in ROLLUP and CUBE, an
+    /// element; in GROUPING SETS, a set of it.
+    expr: *Expr,
+    /// (a, b), or () where empty: a set (of ROLLUP's or CUBE's elements,
+    /// of GROUPING SETS, or () at the top).
+    list: []const *Expr,
+    /// ROLLUP (...) and CUBE (...) of elements .expr or .list.
+    rollup: []const GroupItem,
+    cube: []const GroupItem,
+    /// GROUPING SETS (...) of any items.
+    sets: []const GroupItem,
 };
 
 pub const NamedWindow = struct { name: Name, spec: *WindowSpec };

@@ -90,7 +90,7 @@ pg_get_viewdef
    FROM e
   GROUP BY CUBE(d, s);
 (1 row)
-==== case 09901626829009bc pg_get_viewdef() of a WITH TIES view
+==== case fbc39c82b94e9edc pg_get_viewdef() of a WITH TIES view
 pg_get_viewdef
  SELECT id,
     d
@@ -104,4 +104,189 @@ pg_get_viewdef
   ORDER BY d
  OFFSET 1
  FETCH FIRST (2) ROWS WITH TIES;
+(1 row)
+==== case 64750ae8f8070007 pg_get_viewdef() of ROLLUP, CUBE and GROUPING SETS as written
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY ROLLUP(a, b);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY CUBE(a, b);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY GROUPING SETS ((a, b), (a), ());
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY GROUPING SETS ((a, b), (a), (b), ());
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY a, ROLLUP(b);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY CUBE(a), ROLLUP(b);
+(1 row)
+==== case dae26978ec8e2ce1 pg_get_viewdef() of nested grouping sets and composite elements
+pg_get_viewdef
+ SELECT a,
+    b,
+    c,
+    count(*) AS count
+   FROM t
+  GROUP BY GROUPING SETS (ROLLUP(a, b), (c), (), (a, c), CUBE(c));
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    c,
+    count(*) AS count
+   FROM t
+  GROUP BY ROLLUP((a, b), c);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    c,
+    count(*) AS count
+   FROM t
+  GROUP BY CUBE((a, b), c);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY GROUPING SETS ((a), (b), (a), (), (a));
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY GROUPING SETS (ROLLUP(a), (b), ROLLUP(b));
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    count(*) AS count
+   FROM t
+  GROUP BY ROLLUP(a, a);
+(1 row)
+pg_get_viewdef
+ SELECT (a + 1) AS "?column?",
+    count(*) AS count
+   FROM t
+  GROUP BY ROLLUP((a + 1), (b * 2));
+(1 row)
+pg_get_viewdef
+ SELECT count(*) AS count
+   FROM t
+  GROUP BY GROUPING SETS (((a + 1)), (a, (b + 1)));
+(1 row)
+pg_get_viewdef
+ SELECT count(*) AS count
+   FROM t
+  GROUP BY ROLLUP((a + 1), b);
+(1 row)
+==== case caef43e1c3525b6d pg_get_viewdef() of GROUP BY DISTINCT, (), one grouping set
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY DISTINCT ROLLUP(a, b), CUBE(a);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    count(*) AS count
+   FROM t
+  GROUP BY DISTINCT a;
+(1 row)
+pg_get_viewdef
+ SELECT count(*) AS count
+   FROM t
+  GROUP BY ();
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    count(*) AS count
+   FROM t
+  GROUP BY a;
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY a, b;
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count
+   FROM t
+  GROUP BY a, ROLLUP(b);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    b,
+    count(*) AS count,
+    GROUPING(a, b) AS g
+   FROM t
+  GROUP BY GROUPING SETS ((a, b)), ROLLUP(a);
+(1 row)
+pg_get_viewdef
+ SELECT a,
+    count(*) AS count
+   FROM t
+  GROUP BY a, ROLLUP(b);
+(1 row)
+==== case 9bb0da81eedb4bb9 grouping sets with a window function in a view
+shown
+t
+(1 row)
+a|b|s|r
+2||35|1
+1||30|2
+2|1|30|2
+1|2|20|4
+1|1|10|5
+2||5|6
+(6 rows)
+a|b|s
+1|1|10
+1|2|20
+1||30
+2|1|30
+2||5
+2||35
+||65
+(7 rows)
+==== case 71ab656b8cb17811 a view comparing numbers with string literals reads them as numbers
+a|b|c|d|e|g
+t|t|t|t|t|t
+(1 row)
+i
+10
 (1 row)

@@ -701,8 +701,9 @@ pub const Renderer = struct {
         }
         if (c.group_by.len > 0 or (r.keep and c.grouping_sets != null)) {
             try r.put(" GROUP BY ");
+            if (r.keep and c.group_distinct) try r.put("DISTINCT ");
             if (r.keep and c.grouping_sets != null) {
-                try r.groupingSets(c.group_by, c.grouping_sets.?);
+                try r.groupingSets(c);
             } else try r.exprList(c.group_by);
         }
         if (c.having) |h| {
@@ -721,47 +722,106 @@ pub const Renderer = struct {
         }
     }
 
-    /// The grouping sets of a GROUP BY as written (keep): ROLLUP (a, b)
-    /// or CUBE (a, b) where the sets are theirs over all of `exprs` in
-    /// order, else GROUPING SETS ((a, b), (a), ()).
-    fn groupingSets(r: *Renderer, exprs: []const *tree.Expr, sets: []const []const u32) Error!void {
-        const n = exprs.len;
-        if (sets.len == 1 and sets[0].len == n) return r.exprList(exprs);
-        const rollup = n > 0 and sets.len == n + 1 and for (sets, 0..) |set, k| {
-            if (set.len != n - k) break false;
-            const prefix = for (set, 0..) |x, j| {
-                if (x != j) break false;
-            } else true;
-            if (!prefix) break false;
-        } else true;
-        const cube = n > 0 and n < 16 and sets.len == (@as(usize, 1) << @intCast(n)) and for (sets, 0..) |set, k| {
-            // (a, b), (a), (b), (): mask 2^n-1-k, the first expression's
-            // the high bit.
-            const m = (@as(usize, 1) << @intCast(n)) - 1 - k;
-            var i: usize = 0;
-            var ok = true;
-            for (0..n) |j| if (m & (@as(usize, 1) << @intCast(n - 1 - j)) != 0) {
-                if (i >= set.len or set[i] != j) ok = false;
-                i += 1;
-            };
-            if (!ok or i != set.len) break false;
-        } else true;
-        if (rollup or cube) {
-            try r.put(if (rollup) "ROLLUP (" else "CUBE (");
-            try r.exprList(exprs);
-            return r.put(")");
-        }
-        try r.put("GROUPING SETS (");
-        for (sets, 0..) |set, k| {
-            if (k > 0) try r.put(", ");
-            try r.put("(");
-            for (set, 0..) |x, j| {
-                if (j > 0) try r.put(", ");
-                try r.expr(exprs[x]);
+    /// The GROUP BY of grouping sets as PostgreSQL's pg_get_viewdef()
+    /// has them (keep): one set of expressions a plain GROUP BY (as
+    /// parseCheckAggregates() makes it); else the items as written
+    /// (`group_written`), with () at the top dropped (all () one ()),
+    /// an expression repeated at the top or in a set once and GROUPING
+    /// SETS in GROUPING SETS flattened, as transformGroupClause() has
+    /// them; without them GROUPING SETS ((a, b), ...).
+    fn groupingSets(r: *Renderer, c: *const tree.Core) Error!void {
+        const sets = c.grouping_sets.?;
+        if (sets.len == 1 and c.group_by.len > 0) return r.exprList(c.group_by);
+        const written = c.group_written orelse {
+            try r.put("GROUPING SETS (");
+            for (sets, 0..) |set, k| {
+                if (k > 0) try r.put(", ");
+                try r.put("(");
+                for (set, 0..) |x, j| {
+                    if (j > 0) try r.put(", ");
+                    try r.expr(c.group_by[x]);
+                }
+                try r.put(")");
             }
-            try r.put(")");
+            return r.put(")");
+        };
+        var any = false;
+        for (written, 0..) |w, i| {
+            switch (w) {
+                .list => |l| if (l.len == 0) continue,
+                .expr => |e| if (for (written[0..i]) |x| {
+                    if (x == .expr and desugar.sameExpr(x.expr, e)) break true;
+                } else false) continue,
+                else => {},
+            }
+            if (any) try r.put(", ");
+            any = true;
+            try r.groupItem(w);
         }
-        try r.put(")");
+        if (!any) try r.put("()");
+    }
+
+    /// An item of groupingSets(): an expression, ROLLUP (...), CUBE
+    /// (...) or GROUPING SETS (...); in ROLLUP and CUBE an element
+    /// (a, b), an expression where one.
+    fn groupItem(r: *Renderer, w: tree.GroupItem) Error!void {
+        switch (w) {
+            .expr => |e| try r.expr(e),
+            .list => |l| {
+                const xs = try r.onceEach(l);
+                if (xs.len == 1) return r.expr(xs[0]);
+                try r.put("(");
+                try r.exprList(xs);
+                try r.put(")");
+            },
+            .rollup, .cube => |elems| {
+                try r.put(if (w == .rollup) "ROLLUP (" else "CUBE (");
+                for (elems, 0..) |x, i| {
+                    if (i > 0) try r.put(", ");
+                    try r.groupItem(x);
+                }
+                try r.put(")");
+            },
+            .sets => |items| {
+                try r.put("GROUPING SETS (");
+                var first = true;
+                try r.setsOf(items, &first);
+                try r.put(")");
+            },
+        }
+    }
+
+    /// The sets of GROUPING SETS `items` (of the GROUPING SETS in them
+    /// flattened): (a, b), (a), (), ROLLUP (...), CUBE (...).
+    fn setsOf(r: *Renderer, items: []const tree.GroupItem, first: *bool) Error!void {
+        for (items) |x| {
+            if (x == .sets) {
+                try r.setsOf(x.sets, first);
+                continue;
+            }
+            if (!first.*) try r.put(", ");
+            first.* = false;
+            switch (x) {
+                .expr, .list => {
+                    try r.put("(");
+                    try r.exprList(if (x == .expr) &.{x.expr} else try r.onceEach(x.list));
+                    try r.put(")");
+                },
+                else => try r.groupItem(x),
+            }
+        }
+    }
+
+    /// `l` with each expression once.
+    fn onceEach(r: *Renderer, l: []const *tree.Expr) Error![]const *tree.Expr {
+        var xs: std.ArrayList(*tree.Expr) = .empty;
+        for (l) |e| {
+            const seen = for (xs.items) |x| {
+                if (desugar.sameExpr(x, e)) break true;
+            } else false;
+            if (!seen) try xs.append(r.a(), e);
+        }
+        return xs.items;
     }
 
     pub fn targets(r: *Renderer, cols: []const tree.ResultCol) Error!void {

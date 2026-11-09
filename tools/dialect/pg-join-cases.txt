@@ -1,0 +1,135 @@
+-- Differential cases of PostgreSQL's FROM: a comma binds looser than
+-- JOIN, so `a, b RIGHT JOIN c ON ...` is `a, (b RIGHT JOIN c ON ...)`
+-- (the parser groups a chain after a comma with a RIGHT or FULL JOIN so),
+-- LATERAL references across the comma from such a chain, and the ON of
+-- a join after a comma, which sees only its chain (xqt dialect-diff pg
+-- tools/dialect/pg-join-cases.txt), in the format of pg-cases.txt: each
+-- case starts with a "-- case:" line and runs on an empty database, in
+-- PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages must
+-- be the same. The expected output is PostgreSQL 18's.
+
+-- case: RIGHT JOIN after a comma joins its own chain only
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO a VALUES (1), (2); INSERT INTO c VALUES (5);
+SELECT * FROM a, b RIGHT JOIN c ON b.y = c.z ORDER BY x;
+SELECT * FROM a, (b RIGHT JOIN c ON b.y = c.z) ORDER BY x;
+SELECT count(*) FROM a, b RIGHT OUTER JOIN c ON b.y = c.z;
+
+-- case: FULL JOIN after a comma
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO a VALUES (1), (2); INSERT INTO b VALUES (5), (6); INSERT INTO c VALUES (5), (7);
+SELECT * FROM a, b FULL JOIN c ON b.y = c.z ORDER BY x, y NULLS LAST, z NULLS LAST;
+SELECT a.x, b.y, c.z FROM a, b FULL OUTER JOIN c ON b.y = c.z WHERE c.z IS NULL ORDER BY 1, 2;
+
+-- case: an empty left side of the comma
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO b VALUES (1); INSERT INTO c VALUES (1), (2);
+SELECT * FROM a, b RIGHT JOIN c ON b.y = c.z;
+SELECT * FROM b RIGHT JOIN c ON b.y = c.z, a;
+
+-- case: a chain before the comma stays as it is
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO a VALUES (1), (2); INSERT INTO c VALUES (5), (6);
+SELECT * FROM a RIGHT JOIN c ON a.x = c.z, a a2 ORDER BY z, a2.x;
+SELECT * FROM c LEFT JOIN b ON b.y = c.z FULL JOIN a ON a.x = c.z, a a2 ORDER BY z NULLS LAST, a.x NULLS LAST, a2.x;
+
+-- case: mixed chains after a comma
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int); CREATE TABLE d (w int);
+INSERT INTO a VALUES (1), (2); INSERT INTO b VALUES (5); INSERT INTO c VALUES (5), (6); INSERT INTO d VALUES (6), (8);
+SELECT * FROM a, b JOIN c ON b.y = c.z RIGHT JOIN d ON c.z = d.w ORDER BY x, w;
+SELECT * FROM a, b RIGHT JOIN c ON b.y = c.z LEFT JOIN d ON d.w = c.z ORDER BY x, z;
+SELECT * FROM a, c FULL JOIN d ON c.z = d.w, b RIGHT JOIN d d2 ON b.y = d2.w ORDER BY 1, 2 NULLS LAST, 3 NULLS LAST, 5;
+SELECT * FROM a, b CROSS JOIN c FULL JOIN d ON c.z = d.w ORDER BY 1, 2, 3 NULLS LAST, 4 NULLS LAST;
+SELECT * FROM a, b LEFT JOIN c ON b.y = c.z ORDER BY x;
+
+-- case: USING and NATURAL in a chain after a comma
+CREATE TABLE a (x int); CREATE TABLE b (k int, y int); CREATE TABLE c (k int, z int);
+INSERT INTO a VALUES (1), (2); INSERT INTO b VALUES (1, 10); INSERT INTO c VALUES (1, 100), (2, 200);
+SELECT * FROM a, b RIGHT JOIN c USING (k) ORDER BY x, k;
+SELECT * FROM a, b FULL JOIN c USING (k) ORDER BY x, k;
+SELECT * FROM a, b NATURAL RIGHT JOIN c ORDER BY x, k;
+SELECT * FROM a, b NATURAL FULL JOIN c ORDER BY x, k;
+SELECT a.x, k, b.y, c.z FROM a, b FULL JOIN c USING (k) ORDER BY 1, 2;
+
+-- case: SELECT * and qualified names of a grouped chain
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO a VALUES (1); INSERT INTO c VALUES (5);
+SELECT a.*, c.*, b.* FROM a, b RIGHT JOIN c ON b.y = c.z;
+SELECT t.x, u.y, v.z FROM a t, b u RIGHT JOIN c v ON u.y = v.z;
+SELECT x, y, z FROM a, b RIGHT JOIN c ON y = z WHERE x = 1 AND z = 5;
+
+-- case: a grouped chain in a subquery and with aggregates
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO a VALUES (1), (2), (3); INSERT INTO c VALUES (5), (6);
+SELECT x, count(*), count(y) FROM a, b RIGHT JOIN c ON b.y = c.z GROUP BY x ORDER BY x;
+SELECT (SELECT count(*) FROM a, b RIGHT JOIN c ON b.y = c.z);
+SELECT * FROM (SELECT * FROM a, b FULL JOIN c ON b.y = c.z) s WHERE s.x = 2 ORDER BY z;
+
+-- case: LATERAL across the comma from a RIGHT or FULL JOIN
+CREATE TABLE a (x int); CREATE TABLE b (y int);
+INSERT INTO a VALUES (1), (2);
+SELECT a.x, s.v FROM a, b RIGHT JOIN LATERAL (SELECT a.x * 10 AS v) s ON true ORDER BY 1;
+SELECT a.x, s.v FROM a, b FULL JOIN LATERAL (SELECT a.x * 10 AS v) s ON true ORDER BY 1;
+SELECT a.x, g FROM a, b RIGHT JOIN generate_series(1, a.x) g ON true ORDER BY 1, 2;
+SELECT a.x, s.v FROM a, b RIGHT JOIN LATERAL (SELECT v FROM generate_series(a.x, 3) v) s ON true ORDER BY 1, 2;
+SELECT * FROM a JOIN (b RIGHT JOIN LATERAL (SELECT a.x AS v) s ON true) ON true ORDER BY 1;
+SELECT a.x, s.v FROM a, (b RIGHT JOIN LATERAL (SELECT a.x + 1 AS v) s ON true) ORDER BY 1;
+
+-- case: LATERAL across the comma with rows on both sides
+CREATE TABLE a (x int); CREATE TABLE b (y int);
+INSERT INTO a VALUES (1), (2); INSERT INTO b VALUES (1), (3);
+SELECT a.x, b.y, s.v FROM a, b RIGHT JOIN LATERAL (SELECT a.x AS v) s ON b.y = s.v ORDER BY 1, 2;
+SELECT a.x, b.y, s.v FROM a, b FULL JOIN LATERAL (SELECT a.x AS v) s ON b.y = s.v ORDER BY 1, 2 NULLS LAST;
+SELECT a.x, b.y, s.v FROM a, b LEFT JOIN LATERAL (SELECT a.x + b.y AS v) s ON true ORDER BY 1, 2;
+
+-- case: RIGHT JOIN LATERAL naming the left side of its own join
+CREATE TABLE a (x int); CREATE TABLE b (y int);
+SELECT * FROM a, b RIGHT JOIN LATERAL (SELECT b.y) s ON true;
+
+-- case: FULL JOIN LATERAL naming the left side of its own join
+CREATE TABLE a (x int); CREATE TABLE b (y int);
+SELECT * FROM a, b FULL JOIN LATERAL (SELECT a.x, b.y) s ON true;
+
+-- case: the ON of a RIGHT JOIN after a comma naming an item before it
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+SELECT * FROM a, b RIGHT JOIN c ON a.x = c.z;
+
+-- case: the ON of an inner join after a comma naming an item before it
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+SELECT * FROM a, b JOIN c ON a.x = c.z;
+
+-- case: the ON of a parenthesized join naming an item before it
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+SELECT * FROM a, (b LEFT JOIN c ON c.z = a.x);
+
+-- case: the ON of a LATERAL chain after a comma naming an item before it
+CREATE TABLE a (x int); CREATE TABLE b (y int);
+SELECT * FROM a, b RIGHT JOIN LATERAL (SELECT a.x AS v) s ON a.x = s.v;
+
+-- case: views of a grouped chain
+CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO a VALUES (1), (2); INSERT INTO c VALUES (5);
+CREATE VIEW v1 AS SELECT * FROM a, b RIGHT JOIN c ON b.y = c.z;
+CREATE VIEW v2 AS SELECT a.x, b.y, c.z FROM a, b FULL JOIN c ON b.y = c.z;
+CREATE VIEW v3 AS SELECT a.x, s.q FROM a, b RIGHT JOIN LATERAL (SELECT 7 AS q) s ON true;
+SELECT * FROM v1 ORDER BY x;
+SELECT * FROM v2 ORDER BY x;
+SELECT * FROM v3 ORDER BY x;
+CREATE VIEW v4 AS SELECT a.x, s.q FROM a, (c JOIN LATERAL (SELECT 8 AS q) s ON true);
+SELECT * FROM v4 ORDER BY x;
+INSERT INTO b VALUES (5);
+SELECT * FROM v1 ORDER BY x;
+SELECT * FROM v3 ORDER BY x;
+
+-- case: UPDATE ... FROM and DELETE ... USING with a RIGHT or FULL JOIN
+CREATE TABLE t (id int, v int); CREATE TABLE b (y int); CREATE TABLE c (z int);
+INSERT INTO t VALUES (1, 0), (2, 0); INSERT INTO c VALUES (5);
+UPDATE t SET v = c.z FROM b RIGHT JOIN c ON b.y = c.z;
+SELECT * FROM t ORDER BY id;
+UPDATE t SET v = coalesce(b.y, 0) + c.z + 1 FROM b FULL JOIN c ON b.y = c.z WHERE t.id = 2;
+SELECT * FROM t ORDER BY id;
+DELETE FROM t USING b RIGHT JOIN c ON b.y = c.z WHERE t.id = 1 AND b.y IS NULL;
+SELECT * FROM t ORDER BY id;
+DELETE FROM t USING c, b RIGHT JOIN c c2 ON b.y = c2.z WHERE c.z = c2.z;
+SELECT count(*) FROM t;

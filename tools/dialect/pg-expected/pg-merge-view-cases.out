@@ -141,7 +141,7 @@ id|a|tag
 2|17|b
 3|30|
 (3 rows)
-==== case c83c16cdf5e48986 MERGE: an UPDATE of the primary key, RETURNING the source's columns
+==== case be492b7a71953a8f MERGE: an UPDATE of the primary key, RETURNING the source's columns
 name|id|a
 one|10|10
 (1 row)
@@ -152,3 +152,65 @@ id|a
 10|10
 20|20
 (2 rows)
+==== case 06eacd22e63d518c MERGE into a view pg_get_viewdef() is not printed for here: aggregates and window functions
+ERROR:  cannot delete from view "vf"
+DETAIL:  Views that return aggregate functions are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot delete from view "vb"
+DETAIL:  Views that return aggregate functions are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot delete from view "vw"
+DETAIL:  Views that return window functions are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+==== case 62f7a62d727b4f0d MERGE into a view pg_get_viewdef() is not printed for here: not of one table
+ERROR:  cannot delete from view "vn"
+DETAIL:  Views that do not select from a single table or view are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot update view "vc"
+DETAIL:  Views that do not select from a single table or view are not automatically updatable.
+HINT:  To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger.
+ERROR:  cannot insert into view "vs"
+DETAIL:  Views that do not select from a single table or view are not automatically updatable.
+HINT:  To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT trigger.
+ERROR:  cannot delete from view "vg"
+DETAIL:  Views that do not select from a single table or view are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+ERROR:  cannot delete from view "v0"
+DETAIL:  Views that do not select from a single table or view are not automatically updatable.
+HINT:  To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.
+==== case ca4d4d2b1d68aefe MERGE into a view: columns qualified and quoted, names swapped
+merge_action|id|small|Big|A b
+UPDATE|1|11|21|q
+INSERT|2|12|22|n
+(2 rows)
+merge_action|small|Big|k|ab|s2
+UPDATE|50|5|2|r|50
+INSERT||6|3||
+(2 rows)
+id|Big|small|A b
+1|11|7|q
+2|5|50|r
+3|6||
+(3 rows)
+==== case bf564854951e8235 MERGE into a view: literals of no type into text, numeric, integer and boolean columns
+merge_action|id|s|n|i|b|v
+UPDATE|1|q|2.35|12|t|abc
+UPDATE|2|yes||2|t|zy
+INSERT|3|new|3.50|7|f|w
+(3 rows)
+id|s|n|i|b|v
+1|q|2.35|12|t|abc
+2|yes||2|t|zy
+3|new|3.50|7|f|w
+(3 rows)
+==== case d5b10464538a1ffa MERGE into a view: literals the column's type does not read
+ERROR:  invalid input syntax for type integer: "abc"
+LINE 1: ...x(id) ON v.id = x.id WHEN MATCHED THEN UPDATE SET i = 'abc';
+                                                                 ^
+ERROR:  invalid input syntax for type numeric: "q"
+LINE 1: ...S x(id) ON v.id = x.id WHEN MATCHED THEN UPDATE SET n = 'q';
+                                                                   ^
+ERROR:  invalid input syntax for type boolean: "maybe"
+LINE 1: ...id) ON v.id = x.id WHEN MATCHED THEN UPDATE SET b = 'maybe';
+                                                               ^
+ERROR:  value too long for type character varying(2)

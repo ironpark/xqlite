@@ -993,19 +993,33 @@ pub const Lowerer = struct {
                 },
                 .nested => |inner| {
                     const inner_list = try l.fromItems(inner);
+                    const n = if (list) |sl| sl.len() else 0;
                     list = try ir.from.nested(p, list, inner_list, alias, &ou);
+                    // (b JOIN LATERAL (...) ...) after other items: the
+                    // group, a subquery, is LATERAL for its members to name
+                    // them (`a, b RIGHT JOIN LATERAL (SELECT a.x) ...`,
+                    // which the parser groups so).
+                    if (i > 0 and inner.len > 1 and namesBefore(inner)) if (list) |sl| if (sl.len() == n + 1) {
+                        sl.at(n).fg.xq_lateral = true;
+                    };
                 },
             }
-            // After a comma: where a LATERAL subquery of a RIGHT or FULL
-            // JOIN may not name the items before it (resolve.zig's
-            // lateralRefOk()).
-            if (item.join == .comma) if (list) |sl| {
-                sl.at(sl.len() - 1).fg.xq_comma = true;
-            };
             try l.check();
             if (l.origins) |o| if (o.want_from_items) if (list) |sl| try o.from_items.put(l.arena(), &items[i], .{ .list = sl, .i = sl.len() - 1 });
         }
         return list;
+    }
+
+    /// Whether a member of FROM items `items` may name the items before
+    /// them: a LATERAL subquery or a function (LATERAL in PostgreSQL).
+    fn namesBefore(items: []const tree.FromItem) bool {
+        for (items) |it| switch (it.source) {
+            .table => {},
+            .subquery => if (it.lateral) return true,
+            .func => return true,
+            .nested => |n| if (namesBefore(n)) return true,
+        };
+        return false;
     }
 
     /// `(s) AS x(a, b)`: (WITH xq_alias(a, b) AS (s) SELECT * FROM
@@ -1532,17 +1546,17 @@ pub const Lowerer = struct {
     }
 };
 
-test "lower: a LATERAL VALUES item after a comma is marked as one" {
+test "lower: a RIGHT JOIN chain after a comma is a LATERAL group" {
     try dialect.Dialect.requireBuilt(&.{.postgres});
     var c: @import("../sql/sql_test.zig").Conn = undefined;
     try c.open();
     defer c.close();
     @import("../sql/main.zig").setDialect(c.db, .postgres);
-    try c.exec("CREATE TABLE a (x int)");
-    // `a, v RIGHT JOIN LATERAL (...)`: the reference to a is past the
-    // comma before v, a LATERAL VALUES (fromItems()' renamed form) as a
-    // LATERAL subquery.
-    const msg = "a LATERAL reference to \"a\" before a comma from a RIGHT or FULL JOIN is not supported";
-    try c.expectError("SELECT 1 FROM a, LATERAL (SELECT 1) v RIGHT JOIN LATERAL (SELECT a.x) c ON true", msg);
-    try c.expectError("SELECT 1 FROM a, LATERAL (VALUES (1)) v RIGHT JOIN LATERAL (SELECT a.x) c ON true", msg);
+    try c.exec("CREATE TABLE a (x int); CREATE TABLE b (y int); CREATE TABLE c (z int)");
+    try c.exec("INSERT INTO a VALUES (1), (2); INSERT INTO c VALUES (5)");
+    // `a, (b RIGHT JOIN c ...)`, not `(a, b) RIGHT JOIN c`.
+    try c.expectRows("SELECT a.x, b.y, c.z FROM a, b RIGHT JOIN c ON b.y = c.z ORDER BY 1", "1|NULL|5\n2|NULL|5\n");
+    // The group's LATERAL subquery names a, before the comma.
+    try c.expectRows("SELECT a.x, s.v FROM a, b RIGHT JOIN LATERAL (SELECT a.x * 10 AS v) s ON true ORDER BY 1", "1|10\n2|20\n");
+    try c.expectError("SELECT 1 FROM a, b RIGHT JOIN LATERAL (SELECT b.y) s ON true", "invalid reference to FROM-clause entry for table \"b\"\nDETAIL:  The combining JOIN type must be INNER or LEFT for a LATERAL reference.");
 }

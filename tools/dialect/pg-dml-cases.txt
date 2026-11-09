@@ -268,3 +268,15 @@ INSERT INTO target VALUES (1, 'one', 1, 'a', NULL), (2, 'two', 2, 'b', NULL);
 INSERT INTO src VALUES (2, 'TWO', true), (3, 'three', false);
 UPDATE target AS tg SET v = src.w, n = 5, c = src.w, b = src.flag FROM src WHERE src.k = tg.k RETURNING tg.*;
 UPDATE target SET v = src.flag, c = 'x' || src.k FROM src WHERE src.k = target.k RETURNING target.*;
+
+-- case: the DEFAULT of an integer primary key
+CREATE TABLE pk (id int PRIMARY KEY DEFAULT 99, v text DEFAULT 'x');
+INSERT INTO pk DEFAULT VALUES;
+INSERT INTO pk (v) VALUES ('dup');
+INSERT INTO pk (v) VALUES ('dup') ON CONFLICT (id) DO UPDATE SET v = 'upd' RETURNING *;
+INSERT INTO pk (v) VALUES ('n') ON CONFLICT DO NOTHING;
+CREATE TABLE pk2 (id bigint PRIMARY KEY DEFAULT 7, v text);
+INSERT INTO pk2 (v) SELECT 'a' RETURNING *;
+CREATE TABLE pk3 (id int PRIMARY KEY DEFAULT 3000000000, v text);
+INSERT INTO pk3 (v) VALUES ('big');
+SELECT * FROM pk ORDER BY id;

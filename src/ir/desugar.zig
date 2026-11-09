@@ -551,6 +551,8 @@ pub const Desugar = struct {
             branch.cols = set_cols;
             branch.group_by = gb;
             branch.grouping_sets = null;
+            branch.group_written = null;
+            branch.group_distinct = false;
             branch.having = having;
             const b = try d.coreBody(branch);
             out = if (out) |prev| try tree.new(ar, tree.Body, .{ .compound = .{ .op = .@"union", .all = all, .left = prev, .right = b } }) else b;
@@ -651,7 +653,7 @@ pub const Desugar = struct {
         in_set: []const bool,
 
         fn expr(x: *Subst, e: *Expr) Error!*Expr {
-            for (x.groups, 0..) |g, i| if (sameExpr(g, e)) {
+            for (x.groups, 0..) |g, i| if (sameExpr(groupTerm(g), e)) {
                 if (x.in_set[i]) return e;
                 return tree.expr(x.d.a(), e.pos, e.end, .null);
             };
@@ -670,7 +672,7 @@ pub const Desugar = struct {
             if (f.args.len == 0 or f.args.len > 31) return x.d.fail(e.pos, .of("54023"), "GROUPING must have fewer than 32 arguments", .{});
             var v: i64 = 0;
             for (f.args) |arg| {
-                const i = indexOf(x.groups, arg) orelse return x.d.fail(arg.pos, .of("42803"), "arguments to GROUPING must be grouping expressions of the associated query level", .{});
+                const i = groupIndex(x.groups, arg) orelse return x.d.fail(arg.pos, .of("42803"), "arguments to GROUPING must be grouping expressions of the associated query level", .{});
                 v = v * 2 + @intFromBool(!x.in_set[i]);
             }
             return tree.intConst(x.d.a(), e.pos, v);
@@ -716,6 +718,19 @@ pub const Desugar = struct {
 };
 
 // ============================================================ expressions
+
+/// The expression GROUP BY term `g` groups by: the argument of a key
+/// the frontend made of it (tree.Func.group_key), else `g`.
+fn groupTerm(g: *const Expr) *const Expr {
+    if (g.kind == .func and g.kind.func.group_key and g.kind.func.args.len == 1) return g.kind.func.args[0];
+    return g;
+}
+
+/// The index of the GROUP BY term of `groups` that groups by `e`.
+fn groupIndex(groups: []const *Expr, e: *const Expr) ?usize {
+    for (groups, 0..) |g, i| if (sameExpr(groupTerm(g), e)) return i;
+    return null;
+}
 
 fn indexOf(list: []const *Expr, e: *const Expr) ?usize {
     for (list, 0..) |x, i| if (sameExpr(x, e)) return i;

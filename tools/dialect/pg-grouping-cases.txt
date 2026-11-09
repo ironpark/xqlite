@@ -109,3 +109,15 @@ SELECT region, product, string_agg(product, ',') OVER (PARTITION BY region ORDER
 SELECT region, count(*) FILTER (WHERE qty > 5) AS big, sum(count(*) FILTER (WHERE qty > 5)) OVER () AS all_big FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
 SELECT region, (SELECT count(*) FROM sales s2 WHERE s2.qty > 6) AS c, rank() OVER (ORDER BY region) FROM sales GROUP BY ROLLUP (region) ORDER BY 3;
 SELECT pg_typeof(rank() OVER ()), pg_typeof(sum(sum(qty)) OVER ()), pg_typeof(grouping(region)) FROM sales GROUP BY ROLLUP (region) LIMIT 1;
+
+-- case: grouping sets of types grouped by a key (interval, numeric), with and without aggregates, in views
+CREATE TABLE ty (i interval, n numeric(5,2), d date);
+INSERT INTO ty VALUES ('1 day', 1.5, '2024-01-02'), ('24 hours', 1.50, '2024-01-02'), ('2 days', 2.25, '2024-01-03');
+SELECT i FROM ty GROUP BY ROLLUP (i) ORDER BY 1;
+SELECT n FROM ty GROUP BY ROLLUP (n) ORDER BY 1;
+SELECT i, n FROM ty GROUP BY GROUPING SETS ((i), (n), ()) ORDER BY 1, 2;
+SELECT i, grouping(i), count(*) FROM ty GROUP BY ROLLUP (i) ORDER BY 1;
+CREATE VIEW gv AS SELECT i FROM ty GROUP BY ROLLUP (i);
+CREATE VIEW gv2 AS SELECT i, grouping(i) AS g, count(*) FROM ty GROUP BY CUBE (i);
+SELECT * FROM gv ORDER BY 1;
+SELECT * FROM gv2 ORDER BY 1;

@@ -408,10 +408,6 @@ pub const SrcItem = struct {
         /// so it has no covering-index or automatic-index loop and, if a
         /// co-routine itself, its columns are copied there too.
         xq_lateral_ref: bool = false,
-        /// xqlite: a term after a comma, not a JOIN (set by the IR's
-        /// lowering only): a LATERAL subquery of a RIGHT or FULL JOIN
-        /// after it may not name the terms before it.
-        xq_comma: bool = false,
     } = .{},
     i_cursor: i32 = -1,
     col_used: Bitmask = 0,

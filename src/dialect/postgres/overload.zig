@@ -330,14 +330,19 @@ fn compare(c: *Ctx, e: *Expr) Error!bool {
     if (try uuid.uuidCompare(c, e)) return true;
     // A number against a string literal: the literal read as the number's
     // type (int4in(), float8in()), not compared as text (`10 > '7'`).
+    // A choice by type, as an exact numeric is (Parse.xq_exact_numeric):
+    // the untyped SQLite text of a view another dialect made compares
+    // text.
     if (numberInput(c, l)) |f| if (r.op == TK.STRING) {
         try c.readInput(f, r);
         e.right = try c.call(f, &.{r});
+        c.p.xq_exact_numeric = true;
         return true;
     };
     if (numberInput(c, r)) |f| if (l.op == TK.STRING) {
         try c.readInput(f, l);
         e.left = try c.call(f, &.{l});
+        c.p.xq_exact_numeric = true;
         return true;
     };
     if (e.op != TK.IS and e.op != TK.ISNOT and logical(c, l) == .json and logical(c, r) == .json) {

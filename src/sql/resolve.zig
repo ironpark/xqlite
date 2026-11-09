@@ -608,25 +608,17 @@ fn resolveTabFuncArgs(nc: *NameContext, item: *SrcItem, i: usize) error{ParseFai
 /// xqlite: whether the LATERAL subquery (or function) of term `k` of
 /// `src` may name term `m` before it (PostgreSQL's
 /// check_lateral_ref_ok()): not if term `k` is the right side of a
-/// RIGHT or FULL JOIN that `m` is on the left side of. Past a comma (`a, b RIGHT JOIN LATERAL (...)`,
-/// whose RIGHT JOIN PostgreSQL joins to `b` alone and SQLite's flat
-/// FROM to both) the reference is not supported. Records the error.
+/// RIGHT or FULL JOIN that `m` is on the left side of. (The PostgreSQL
+/// parser groups `a, b RIGHT JOIN ...` as `a, (b RIGHT JOIN ...)`, a
+/// LATERAL group that may name a.) Records the error.
 fn lateralRefOk(p: *Parse, src: *SrcList, k: usize, m: *const SrcItem, e: *const Expr) bool {
     const items = src.slice();
     if (!items[k].fg.jointype.RIGHT) return true;
-    const j = (@intFromPtr(m) - @intFromPtr(items.ptr)) / @sizeOf(SrcItem);
     const name = m.alias orelse m.s_tab.?.name;
-    const across = for (items[j + 1 .. k]) |it| {
-        if (it.fg.xq_comma) break true;
-    } else false;
-    if (across) {
-        util.errorMsgState(p, null, .of("0A000"), "a LATERAL reference to \"{s}\" before a comma from a RIGHT or FULL JOIN is not supported", .{name});
-    } else {
-        util.errorFieldsAt(p, null, .of("42P10"), .{
-            .message = std.fmt.allocPrint(p.arena, "invalid reference to FROM-clause entry for table \"{s}\"", .{name}) catch "invalid reference to FROM-clause entry",
-            .detail = "The combining JOIN type must be INNER or LEFT for a LATERAL reference.",
-        });
-    }
+    util.errorFieldsAt(p, null, .of("42P10"), .{
+        .message = std.fmt.allocPrint(p.arena, "invalid reference to FROM-clause entry for table \"{s}\"", .{name}) catch "invalid reference to FROM-clause entry",
+        .detail = "The combining JOIN type must be INNER or LEFT for a LATERAL reference.",
+    });
     expr_mod.recordErrorOffsetOfExpr(p, e);
     return false;
 }

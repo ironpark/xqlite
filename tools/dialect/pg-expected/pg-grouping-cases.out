@@ -316,7 +316,7 @@ west|2
 m
 4
 (1 row)
-==== case dc8bf3922ca15f13 expressions mixing window functions, grouping keys, aggregates and GROUPING()
+==== case 2b41b918750797b7 expressions mixing window functions, grouping keys, aggregates and GROUPING()
 r|diff
 all|0.0000000000000000
 east|0.3333333333333333
@@ -363,3 +363,36 @@ west|3|3
 pg_typeof|pg_typeof|pg_typeof
 bigint|numeric|integer
 (1 row)
+==== case 6498139224294533 grouping sets of types grouped by a key (interval, numeric), with and without aggregates, in views
+i
+1 day
+2 days
+
+(3 rows)
+n
+1.50
+2.25
+
+(3 rows)
+i|n
+1 day|
+2 days|
+|1.50
+|2.25
+|
+(5 rows)
+i|grouping|count
+1 day|0|2
+2 days|0|1
+|1|3
+(3 rows)
+i
+1 day
+2 days
+
+(3 rows)
+i|g|count
+1 day|0|2
+2 days|0|1
+|1|3
+(3 rows)

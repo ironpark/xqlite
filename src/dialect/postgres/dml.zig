@@ -60,6 +60,7 @@ const catalog = @import("../../catalog/catalog.zig");
 const aux = @import("../../vdbe/aux.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const lower = @import("../../ir/lower.zig");
+const callback = @import("../../sql/callback.zig");
 const Quoted = @import("../dialect.zig").Quoted('"');
 const parser = @import("parser.zig");
 const rows = @import("rows.zig");
@@ -302,7 +303,7 @@ fn viewOf(ps: *Parser, t: *int.Table, i_db: usize, pos: u32) Error!*View {
     const text = (try catalog_funcs.viewText(db, a, db.dbs.items[i_db].name, t.name)) orelse {
         // A query deparse.zig does not print: why it is not updatable,
         // from the query SQLite keeps.
-        v.why = storedWhy(t) orelse return ps.unsupported(pos, "MERGE into this view");
+        v.why = storedWhy(db, t) orelse return ps.unsupported(pos, "MERGE into this view");
         return v;
     };
     const z = try a.dupeSentinel(u8, std.mem.trim(u8, text, " \t\r\n;"), 0);
@@ -367,18 +368,33 @@ fn viewOf(ps: *Parser, t: *int.Table, i_db: usize, pos: u32) Error!*View {
     // table ([schema.]table), as the query has them.
     v.exprs = try a.alloc([]const u8, core.cols.len);
     v.base_cols = try a.alloc(?[]const u8, core.cols.len);
-    for (core.cols, v.exprs, v.base_cols) |rc, *x, *bc| {
+    @memset(v.base_cols, null);
+    for (core.cols, v.exprs) |rc, *x| {
         if (rc != .expr) return ps.unsupported(pos, "MERGE into this view");
         const e = rc.expr.e;
         if (e.end <= e.pos or e.end > z.len) return ps.unsupported(pos, "MERGE into this view");
         x.* = z[e.pos..e.end];
-        bc.* = null;
-        if (e.kind != .column) continue;
-        const names = e.kind.column;
-        const col = names[names.len - 1].text;
-        for (base.cols) |*c| if (std.ascii.eqlIgnoreCase(c.name(), col)) {
-            bc.* = c.name();
-            break;
+    }
+    // Which column of the table each one is, as the core resolves the
+    // query (`t.x`, `x` and `"X"` alike; an expression is none), read
+    // again: lowering changes the tree.
+    {
+        var again = Parser.init(a, z, 0, null, .{}) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => return ps.unsupported(pos, "MERGE into this view"),
+        };
+        again.p = p;
+        again.schema_read = true;
+        const s2 = again.select() catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => return ps.unsupported(pos, "MERGE into this view"),
+        };
+        _ = probeOf(&again, s2, .{ .base = base, .out = v.base_cols }) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => {
+                ps.err_in_parse = again.err_in_parse;
+                return error.ParseFailed;
+            },
         };
     }
     const toks = sub.c.src.toks;
@@ -396,8 +412,9 @@ fn viewOf(ps: *Parser, t: *int.Table, i_db: usize, pos: u32) Error!*View {
 }
 
 /// Why view `t` is not automatically updatable, from the query SQLite
-/// keeps of it (unresolved), where that tells; null otherwise.
-fn storedWhy(t: *int.Table) ?NotUpdatable {
+/// keeps of it (unresolved), in viewOf()'s order; null where it does not
+/// tell.
+fn storedWhy(db: *int.Sqlite3, t: *int.Table) ?NotUpdatable {
     const sel = t.u.view.select orelse return null;
     if (sel.prior != null) return .compound;
     if (sel.sel_flags.Distinct) return .distinct;
@@ -405,8 +422,38 @@ fn storedWhy(t: *int.Table) ?NotUpdatable {
     if (sel.having != null) return .having;
     if (sel.with != null) return .with;
     if (sel.limit != null) return .limit;
-    if (sel.e_list) |list| for (list.slice()) |item| if (item.expr) |e| if (e.flags.WinFunc) return .window;
+    if (sel.e_list) |list| {
+        for (list.slice()) |item| if (item.expr) |e| if (storedCall(db, e, .aggregate)) return .aggregate;
+        for (list.slice()) |item| if (item.expr) |e| if (storedCall(db, e, .window)) return .window;
+    }
+    // One table or view: not a join, a subquery or a table-valued
+    // function (a virtual table, not one PostgreSQL's views select from).
+    const src = sel.src orelse return .not_single;
+    if (src.len() != 1) return .not_single;
+    const item = src.at(0);
+    if (item.fg.is_subquery or item.fg.is_tab_func or item.fg.is_nested_from) return .not_single;
+    const name = item.name orelse return .not_single;
+    const schema: ?[]const u8 = if (item.fg.fixed_schema) null else item.u4.database;
+    if (build.findTable(db, name, schema)) |base| if (base.isVirtual()) return .not_single;
     return null;
+}
+
+/// Whether `e` calls an aggregate (as the resolver finds the function:
+/// SQLite's name, its number of arguments) or a window function, not in
+/// its subqueries.
+fn storedCall(db: *int.Sqlite3, e: *const int.Expr, comptime kind: enum { aggregate, window }) bool {
+    if (e.op == int.TK.FUNCTION) {
+        if (e.isWindowFunc()) {
+            if (kind == .window) return true;
+        } else if (kind == .aggregate) {
+            const n: i32 = if (e.x.list) |l| @intCast(l.len()) else 0;
+            if (callback.findFunction(db, e.token(), n, db.enc, false)) |def| if (def.x_finalize != null) return true;
+        }
+    }
+    if (e.left) |x| if (storedCall(db, x, kind)) return true;
+    if (e.right) |x| if (storedCall(db, x, kind)) return true;
+    if (e.useXList()) if (e.x.list) |l| for (l.slice()) |item| if (item.expr) |x| if (storedCall(db, x, kind)) return true;
+    return false;
 }
 
 /// Whether a column of `cols` calls a function `pred` says yes to (not
@@ -419,6 +466,13 @@ fn callsIn(p: *int.Parse, cols: []const tree.ResultCol, comptime pred: fn (*int.
 /// The names and types of the result columns of `s`, lowered and
 /// resolved in a Parse of its own (its error the statement's).
 fn probe(ps: *Parser, s: *tree.Select) Error![]rows.Col {
+    return probeOf(ps, s, null);
+}
+
+/// probe(), and with `origins` (one for each result column), of each
+/// result column that is a column of table `base` (as the core resolves
+/// it, not by its name), that column's name; null for another.
+fn probeOf(ps: *Parser, s: *tree.Select, origins: ?struct { base: *const int.Table, out: []?[]const u8 }) Error![]rows.Col {
     const outer = ps.p.?;
     const db = outer.db;
     const a = ps.arena;
@@ -453,6 +507,14 @@ fn probe(ps: *Parser, s: *tree.Select) Error![]rows.Col {
         if (outer.xq_param_types.items[i] == 0) outer.xq_param_types.items[i] = ty;
     }
     const list = x.?.e_list orelse return &.{};
+    if (origins) |o| for (o.out, 0..) |*bc, i| {
+        bc.* = null;
+        if (i >= list.len()) continue;
+        const e = list.at(i).expr orelse continue;
+        if (e.op != int.TK.COLUMN or e.y.tab != o.base) continue;
+        const k: i32 = if (e.i_column >= 0) e.i_column else o.base.i_pkey;
+        if (k >= 0) bc.* = o.base.cols[@intCast(k)].name();
+    };
     const out = try a.alloc(rows.Col, list.len());
     for (list.slice(), out) |*item, *c| {
         c.* = .{ .name = if (item.e_name) |n| try a.dupe(u8, n) else "?column?" };
@@ -987,8 +1049,14 @@ fn viewUpdate(ps: *Parser, m: *const Merge, c: Clause, n: usize, tgt: Target, vw
         }
     }
     // The types of the values: those of the expressions where they have
-    // one (an UPDATE checks them as its own), none for a literal or a
-    // parameter (stored as an UPDATE's would be).
+    // one (an UPDATE checks them as its own). A value of none (a literal,
+    // a parameter, NULL, an expression the core does not type) is text
+    // in the slot: the UPDATE stores a value of a type known as it would
+    // store that value (typing.Store.pick(): text and no type go through
+    // the same conversion, a literal's), where one of no type would go
+    // through what a value of any type does (Store.untyped(): into a
+    // text column, a numeric's text_store, which reads 'abc' as a
+    // number).
     if (exprs.items.len > 0) {
         const list = try a.alloc(tree.ResultCol, exprs.items.len);
         for (exprs.items, list) |e, *rc| rc.* = .{ .expr = .{ .e = e } };
@@ -1002,7 +1070,11 @@ fn viewUpdate(ps: *Parser, m: *const Merge, c: Clause, n: usize, tgt: Target, vw
         };
         const probed = try probe(ps, try selectOf(a, list, from, m.pos));
         for (probed, vcols.items[1..], literal) |t, *vc, lit| {
-            if (lit or std.mem.eql(u8, t.spelling, "unknown")) continue;
+            if (lit or t.spelling.len == 0 or t.type.logical == .unknown or std.mem.eql(u8, t.spelling, "unknown")) {
+                vc.spelling = "text";
+                vc.type = .{ .logical = .text };
+                continue;
+            }
             vc.spelling = t.spelling;
             vc.type = t.type;
         }

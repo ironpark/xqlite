@@ -1749,7 +1749,8 @@ const Printer = struct {
                 try pr.close();
             },
             .func => {
-                try pr.put(n.text);
+                // GROUPING() is a GroupingFunc to PostgreSQL, not a call.
+                try pr.put(if (ieql(n.text, "grouping")) "GROUPING" else n.text);
                 try pr.put("(");
                 if (n.flag) try pr.put("DISTINCT ");
                 for (n.args, 0..) |x, i| {
@@ -1982,13 +1983,57 @@ const FromItem = struct {
 const OrderItem = struct { e: *Node, dir: []const u8 };
 
 /// A GROUP BY item of a view's display text (render.zig's keep): an
-/// expression, ROLLUP (...), CUBE (...) or GROUPING SETS ((...), ...).
+/// expression, (a, b) or (), ROLLUP (...), CUBE (...) or GROUPING SETS
+/// (...) of items.
 const GroupItem = struct {
-    kind: enum { expr, rollup, cube, sets },
+    kind: enum { expr, list, rollup, cube, sets },
     e: ?*Node = null,
-    /// ROLLUP's and CUBE's expressions; each set of GROUPING SETS.
-    sets: []const []const *Node = &.{},
+    /// A list's expressions.
+    list: []const *Node = &.{},
+    /// The items of ROLLUP, CUBE and GROUPING SETS.
+    items: []const GroupItem = &.{},
 };
+
+/// A GROUP BY item of a view's display text; `nested`: in ROLLUP, CUBE
+/// or GROUPING SETS, where (a, b) is a set (else only ()).
+fn groupItem(p: *Parser, nested: bool) Error!GroupItem {
+    const t = p.peek();
+    if ((Parser.isWord(t, "ROLLUP") or Parser.isWord(t, "CUBE")) and Parser.isPunct(p.peekAt(1), "(")) {
+        p.i += 2;
+        return .{ .kind = if (Parser.isWord(t, "CUBE")) .cube else .rollup, .items = try groupItems(p) };
+    }
+    if (Parser.isWord(t, "GROUPING") and Parser.isWord(p.peekAt(1), "SETS")) {
+        p.i += 2;
+        try p.expect("(");
+        return .{ .kind = .sets, .items = try groupItems(p) };
+    }
+    if (Parser.isPunct(t, "(") and Parser.isPunct(p.peekAt(1), ")")) {
+        p.i += 2;
+        return .{ .kind = .list };
+    }
+    if (nested and Parser.isPunct(t, "(")) {
+        // (a, b), where the parenthesis ends the element; else an
+        // expression starting with one, (a + 1) * 2.
+        const at = p.i;
+        p.i += 1;
+        if (p.exprsSep()) |xs| {
+            if (p.punct(")") and (Parser.isPunct(p.peek(), ",") or Parser.isPunct(p.peek(), ")"))) return .{ .kind = .list, .list = xs };
+        } else |e| if (e == error.OutOfMemory) return e;
+        p.i = at;
+    }
+    return .{ .kind = .expr, .e = try p.expr() };
+}
+
+/// The items of ROLLUP (, CUBE ( or GROUPING SETS ( and its ).
+fn groupItems(p: *Parser) Error![]const GroupItem {
+    var items: std.ArrayList(GroupItem) = .empty;
+    while (true) {
+        try items.append(p.a, try groupItem(p, true));
+        if (!p.punct(",")) break;
+    }
+    try p.expect(")");
+    return items.items;
+}
 
 fn viewDefErr(
     a: Allocator,
@@ -2106,33 +2151,12 @@ fn viewDefErr(
     var where: ?*Node = null;
     if (p.word("WHERE")) where = try p.expr();
     var group: std.ArrayList(GroupItem) = .empty;
+    var group_distinct = false;
     if (p.word("GROUP")) {
         try p.expectWord("BY");
+        group_distinct = p.word("DISTINCT");
         while (true) {
-            const t = p.peek();
-            if ((Parser.isWord(t, "ROLLUP") or Parser.isWord(t, "CUBE")) and Parser.isPunct(p.peekAt(1), "(")) {
-                p.i += 2;
-                const one = try a.alloc([]const *Node, 1);
-                one[0] = try p.exprsSep();
-                try p.expect(")");
-                try group.append(a, .{ .kind = if (Parser.isWord(t, "CUBE")) .cube else .rollup, .sets = one });
-            } else if (Parser.isWord(t, "GROUPING") and Parser.isWord(p.peekAt(1), "SETS")) {
-                p.i += 2;
-                try p.expect("(");
-                var sets: std.ArrayList([]const *Node) = .empty;
-                while (true) {
-                    try p.expect("(");
-                    var xs: []const *Node = &.{};
-                    if (!p.punct(")")) {
-                        xs = try p.exprsSep();
-                        try p.expect(")");
-                    }
-                    try sets.append(a, xs);
-                    if (!p.punct(",")) break;
-                }
-                try p.expect(")");
-                try group.append(a, .{ .kind = .sets, .sets = sets.items });
-            } else try group.append(a, .{ .kind = .expr, .e = try p.expr() });
+            try group.append(a, try groupItem(&p, false));
             if (!p.punct(",")) break;
         }
     }
@@ -2278,27 +2302,10 @@ fn viewDefErr(
     }
     if (group.items.len > 0) {
         try pr.keyword(" GROUP BY ", -8, 8, 1);
+        if (group_distinct) try pr.put("DISTINCT ");
         for (group.items, 0..) |g, i| {
             if (i > 0) try pr.put(", ");
-            switch (g.kind) {
-                .expr => try pr.sortItem(try f.fix(try position(&f, g.e.?, exp.items))),
-                .rollup, .cube, .sets => {
-                    // get_rule_groupingset(): ROLLUP(a, b), GROUPING
-                    // SETS ((a), ()).
-                    try pr.put(switch (g.kind) {
-                        .rollup => "ROLLUP(",
-                        .cube => "CUBE(",
-                        else => "GROUPING SETS (",
-                    });
-                    for (g.sets, 0..) |set, k| {
-                        if (k > 0) try pr.put(", ");
-                        if (g.kind == .sets) try pr.put("(");
-                        try pr.sortItems(&f, set);
-                        if (g.kind == .sets) try pr.put(")");
-                    }
-                    try pr.put(")");
-                },
-            }
+            try groupingSet(&pr, &f, g, exp.items, true);
         }
     }
     if (having) |h| {
@@ -2334,6 +2341,38 @@ fn viewDefErr(
 
 /// A GROUP BY or ORDER BY term: a result column's number is that column
 /// (PostgreSQL prints its expression).
+/// GROUP BY item `g` as get_rule_groupingset() prints it: ROLLUP(a, b),
+/// CUBE((a, b), c), GROUPING SETS ((a), (), ROLLUP(b)); a set of one
+/// expression without parentheses where `omit_parens` (at the top, in
+/// ROLLUP and CUBE).
+fn groupingSet(pr: *Printer, f: *Fixer, g: GroupItem, targets: []const *Node, omit_parens: bool) Error!void {
+    switch (g.kind) {
+        .expr, .list => {
+            const one = [_]*Node{g.e orelse undefined};
+            const xs: []const *Node = if (g.kind == .expr) &one else g.list;
+            const parens = !omit_parens or xs.len != 1;
+            if (parens) try pr.put("(");
+            for (xs, 0..) |x, i| {
+                if (i > 0) try pr.put(", ");
+                try pr.sortItem(try f.fix(try position(f, x, targets)));
+            }
+            if (parens) try pr.put(")");
+        },
+        .rollup, .cube, .sets => {
+            try pr.put(switch (g.kind) {
+                .rollup => "ROLLUP(",
+                .cube => "CUBE(",
+                else => "GROUPING SETS (",
+            });
+            for (g.items, 0..) |x, i| {
+                if (i > 0) try pr.put(", ");
+                try groupingSet(pr, f, x, targets, g.kind != .sets);
+            }
+            try pr.put(")");
+        },
+    }
+}
+
 fn position(f: *Fixer, n: *Node, targets: []const *Node) Error!*Node {
     if (n.kind != .int) return n;
     const k = std.fmt.parseInt(usize, n.text, 10) catch return n;

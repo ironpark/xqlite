@@ -120,8 +120,8 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 [Releases](https://github.com/ironpark/xqlite/releases)에 Linux(x86_64, aarch64), macOS(Apple Silicon, Intel), WebAssembly용 아카이브가 있습니다. 아카이브마다 CLI `bin/xqlite`, C 라이브러리 `lib/libxqlite3`(정적·공유)와 헤더, sqlite3용 확장 `lib/libxqlite_ext`가 들어 있습니다.
 
 ```sh
-tar xzf xqlite-v0.0.2-linux-x86_64.tar.gz
-xqlite-v0.0.2-linux-x86_64/bin/xqlite --version    # xqlite 0.0.2 (SQLite 3.54.1)
+tar xzf xqlite-v0.0.3-linux-x86_64.tar.gz
+xqlite-v0.0.3-linux-x86_64/bin/xqlite --version    # xqlite 0.0.3 (SQLite 3.54.1)
 ```
 
 ### 빌드

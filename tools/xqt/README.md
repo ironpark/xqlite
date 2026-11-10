@@ -10,11 +10,13 @@ xqlite의 테스트 도구입니다. xqlite와 sqlite3(또는 PostgreSQL·MariaD
 | sqlite3용 확장 `libxqlite_ext` (`--ext`) | `interop ext`(sqlite3에 `-cmd .load`), 시스템 `python3`의 `sqlite3`(있으면) |
 | `PATH`의 `sqlite3` (`--fixtures-sqlite3`) | `gen fixtures` |
 | C 실행기 `sqllogictest` (`--ref`, 선택) | `slt` |
+| `testfixture-xqlite`, `testfixture-sqlite` (`zig build testfixture`; `--fixture`, `--ref`), Tcl의 스크립트 라이브러리(`ref/tcl`, `--tcl-library`) | `tcl` |
 | 서버 클라이언트(`$PG_PSQL`, `$MARIA_CLIENT`, `$ORA_SQLPLUS`, 기본 `podman exec -i ...`) | `dialect-diff --live`/`--record` (기본은 기록과 비교하므로 서버가 필요 없음) |
 | psql을 돌리는 명령(`$PG_WIRE_EXEC`; 기본은 호스트의 psql 18, 없으면 `podman run --rm -i postgres:18-alpine`, `--live`/`--record`는 `podman exec -i xq-pg`)과 `xqlite serve` | `wire-diff` |
 | `zig cc`, `zig run` (`$ZIG`) | `gen opcodes` (크래시 shim은 `zig build tools`가 `zig cc`로 빌드) |
 | `tclsh` | `gen opcodes` |
 | `git` | `fetch slt` (`fetch sqlite`는 내려받기와 압축 풀기를 프로세스 안에서 함) |
+| `sh`, `make`, C 컴파일러(`$CC`, 기본 `cc`) | `fetch tcl` (Tcl 소스의 configure·make) |
 
 다른 테스트 도구는 [테스트와 검증](../../docs/testing.md)에 정리되어 있습니다.
 
@@ -60,13 +62,14 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 | `planner [FILE...] [-k KINDS] [--known FILE]` | 쿼리 결과·실행 계획·바이트코드를 sqlite3와 비교 | `planner.zig` |
 | `planner gen basic\|hard SEED NBLOCKS NQUERIES` | 무작위 플래너 케이스. 예전 `gen-basic`, `gen-hard` 생성기와 바이트까지 같은 출력 | `planner_gen.zig` |
 | `slt [PATH...] [-- ARGS]` | sqllogictest를 스크립트마다 `xqlite slt` 프로세스로 | `slt.zig` |
+| `tcl [--set all\|quick\|veryquick] [PATH...]` | SQLite의 TCL 테스트(`ref/sqlite/test`)를 파일마다 두 테스트 픽스처(libxqlite3, SQLite)로 돌려 테스트 케이스마다 비교([tools/tcl/README.md](../tcl/README.md)) | `tcl.zig` |
 | `dialect-diff pg\|mariadb\|mssql\|oracle [--live\|--record] [CASES]` | 방언을 실제 서버의 출력과 차등 비교. 기본은 저장소에 기록해 둔 서버의 출력(`tools/dialect/pg-expected/pg-cases.out`)과 비교하므로 서버가 필요 없고, 기록이 있는 방언(지금은 pg)은 `zig build check`에 들어 있음. `--live`는 서버와 지금, `--record`는 서버에서 돌려 기록을 다시 씀 | `dialect_diff.zig` |
 | `wire-diff pg [--live\|--record] [CASES...]`, `wire-diff pg --regress [TEST...]` | 와이어 서버(`xqlite serve --pg`)를 psql로 PostgreSQL의 출력과 차등 비교(기본은 기록과), PostgreSQL 회귀 테스트 일부의 문장별 통과율(PostgreSQL이 함께 내놓는 기대 출력과). psql이 필요하고 호스트에 psql 18이 없으면 podman으로 돌리므로 `zig build check`에는 없음 | `wire_diff.zig` |
 | `bench [WORKLOAD...]` | 같은 작업의 실행 시간(`--runs`/`RUNS`, `--rows`/`ROWS`) | `bench.zig` |
 | `wasi [--wasm PATH] [--runtime PROG]` | wasm32-wasi 빌드를 wasmtime에서: sqlite3·네이티브 xqlite와 비교(`zig build test-wasi`) | `wasi.zig` |
 | `gen fixtures\|opcodes` | `src/testdata`의 DB, `opcodes.zig` 재생성 | `gen.zig` |
 | `gen superjournal [DIR]` | `src/testdata/superjournal` 재생성 | `gen/superjournal.zig` |
-| `fetch sqlite\|slt [--dest DIR]` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | `fetch.zig` |
+| `fetch sqlite\|slt\|tcl [--dest DIR]` | `ref/sqlite`, `ref/sqllogictest` 내려받기, `ref/tcl`에 Tcl 8.6 빌드 | `fetch.zig` |
 | `list` | interop 모듈, 플래너 케이스 파일, 고른 바이너리 | `main.zig` |
 | `help [COMMAND]` | 사용법 | `main.zig` |
 
@@ -144,13 +147,14 @@ tools/xqt/
   planner.zig           xqt planner
   planner_gen.zig       xqt planner gen basic|hard (CPython random.Random의 포팅 포함)
   slt.zig               xqt slt
+  tcl.zig               xqt tcl
   dialect_diff.zig      xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record], 기록(Recording)
   wire_diff.zig         xqt wire-diff pg [--live|--record] [--regress]
   bench.zig             xqt bench
   wasi.zig              xqt wasi
   gen.zig               xqt gen fixtures|opcodes
   gen/superjournal.zig  xqt gen superjournal
-  fetch.zig             xqt fetch sqlite|slt
+  fetch.zig             xqt fetch sqlite|slt|tcl
   lib/                  라이브러리, 모듈에서는 @import("xqt")
     xqt.zig           Config, Suite, Check, proc, diff, pool, crash를 내보냄
     Config.zig        바이너리와 공통 옵션

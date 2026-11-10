@@ -204,8 +204,14 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
     }
     const of = parsed.flags;
     const name = parsed.filename();
-    const path: ?[]const u8 = if (of.memory or name.len == 0 or std.mem.eql(u8, name, ":memory:")) null else name;
+    // ":memory:" (or a URI's mode=memory) is an in-memory database with
+    // no file; "" a temporary one, in a file of its own (sqlite3BtreeOpen()).
+    const is_memdb = of.memory or std.mem.eql(u8, name, ":memory:");
+    const path: ?[]const u8 = if (is_memdb or name.len == 0) null else name;
+    db.sz_mmap = @import("xqlite_vfs").vfs.mmap_config.default_size;
     const bt = btree.Btree.open(malloc.allocator, v, path, .{
+        .memory = is_memdb,
+        .mmap_size = db.sz_mmap,
         .read_only = of.read_only,
         .create = of.create and !of.read_only,
         .n_vdbe_read = &db.n_vdbe_read,

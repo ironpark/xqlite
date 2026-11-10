@@ -2,9 +2,10 @@
 //! of vdbe.c). A Mem owns at most one buffer, `z_malloc`; `z` may point
 //! into it, to static or ephemeral memory, or to memory freed by `x_del`.
 //!
-//! The engine keeps text in UTF-8. A value becomes UTF-16 only when an
-//! interface asks for it (sqlite3_value_text16()), as in SQLite by
-//! translating it in place (utf.zig), and is read back as UTF-8.
+//! Text is kept in the encoding of the database (Sqlite3.enc: UTF-8, or
+//! UTF-16le/be for a UTF-16 database), as in SQLite. A value changes
+//! encoding when an interface asks for another (sqlite3_value_text(),
+//! sqlite3_value_text16()), by translating it in place (utf.zig).
 
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
@@ -85,35 +86,68 @@ fn translate(m: *Mem, desired: u8) Oom!void {
     ownBuffer(m, out.ptr);
 }
 
-/// The text of a UTF-16 string or blob as NUL-terminated UTF-8, for
-/// reading a number from it without changing the value (SQLite's
-/// sqlite3AtoF() and sqlite3Atoi64() read UTF-16 directly); null on OOM.
-fn utf8Copy(m: *const Mem) ?Utf8Copy {
+/// What sqlite3Atoi64() and sqlite3AtoF() read of UTF-16 text: the low
+/// bytes of its code units up to the first with a nonzero high byte, as a
+/// NUL-terminated copy (sqlite3MemRealValueRCSlowPath()); `cut` if such a
+/// unit stopped it. Null on OOM.
+fn asciiCopy(m: *const Mem) ?AsciiCopy {
     @branchHint(.cold);
     const in = m.bytes();
-    const out = gpa(m).alloc(u8, utf.maxLen(in.len, ENC.UTF8)) catch return null;
-    const n = utf.translate(in, m.enc, ENC.UTF8, out);
-    return .{ .buf = out, .s = out[0..n :0] };
+    const n = in.len & ~@as(usize, 1);
+    const out = gpa(m).alloc(u8, n / 2 + 1) catch return null;
+    // The byte of each unit that holds its low half.
+    const lo: usize = if (m.enc == ENC.UTF16LE) 0 else 1;
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < n) : (i += 2) {
+        if (in[i + 1 - lo] != 0) break;
+        out[j] = in[i + lo];
+        j += 1;
+    }
+    out[j] = 0;
+    return .{ .buf = out, .s = out[0..j :0], .cut = i < n };
 }
 
-const Utf8Copy = struct {
+const AsciiCopy = struct {
     buf: []u8,
     s: [:0]u8,
+    cut: bool,
 
-    fn free(cp: Utf8Copy, m: *const Mem) void {
+    fn free(cp: AsciiCopy, m: *const Mem) void {
         gpa(m).free(cp.buf);
     }
 };
+
+/// Port of sqlite3Atoi64() on the text of `m`, in its encoding.
+pub fn atoi64(m: *const Mem, out: *i64) util.AtoiResult {
+    if (!isUtf16(m)) return util.atoi64(m.bytes(), out);
+    return atoi64Utf16(m, out);
+}
+
+fn atoi64Utf16(m: *const Mem, out: *i64) util.AtoiResult {
+    @branchHint(.cold);
+    const cp = asciiCopy(m) orelse {
+        out.* = 0;
+        return .not_a_number;
+    };
+    defer cp.free(m);
+    const rc = util.atoi64(cp.s, out);
+    // UTF-16 with a high byte set: extra text after the number.
+    if (cp.cut and (rc == .ok or rc == .excess_text)) return .excess_text;
+    return rc;
+}
 
 fn isUtf16(m: *const Mem) bool {
     return m.enc == ENC.UTF16LE or m.enc == ENC.UTF16BE;
 }
 
-/// Bring a value an interface turned into UTF-16 back to UTF-8, before
-/// the engine reads it again (the C ABI calls this on the registers it
-/// handed out). The engine itself only reads UTF-8.
-pub fn toUtf8(m: *Mem) void {
-    if (m.flags.Str and isUtf16(m)) changeEncoding(m, ENC.UTF8) catch {
+/// Bring a value an interface converted (sqlite3_column_text16(), or
+/// sqlite3_column_text() in a UTF-16 database) back to the encoding of
+/// its database, before the engine reads it again (the C ABI calls this
+/// on the registers it handed out; see common.toDbEnc()).
+pub fn toDbEnc(m: *Mem) void {
+    const enc = if (m.db) |db| db.enc else ENC.UTF8;
+    if (m.flags.Str and m.enc != enc) changeEncoding(m, enc) catch {
         if (m.db) |db| db.oomFault();
         setNull(m);
     };
@@ -325,9 +359,7 @@ pub fn intValue(m: *const Mem) i64 {
     if (flags.intersects(.{ .Str = true, .Blob = true })) if (m.z) |z| {
         var v: i64 = 0;
         if (isUtf16(m)) {
-            const copy8 = utf8Copy(m) orelse return 0;
-            defer copy8.free(m);
-            _ = util.atoi64(copy8.s, &v);
+            _ = atoi64Utf16(m, &v);
             return v;
         }
         _ = util.atoi64(z[0..@intCast(m.n)], &v);
@@ -347,12 +379,13 @@ pub fn realValueRC(m: *Mem, value: *f64) i32 {
         return 0;
     };
     if (isUtf16(m)) {
-        const copy8 = utf8Copy(m) orelse {
+        const cp = asciiCopy(m) orelse {
             value.* = 0.0;
             return 0;
         };
-        defer copy8.free(m);
-        return numeric.atoF(copy8.s.ptr, value);
+        defer cp.free(m);
+        const rc = numeric.atoF(cp.s.ptr, value);
+        return if (cp.cut) -100 else rc;
     }
     if (m.flags.Term or zeroTerminateIfAble(m)) return numeric.atoF(@ptrCast(z), value);
     if (m.n == 0) {
@@ -427,7 +460,7 @@ pub fn numerify(m: *Mem) void {
         const rc = realValueRC(m, &r);
         m.u.r = r;
         var ix: i64 = 0;
-        const as_int = rc & 2 == 0 and @backingInt(util.atoi64(m.bytes(), &ix)) < 2;
+        const as_int = rc & 2 == 0 and @backingInt(atoi64(m, &ix)) < 2;
         if (as_int) {
             m.u.i = ix;
             m.setTypeFlag(.{ .Int = true });
@@ -748,7 +781,7 @@ fn alsoAnInt(m: *Mem, r: f64, out: *i64) bool {
         out.* = iv;
         return true;
     }
-    return util.atoi64(m.bytes(), out) == .ok;
+    return atoi64(m, out) == .ok;
 }
 
 /// Port of applyNumericAffinity() (vdbe.c): turn text that looks like a
@@ -803,12 +836,12 @@ fn computeNumericType(m: *Mem) MEM {
     m.u = .{ .r = r };
     var ix: i64 = 0;
     if (rc <= 0) {
-        if (rc & 2 == 0 and @backingInt(util.atoi64(m.bytes(), &ix)) <= 1) {
+        if (rc & 2 == 0 and @backingInt(atoi64(m, &ix)) <= 1) {
             m.u = .{ .i = ix };
             return .{ .Int = true };
         }
         return .{ .Real = true };
-    } else if (rc & 2 == 0 and util.atoi64(m.bytes(), &ix) == .ok) {
+    } else if (rc & 2 == 0 and atoi64(m, &ix) == .ok) {
         m.u = .{ .i = ix };
         return .{ .Int = true };
     }
@@ -853,20 +886,6 @@ pub fn valueType(m: *const Mem) i32 {
 /// Port of sqlite3_value_numeric_type().
 pub fn valueNumericType(m: *Mem) i32 {
     var t = valueType(m);
-    if (t == vi.SQLITE_TEXT and isUtf16(m)) {
-        // UTF-16 text: a UTF-8 copy decides.
-        const copy8 = utf8Copy(m) orelse return t;
-        defer copy8.free(m);
-        var tmp: Mem = .{ .db = m.db, .flags = .{ .Str = true, .Term = true, .Static = true }, .enc = ENC.UTF8, .z = copy8.s.ptr, .n = @intCast(copy8.s.len) };
-        applyNumericAffinity(&tmp, false);
-        if (!tmp.flags.Str) {
-            m.u = tmp.u;
-            m.flags.Str = false;
-            m.flags.Int = tmp.flags.Int;
-            m.flags.Real = tmp.flags.Real;
-        }
-        return valueType(m);
-    }
     if (t == vi.SQLITE_TEXT) {
         applyNumericAffinity(m, false);
         t = valueType(m);

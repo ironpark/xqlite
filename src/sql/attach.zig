@@ -109,7 +109,11 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         flags.create = false;
     }
     const path_name = parsed.filename();
-    const path: ?[]const u8 = if (flags.memory or path_name.len == 0 or std.mem.eql(u8, path_name, ":memory:")) null else path_name;
+    // As in sqlite3BtreeOpen(): ":memory:", mode=memory, or "" with
+    // temp_store=MEMORY is an in-memory database.
+    const is_memdb = flags.memory or std.mem.eql(u8, path_name, ":memory:") or
+        (path_name.len == 0 and @import("../vdbe/sorter.zig").tempInMemory(db));
+    const path: ?[]const u8 = if (is_memdb or path_name.len == 0) null else path_name;
     // The URI's own vfs=, which the registry of the caller (the C ABI)
     // resolves; otherwise the connection's VFS.
     var v = db.vfs.?;
@@ -121,6 +125,8 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     var err_dyn: ?[:0]u8 = null;
     defer if (err_dyn) |m| gpa.free(m);
     const bt: ?*btree.Btree = btree.Btree.open(malloc.allocator, v, path, .{
+        .memory = is_memdb,
+        .mmap_size = db.sz_mmap,
         .read_only = flags.read_only,
         .create = flags.create and !flags.read_only,
         .cell_size_check = db.flags.CellSizeCk,
@@ -144,7 +150,8 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     };
     db.dbs.appendAssumeCapacity(.{ .name = db_name, .bt = bt, .schema = schema });
     if (bt) |b| {
-        // The pager settings of main.
+        // The default locking mode, and the pager settings of main.
+        _ = b.pager.lockingMode(db.dflt_lock_mode);
         if (db.dbs.items[0].bt) |main_bt| _ = b.secureDelete(main_bt.secureDelete(null));
         b.setPagerFlags(db.pagerFlags(.full));
     }

@@ -40,14 +40,12 @@ pub export fn sqlite3_set_authorizer(db_arg: ?*Handle, f: ?c.CAuth, arg: ?*anyop
 fn collNeededThunk(arg: ?*anyopaque, db: *Handle, name: [:0]const u8) void {
     const e = extOf(arg);
     const f = e.coll_needed.f.?;
-    if (!e.coll_needed16) return f(e.coll_needed.arg, db, ENC_UTF8, name.ptr);
+    // The encoding passed is the database's, as in SQLite.
+    if (!e.coll_needed16) return f(e.coll_needed.arg, db, db.enc, name.ptr);
     const z = c.utf8ToUtf16(name) orelse return db.oomFault();
     defer c.gpa.free(z);
-    // The encoding is the database's (UTF-8), as in SQLite.
-    f(e.coll_needed.arg, db, ENC_UTF8, z.ptr);
+    f(e.coll_needed.arg, db, db.enc, z.ptr);
 }
-
-const ENC_UTF8: c_int = 1;
 
 fn setCollNeeded(db_arg: ?*Handle, arg: ?*anyopaque, f: ?*const anyopaque, utf16: bool) c_int {
     const lk = c.lock(db_arg);

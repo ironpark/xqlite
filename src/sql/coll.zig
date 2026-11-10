@@ -1,7 +1,10 @@
 //! Collating sequences: the built-in BINARY, NOCASE and RTRIM (main.c)
-//! and their lookup (the collation half of callback.c). Only UTF-8 is
-//! supported, so each name has a single CollSeq rather than one per
-//! encoding.
+//! and their lookup (the collation half of callback.c). As in SQLite a
+//! name may have a definition for each text encoding (CollSeq.enc); the
+//! lookup takes the one of the database encoding, else one of another
+//! encoding (synthCollSeq()), whose comparisons then convert the values
+//! (serial.compareMemString()). Unlike C, the substitute is used as it
+//! is rather than copied into an entry of its own.
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -13,6 +16,7 @@ const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
 const CollSeq = int.CollSeq;
 const RC = int.RC;
+const ENC = @import("../vdbe/vdbe_int.zig").ENC;
 
 /// Both names "BINARY" in one array, at addresses that cannot be merged.
 const binary_names = "BINARY\x00BINARY\x00".*;
@@ -38,30 +42,47 @@ fn rtrimCollFunc(_: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order {
     return serial.binaryCollation(null, std.mem.trimEnd(u8, a, " "), std.mem.trimEnd(u8, b, " "));
 }
 
-/// The collations every connection has (registered by openDatabase();
-/// read-only, as a connection shadows them rather than replacing them).
+/// The collations every connection has (registered by openDatabase():
+/// BINARY for each encoding, NOCASE and RTRIM for UTF-8; read-only, as a
+/// connection shadows them rather than replacing them).
 const builtin = [_]CollSeq{
-    .{ .name = binary_name, .cmp = serial.binaryCollation },
+    .{ .name = binary_name, .cmp = serial.binaryCollation, .enc = ENC.UTF8 },
+    .{ .name = binary_name, .cmp = serial.binaryCollation, .enc = ENC.UTF16LE },
+    .{ .name = binary_name, .cmp = serial.binaryCollation, .enc = ENC.UTF16BE },
     .{ .name = "NOCASE", .cmp = nocaseCollatingFunc },
     .{ .name = "RTRIM", .cmp = rtrimCollFunc },
 };
 
-/// The built-in collations, which SQLite keeps in the connection's
-/// aCollSeq with the others (for PRAGMA collation_list).
+/// The built-in collations, one entry for each name, which SQLite keeps
+/// in the connection's aCollSeq with the others (for PRAGMA
+/// collation_list).
 pub fn builtins() []const CollSeq {
-    return &builtin;
+    return builtin[2..];
 }
 
-/// db->pDfltColl: the BINARY collation.
+/// The BINARY collation of UTF-8.
 pub fn defaultColl() *const CollSeq {
     return &builtin[0];
 }
 
-/// db->pDfltColl: the collation of a value without one. BINARY, unless
-/// the dialect of the connection has another default (xqlite; see
-/// dialect.Hooks.default_collation).
+/// The BINARY collation of encoding `enc`.
+fn binaryColl(enc: u8) *const CollSeq {
+    return &builtin[enc - 1];
+}
+
+/// db->pDfltColl: the collation of a value without one. BINARY of the
+/// database encoding, unless the dialect of the connection has another
+/// default (xqlite; see dialect.Hooks.default_collation).
 pub fn dfltColl(db: *Sqlite3) *const CollSeq {
-    return dialectColl(db) orelse defaultColl();
+    return dialectColl(db) orelse binaryColl(db.enc);
+}
+
+/// Port of sqlite3SetTextEncoding() (callback.c): change the text
+/// encoding of the connection, and with it the default collation.
+pub fn setTextEncoding(db: *Sqlite3, enc: u8) void {
+    std.debug.assert(enc == ENC.UTF8 or enc == ENC.UTF16LE or enc == ENC.UTF16BE);
+    db.enc = enc;
+    @import("../vdbe/aux.zig").expirePreparedStatements(db, 1);
 }
 
 /// xqlite: the default collation of the connection's dialect, null if it
@@ -71,32 +92,62 @@ pub fn dialectColl(db: *Sqlite3) ?*const CollSeq {
     return findCollSeq(db, name, false);
 }
 
-/// Port of sqlite3FindCollSeq(): the collation named `name`, or the
-/// default one (dfltColl(), BINARY) if `name` is null. With `create`, an
-/// undefined entry (null `cmp`) is made for an unknown name.
+/// Port of sqlite3FindCollSeq() and synthCollSeq(): the collation named
+/// `name` for the database encoding, or the default one (dfltColl(),
+/// BINARY) if `name` is null. A name defined only for other encodings
+/// gives such a definition (UTF-16be, then UTF-16le, then UTF-8, the
+/// order of synthCollSeq()). With `create`, an undefined entry (null
+/// `cmp`) is made for an unknown name.
 pub fn findCollSeq(db: *Sqlite3, name: ?[]const u8, create: bool) ?*const CollSeq {
     const z = name orelse return dfltColl(db);
-    if (db.colls.get(z)) |c| return c;
+    const enc = db.enc;
+    const user = db.colls.get(z);
+    // Those of the connection first: they shadow the built-in ones.
+    var it = user;
+    while (it) |c| : (it = c.next) if (c.enc == enc) return c;
     for (&builtin) |*c| {
-        if (std.ascii.eqlIgnoreCase(c.name, z)) return c;
+        if (c.enc == enc and std.ascii.eqlIgnoreCase(c.name, z)) return c;
     }
+    for ([_]u8{ ENC.UTF16BE, ENC.UTF16LE, ENC.UTF8 }) |e| {
+        it = user;
+        while (it) |c| : (it = c.next) if (c.enc == e and c.cmp != null) return c;
+        for (&builtin) |*c| {
+            if (c.enc == e and std.ascii.eqlIgnoreCase(c.name, z)) return c;
+        }
+    }
+    if (user) |c| return c;
     // xqlite: then those of the connection's dialect.
     if (@import("../dialect/dialect.zig").findCollation(db, z)) |c| return c;
     if (!create) return null;
-    return addCollSeq(db, z, .{ .name = undefined });
+    return addCollSeq(db, z, .{ .name = undefined, .enc = enc });
+}
+
+/// The definition of collation `name` for encoding `enc` made by the
+/// connection, if any.
+fn userCollSeq(db: *Sqlite3, name: []const u8, enc: u8) ?*CollSeq {
+    var it = db.colls.get(name);
+    while (it) |c| : (it = c.next) if (c.enc == enc) return c;
+    return null;
 }
 
 /// Add `c`, named `name`, to the collations of the connection (null on
-/// OOM).
+/// OOM): a new name, or another encoding of a name it has.
 fn addCollSeq(db: *Sqlite3, name: []const u8, c: CollSeq) ?*CollSeq {
     const a = db.gpa;
     const new = a.create(CollSeq) catch return null;
+    new.* = c;
+    if (db.colls.get(name)) |first| {
+        new.name = first.name;
+        new.next = first.next;
+        first.next = new;
+        return new;
+    }
     const owned = a.dupeSentinel(u8, name, 0) catch {
         a.destroy(new);
         return null;
     };
-    new.* = c;
     new.name = owned;
+    new.next = null;
     db.colls.put(a, owned, new) catch {
         a.free(owned);
         a.destroy(new);
@@ -151,18 +202,26 @@ pub fn locateCollSeq(p: *Parse, name: []const u8) ?*const CollSeq {
 }
 
 /// Port of sqlite3_create_collation_v2() without the destructor: define
-/// (or redefine) a collation of the connection.
+/// (or redefine) a collation of the connection, for UTF-8.
 pub fn createCollation(db: *Sqlite3, name: []const u8, user: ?*anyopaque, cmp: CollSeq.CmpFn) i32 {
+    return createCollationEnc(db, name, ENC.UTF8, user, cmp);
+}
+
+/// Port of createCollation() (main.c) without the destructor: define,
+/// redefine or (`cmp` null) undefine collation `name` for encoding `enc`
+/// (SQLITE_UTF8, UTF16LE or UTF16BE).
+pub fn createCollationEnc(db: *Sqlite3, name: []const u8, enc: u8, user: ?*anyopaque, cmp: ?CollSeq.CmpFn) i32 {
+    std.debug.assert(enc >= ENC.UTF8 and enc <= ENC.UTF16BE);
     if (db.n_vdbe_active != 0) {
         @import("main.zig").errorWithMsg(db, RC.BUSY, "unable to delete/modify collation sequence due to active statements", .{});
         return RC.BUSY;
     }
     @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
     // Built-in collations are not replaced but shadowed.
-    if (db.colls.get(name)) |c| {
+    if (userCollSeq(db, name, enc)) |c| {
         c.user = user;
         c.cmp = cmp;
-    } else if (addCollSeq(db, name, .{ .name = undefined, .user = user, .cmp = cmp }) == null) {
+    } else if (addCollSeq(db, name, .{ .name = undefined, .enc = enc, .user = user, .cmp = cmp }) == null) {
         return RC.NOMEM;
     }
     return RC.OK;
@@ -173,7 +232,11 @@ pub fn freeAll(db: *Sqlite3) void {
     var it = db.colls.iterator();
     while (it.next()) |e| {
         db.gpa.free(e.value_ptr.*.name);
-        db.gpa.destroy(e.value_ptr.*);
+        var c: ?*CollSeq = e.value_ptr.*;
+        while (c) |x| {
+            c = x.next;
+            db.gpa.destroy(x);
+        }
     }
     db.colls.deinit(db.gpa);
 }

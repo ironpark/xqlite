@@ -133,9 +133,32 @@ pub fn recordUnpack(key: []const u8, r: *UnpackedRecord) void {
 
 /// Port of vdbeCompareMemString(): compare strings with a collation.
 fn compareMemString(m1: *const Mem, m2: *const Mem, coll: *const CollSeq) i32 {
-    // Only UTF-8 is supported, so no encoding change is ever needed.
+    if (m1.enc != coll.enc) return compareMemStringWithEncodingChange(m1, m2, coll);
     const cmp = coll.cmp.?;
     return switch (cmp(coll.user, m1.bytes(), m2.bytes())) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
+/// Port of vdbeCompareMemStringWithEncodingChange(): compare copies in
+/// the encoding of the collation (0 if out of memory, which is recorded
+/// in the connection).
+noinline fn compareMemStringWithEncodingChange(m1: *const Mem, m2: *const Mem, coll: *const CollSeq) i32 {
+    var c1: Mem = .{ .db = m1.db, .flags = .{ .Null = true } };
+    var c2: Mem = .{ .db = m1.db, .flags = .{ .Null = true } };
+    mem.shallowCopy(&c1, m1, .{ .Ephem = true });
+    mem.shallowCopy(&c2, m2, .{ .Ephem = true });
+    defer mem.releaseMalloc(&c1);
+    defer mem.releaseMalloc(&c2);
+    const v1 = mem.valueText(&c1, coll.enc) catch null;
+    const v2 = mem.valueText(&c2, coll.enc) catch null;
+    if (v1 == null or v2 == null) {
+        if (m1.db) |db| db.oomFault();
+        return 0;
+    }
+    return switch (coll.cmp.?(coll.user, c1.bytes(), c2.bytes())) {
         .lt => -1,
         .eq => 0,
         .gt => 1,
@@ -405,7 +428,8 @@ fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
     while (true) {
         if (serial_type < 12) {
             if (serial_type < 0) {
-                serial_type = @intCast(record.getVarint32(key1, 1).value);
+                // C stores the u32 into an int: a corrupt huge type is negative.
+                serial_type = @bitCast(record.getVarint32(key1, 1).value);
                 if (serial_type >= 12) continue;
             }
             return r.r1;

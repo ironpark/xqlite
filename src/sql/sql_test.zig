@@ -1342,3 +1342,58 @@ test "sql: %T records the error offset only while an error is formatted" {
     try testing.expectEqual(@as(i32, -2), c.db.err_byte_offset);
     c.db.err_byte_offset = -1;
 }
+
+test "sql: UTF-16 databases written by sqlite3" {
+    // Made by sqlite3 with PRAGMA encoding = 'UTF-16le' and 'UTF-16be'.
+    const images = [_]struct { image: []const u8, enc: []const u8, hex: []const u8, order: []const u8 }{
+        .{ .image = @embedFile("../testdata/utf16le.db"), .enc = "UTF-16le\n", .hex = "6800E9006C006C006F00\n", .order = "ĀĀ\n😀x\nZé\na\nabc\nhéllo\n" },
+        .{ .image = @embedFile("../testdata/utf16be.db"), .enc = "UTF-16be\n", .hex = "006800E9006C006C006F\n", .order = "Zé\na\nabc\nhéllo\nĀĀ\n😀x\n" },
+    };
+    for (images) |img| {
+        var c: Conn = undefined;
+        try c.openWith(img.image);
+        defer c.close();
+        try c.expectRows("PRAGMA encoding", img.enc);
+        try c.expectRows("SELECT hex(b) FROM t WHERE a = 1", img.hex);
+        // BINARY compares the stored UTF-16 bytes; the index has that order.
+        try c.expectRows("SELECT b FROM t ORDER BY b", img.order);
+        try c.expectRows("SELECT b FROM t INDEXED BY tb WHERE b > ''", img.order);
+        // NOCASE compares UTF-8 copies.
+        try c.expectRows("SELECT c FROM t ORDER BY c, a", "ABC\nabc\nB\nzz\nāā\n😀\n");
+        try c.expectRows("SELECT a FROM t WHERE c = 'abc' ORDER BY a", "1\n2\n");
+        try c.expectRows("SELECT length(b), octet_length(b), upper(b), substr(b, 2, 2) FROM t WHERE a = 4", "2|6|😀X|x\n");
+        try c.exec("INSERT INTO t(b, c) VALUES ('nëw', 'NËW'); UPDATE t SET b = b || 'ñ' WHERE a = 2");
+        try c.expectRows("SELECT b, c FROM t WHERE a >= 7 OR a = 2 ORDER BY a", "abcñ|abc\nnëw|NËW\n");
+        try c.expectRows("PRAGMA integrity_check", "ok\n");
+        // A new attached database gets the encoding of main.
+        try c.exec("ATTACH 'other.db' AS o; CREATE TABLE o.x(y); INSERT INTO o.x VALUES ('é')");
+        try c.expectRows("SELECT hex(y) = hex(CAST('é' AS BLOB)), length(hex(y)) FROM o.x", "1|4\n");
+    }
+}
+
+test "sql: PRAGMA encoding makes a UTF-16 database" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("PRAGMA encoding = 'UTF-16be'");
+    try c.expectRows("PRAGMA encoding", "UTF-16be\n");
+    try c.exec("CREATE TABLE t(a TEXT PRIMARY KEY, b DEFAULT 'dé') WITHOUT ROWID; INSERT INTO t(a) VALUES ('é'), ('z'), ('Ā')");
+    try c.expectRows("SELECT a, hex(a), b, hex(b), hex(a || b) FROM t", "z|007A|dé|006400E9|007A006400E9\né|00E9|dé|006400E9|00E9006400E9\nĀ|0100|dé|006400E9|0100006400E9\n");
+    // Bound text is stored in the database encoding.
+    var stmt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;
+    try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "SELECT hex(?1), ?1 = 'é', length(?1)", &stmt, null));
+    try testing.expectEqual(RC.OK, api.bindText(stmt.?, 1, "é"));
+    try testing.expectEqual(RC.ROW, api.step(stmt.?));
+    try testing.expectEqualStrings("00E9", api.columnText(stmt.?, 0).?);
+    try testing.expectEqual(@as(i64, 1), api.columnInt64(stmt.?, 1));
+    _ = api.finalize(stmt.?);
+    // Numbers in UTF-16 text.
+    try c.expectRows("SELECT '12' + 1, CAST(' 3.5 ' AS REAL), CAST('7é' AS INTEGER), '1.5é' + 0, typeof(CAST('12' AS NUMERIC))", "13|3.5|7|1.5|integer\n");
+    // The encoding is fixed once the database exists.
+    try c.reopen();
+    try c.exec("PRAGMA encoding = 'UTF-8'");
+    try c.expectRows("PRAGMA encoding", "UTF-16be\n");
+    try c.expectRows("SELECT a FROM t WHERE a > 'z'", "é\nĀ\n");
+    try c.exec("VACUUM");
+    try c.expectRows("PRAGMA encoding; PRAGMA integrity_check", "UTF-16be\nok\n");
+}

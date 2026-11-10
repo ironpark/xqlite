@@ -140,7 +140,14 @@ pub export fn sqlite3_open16(z_filename: ?*const anyopaque, pp_db: ?*?*Handle) c
     out.* = null;
     const z = c.utf16ToUtf8(c.utf16Slice(z_filename orelse return RC.MISUSE, -1), false) orelse return RC.NOMEM;
     defer c.gpa.free(z);
-    return openDatabase(z.ptr, pp_db, 0x06, null);
+    const rc = openDatabase(z.ptr, pp_db, 0x06, null);
+    // A new database is made in UTF-16 (an existing one keeps its own
+    // encoding when its schema is read).
+    if (rc == RC.OK) if (out.*) |db| if (!db.dbs.items[0].schema.schema_flags.SchemaLoaded) {
+        db.dbs.items[0].schema.enc = c.utf.UTF16NATIVE;
+        db.enc = c.utf.UTF16NATIVE;
+    };
+    return rc;
 }
 
 // ================================================================= close
@@ -281,19 +288,20 @@ pub export fn sqlite3_exec(
     const lk = c.lock(db_arg);
     defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
-    var sql: [*:0]const u8 = z_sql orelse "";
+    // Measured once: each statement is prepared from the rest.
+    var sql: [:0]const u8 = std.mem.span(z_sql orelse "");
     var rc: c_int = RC.OK;
     var p_stmt: ?*c.Vdbe = null;
     var az_cols: ?[]?[*:0]u8 = null;
     c.main.setError(db, RC.OK);
-    outer: while (rc == RC.OK and sql[0] != 0) {
+    outer: while (rc == RC.OK and sql.len > 0) {
         p_stmt = null;
-        var leftover: ?[*]const u8 = null;
-        rc = stmt.sqlite3_prepare_v2(db, sql, -1, &p_stmt, &leftover);
+        var leftover: [:0]const u8 = "";
+        rc = stmt.prepareZ(db, sql, &p_stmt, &leftover);
         if (rc != RC.OK) continue;
         const s = p_stmt orelse {
             // A comment or white space.
-            sql = @ptrCast(leftover.?);
+            sql = leftover;
             continue;
         };
         var callback_is_init = false;
@@ -334,8 +342,8 @@ pub export fn sqlite3_exec(
             if (rc != RC.ROW) {
                 rc = stmt.sqlite3_finalize(s);
                 p_stmt = null;
-                sql = @ptrCast(leftover.?);
-                while (c.ctype.isSpace(sql[0])) sql += 1;
+                sql = leftover;
+                while (sql.len > 0 and c.ctype.isSpace(sql[0])) sql = sql[1..];
                 break;
             }
         }
@@ -683,8 +691,9 @@ pub fn xq_db_config(db_arg: ?*Handle, op: c_int, a: i64, b: i64, p: ?*anyopaque,
 /// sqlite3_file_control(): SQLITE_FCNTL_VFS_POINTER, and
 /// SQLITE_FCNTL_FILE_POINTER for a file of a C VFS. Other operations go
 /// to the file: the xFileControl of a C VFS's file, memdb's own
-/// (SQLITE_FCNTL_SIZE_LIMIT, SQLITE_FCNTL_VFSNAME); the engine's other
-/// files have none (SQLITE_NOTFOUND).
+/// (SQLITE_FCNTL_SIZE_LIMIT, SQLITE_FCNTL_VFSNAME), and
+/// SQLITE_FCNTL_MMAP_SIZE of a file with memory maps (vfs.fileControl());
+/// the engine's other files have none (SQLITE_NOTFOUND).
 pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, op: c_int, p_arg: ?*anyopaque) callconv(.c) c_int {
     const lk = c.lock(db_arg);
     defer lk.unlock();

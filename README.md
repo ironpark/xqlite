@@ -277,7 +277,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 
 ## 현재 상태
 
-- **엔진**: SQLite 3.54.1의 SQL(세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`, `VACUUM`, 백업 API ...). sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 통과합니다.
+- **엔진**: SQLite 3.54.1의 SQL(세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`, `VACUUM`, 백업 API ...). sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 통과합니다. SQLite의 TCL 테스트(`xqt tcl`)는 같은 하네스의 SQLite 3.54.1과 비교해 테스트 이름 200만여 개 중 1,215개가 xqlite에서만 실패합니다([기준선](docs/testing.md#기준선)).
 - **방언**: PostgreSQL, MariaDB, MSSQL, Oracle. PostgreSQL은 PostgreSQL 18의 기록과, 나머지는 실제 서버와 차등 비교합니다.
 - **인터페이스**: Zig API, sqlite3 호환 C ABI(`libxqlite3`), WebAssembly(WASI, 브라우저·Node), sqlite3용 확장(`libxqlite_ext`), `sqlite3` 호환 셸.
 - **서버**: PostgreSQL 프로토콜 v3와 MySQL 프로토콜(`xqlite serve`). TLS와 PostgreSQL의 COPY는 없습니다.

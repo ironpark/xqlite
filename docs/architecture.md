@@ -506,13 +506,13 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 
 ## VFS
 
-방언과 상관없이 엔진 맨 아래에는 VFS(`pkg/vfs/src/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`)를 정합니다.
+방언과 상관없이 엔진 맨 아래에는 VFS(`pkg/vfs/src/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`), 메모리 맵(`fetch`, `unfetch`, `mmapSize`)을 정합니다. `File.unopened`는 열리지 않은 파일(C의 `pMethods == 0`)로, 페이저가 아직 쓰지 않은 임시 데이터베이스와 인메모리 데이터베이스의 파일 자리에 둡니다.
 
 구현은 메서드 표를 손으로 채우지 않습니다. 구체 타입을 받는 `pub` 메서드(`pub fn read(f: *MemFile, buf: []u8, offset: u64) Error!usize`)를 쓰면 `&vfs.FileImpl(MemFile).vtable`이 표를 컴파일 시점에 만들고, 타입 지운 포인터를 되돌리는 호출은 인라인됩니다. 선택 메서드를 선언하지 않으면 null로 남고, 필수 메서드가 없으면 컴파일 오류입니다. 표는 타입마다 하나라 주소로 구현을 알아볼 수 있고(memdb), `FileImplWithout(T, &.{"shmMap", ...})`은 선언된 메서드를 빼고 만듭니다(crash VFS의 공유 메모리 없는 변형).
 
 | 구현 | 파일 | 잠금 | wal-index |
 | --- | --- | --- | --- |
-| POSIX | `unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀 | mmap한 `-shm` 파일 |
+| POSIX | `unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀 | mmap한 `-shm` 파일. `PRAGMA mmap_size`면 데이터베이스 파일도 읽기 전용으로 mmap |
 | WASI | `wasi.zig` | 프로세스 안에서만(`inproc.zig`, 장치·inode 번호로) | 힙 메모리 |
 | 호스트(wasm32-freestanding) | `host.zig` | 프로세스 안에서(이름으로) 중재한 뒤 호스트에 물음(`xq_host_lock`) | 힙 메모리 |
 | 메모리 | `mem.zig` | `MemVfs` 객체 안에서 | 힙 메모리 |
@@ -559,7 +559,7 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 
 | 이름 | 내용 |
 | --- | --- |
-| `pager`, `pcache`, `journal` | 페이저(`pager.wal`이 WAL), 페이지 캐시, 롤백 저널 형식 |
+| `pager`, `pcache`, `journal` | 페이저(`pager.wal`이 WAL, `pager.memjournal`이 메모리 저널), 페이지 캐시, 롤백 저널 형식 |
 | `btree` | B-tree 층과 파일 헤더(`btree.header`) |
 | `record`, `varint` | 레코드 형식(serial type 크기, 헤더 varint, 정수 디코딩, `memcmp`, `intFloatCompare`)과 varint. 파일 형식이라 여기 있고, 엔진의 `src/vdbe/serial.zig`(Mem을 쓰는 레코드 코드)도 이 함수들을 씀 |
 | `btree_fuzz` | B-tree 퍼저(`src/fuzz_tests.zig`가 씀) |
@@ -664,6 +664,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `src/sql/memdb.zig` | 엔진의 memdb 인스턴스: `Memdb(malloc)` |
 | `pkg/storage/build.zig`, `build.zig.zon` | 스토리지 패키지(`xqlite_storage`): 모듈과 `zig build test`([스토리지 패키지](#스토리지-패키지)) |
 | `pkg/storage/src/pager/{pager,pcache,wal,journal}.zig` | 페이저, 페이지 캐시, WAL, 롤백 저널 |
+| `pkg/storage/src/pager/memjournal.zig` | 메모리 저널(memjournal.c): `journal_mode=MEMORY`와 `:memory:`의 저널, 커지면 파일로 넘기는 임시 데이터베이스의 저널 |
 | `pkg/storage/src/btree/btree.zig` | B-tree 층: `Btree`(열기, 잠금, 트랜잭션, 테이블)와 `Cursor` |
 | `pkg/storage/src/btree/{page,header,ptrmap,integrity}.zig` | 페이지(`MemPage`, 셀 파싱, 페이지 접근), 파일 헤더, 포인터 맵, 무결성 검사 |
 | `pkg/storage/src/btree/alloc.zig` | 페이지 할당: freelist, 셀의 overflow 체인 |
@@ -698,3 +699,4 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 - 붙인 데이터베이스(`ATTACH`)의 시퀀스(시퀀스는 모두 main의 `xq_sequence`에 있음). `CREATE SCHEMA`의 스키마의 시퀀스는 `s.seq`라는 이름으로 main에 있음
 - `sequence.create()`의 중복 시 PostgreSQL 오류 메시지. PostgreSQL 프론트엔드의 `CREATE SEQUENCE`는 컴파일 시점에 검사합니다.
 - 방언 함수의 `PRAGMA function_list` 노출
+- UTF-16 데이터베이스의 방언: SQLite가 아닌 방언은 UTF-8 데이터베이스에서만 문장을 컴파일합니다. `runParser()`가 프론트엔드를 부르기 전과 후(스키마를 읽어 인코딩을 안 뒤)에 `Sqlite3.enc`를 보고 `the postgres dialect does not support UTF-16 databases`로 실패합니다. 방언 함수, 카탈로그, 값 표시가 텍스트를 UTF-8로 읽기 때문입니다([SQLite 호환: 차이](sqlite/differences.md)).

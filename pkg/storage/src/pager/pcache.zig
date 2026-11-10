@@ -8,8 +8,10 @@
 //!   * unreferenced and clean: on the LRU list, may be recycled
 //!
 //! The dirty list is ordered newest-first so the pager can pick the oldest
-//! dirty page to spill. The pluggable sqlite3_pcache_methods2 interface and
-//! non-purgeable (in-memory database) caches are not ported.
+//! dirty page to spill. A cache that is not purgeable (that of an
+//! in-memory database, bPurgeable) never recycles or frees a page it
+//! holds: nothing else keeps their content. The pluggable
+//! sqlite3_pcache_methods2 interface is not ported.
 
 const std = @import("std");
 const status = @import("xqlite_base").status;
@@ -32,7 +34,10 @@ pub const Flags = packed struct(u8) {
     /// than overwriting an earlier frame of the transaction
     /// (PGHDR_WAL_APPEND).
     wal_append: bool = false,
-    _: u3 = 0,
+    /// A page of a memory map, not in the cache (PGHDR_MMAP): its data
+    /// points into the map of the database file (see Pager.get).
+    mmap: bool = false,
+    _: u2 = 0,
 };
 
 pub const Page = struct {
@@ -141,6 +146,9 @@ pub const PCache = struct {
     /// buffer: every page is an overflow page).
     n_counted: u32 = 0,
     stress: ?Stress,
+    /// Pages may be recycled and freed (bPurgeable); false for an
+    /// in-memory database.
+    purgeable: bool = true,
 
     map: PageHash = .{},
     /// Largest page number that may be in the map.
@@ -279,7 +287,7 @@ pub const PCache = struct {
     /// full, otherwise allocate.
     fn create(pc: *PCache, pgno: Pgno) error{OutOfMemory}!*Page {
         try pc.map.ensureUnusedCapacity(pc.gpa);
-        const p: *Page = if (pc.lru_tail != null and pc.map.n_page + 1 >= pc.max_pages) blk: {
+        const p: *Page = if (pc.purgeable and pc.lru_tail != null and pc.map.n_page + 1 >= pc.max_pages) blk: {
             const victim = pc.lru_tail.?;
             pc.lruRemove(victim);
             pc.map.remove(victim);
@@ -365,7 +373,7 @@ pub const PCache = struct {
     }
 
     fn unpin(pc: *PCache, p: *Page) void {
-        if (pc.map.n_page > pc.max_pages) {
+        if (pc.purgeable and pc.map.n_page > pc.max_pages) {
             pc.map.remove(p);
             pc.freePage(p);
         } else {
@@ -395,6 +403,26 @@ pub const PCache = struct {
 
     pub fn cleanAll(pc: *PCache) void {
         while (pc.dirty_head) |p| pc.makeClean(p);
+    }
+
+    /// Port of sqlite3PcacheClearWritable(): the dirty pages stay dirty
+    /// but must be journaled again before the next change.
+    pub fn clearWritable(pc: *PCache) void {
+        var p = pc.dirty_head;
+        while (p) |pg| : (p = pg.dirty_next) {
+            pg.flags.need_sync = false;
+            pg.flags.writeable = false;
+        }
+        pc.synced = pc.dirty_tail;
+    }
+
+    /// Port of sqlite3PCachePercentDirty().
+    pub fn percentDirty(pc: *const PCache) u32 {
+        var n_dirty: u64 = 0;
+        var p = pc.dirty_head;
+        while (p) |pg| : (p = pg.dirty_next) n_dirty += 1;
+        const n_cache = pc.max_pages;
+        return if (n_cache != 0) @intCast(n_dirty * 100 / n_cache) else 0;
     }
 
     pub fn clearSyncFlags(pc: *PCache) void {

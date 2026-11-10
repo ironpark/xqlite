@@ -138,7 +138,7 @@ WASI에는 권고 잠금(`fcntl(F_SETLK)`, `flock`)이 없고, 브라우저에�
 | 시계 | WASI는 `clock_gettime`, freestanding은 `xq_host_now_ms` |
 | 시간대 | 둘 다 UTC뿐. `'localtime'` 수정자는 UTC를 돌려줌(wasi-libc의 `localtime_r`과 같음) |
 | 환경 변수 | freestanding에는 없음(`XQ_WHERETRACE` 등은 꺼짐) |
-| mmap | 쓰지 않음. 데이터 파일 mmap은 원래 없고, `-shm`은 힙 메모리 |
+| mmap | 쓰지 않음. 데이터 파일 mmap은 없어 `PRAGMA mmap_size`는 늘 0(`SQLITE_MAX_MMAP_SIZE=0`인 빌드처럼)이고, `-shm`은 힙 메모리 |
 | 확장 로드 | `load_extension()`은 네이티브에서도 언제나 거절하므로(dlopen 없음) 차이 없음 |
 | `PATH_MAX` | freestanding은 4096(`vfs.max_path_bytes`) |
 | SIMD | WebAssembly SIMD(`simd128`)를 씀. WAL 체크섬, JSON 문자열 스캔, 텍스트 함수(`length`, `substr`, `instr`, `replace`, `upper`/`lower`, `hex`, `unhex`, `LIKE`), NOCASE 비교, 레코드 비교, UTF-8↔UTF-16 변환, 셸 출력이 `@Vector`로 돎(`pkg/base/src/simd.zig`). `zig build wasm`과 `test-wasi`는 스스로 켜고(끄려면 `-Dwasm-simd=false`), `-Dtarget=wasm32-wasi`로 직접 빌드할 때는 `-Dcpu=generic+simd128`을 줌. 빼면 같은 코드가 스칼라로 풀려 결과는 같고 느려짐. SIMD가 없는 런타임(오래된 브라우저 등)에서는 기본 `zig build wasm` 모듈이 로드되지 않으므로 `-Dwasm-simd=false`로 빌드함 |

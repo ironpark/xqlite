@@ -9,6 +9,8 @@ const testing = std.testing;
 const Pager = pager_mod.Pager;
 const Page = pager_mod.Page;
 const Pgno = pager_mod.Pgno;
+const JournalMode = pager_mod.JournalMode;
+const LockLevel = vfs.LockLevel;
 
 const page_size = 1024;
 const db_name = "test.db";
@@ -677,4 +679,214 @@ test "pager: leaving WAL mode checkpoints and deletes the WAL" {
     // The EXCLUSIVE lock is kept until the next read transaction.
     try expectDb(p, 4, 0x02);
     try testing.expectEqual(@as(u64, 4 * page_size), try fileSize(v, db_name));
+}
+
+test "pager: an in-memory database has no file and keeps every page" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    // A cache of 2 pages: the cache must still hold all 20.
+    const p = try Pager.open(testing.allocator, v, null, .{ .memory = true, .page_size = page_size, .cache_size = 2 });
+    defer p.close(.{});
+    try testing.expect(!p.fd.isOpen());
+    try testing.expectEqual(JournalMode.memory, p.journal_mode);
+    try testing.expectEqualStrings("", p.filename());
+    try commitFill(p, 20, 0x31);
+    try expectDb(p, 20, 0x31);
+    // Rollback and savepoints through the in-memory journal.
+    {
+        const p1 = try beginWrite(p);
+        defer p.unrefPageOne(p1);
+        try p.openSavepoint(1);
+        try fillPages(p, p1, &range(2, 25), 0x32);
+        try p.savepoint(.rollback, 0);
+        try testing.expectEqual(@as(Pgno, 20), p.db_size);
+        try fillPages(p, p1, &.{3}, 0x33);
+        try p.rollback();
+    }
+    try expectDb(p, 20, 0x31);
+    try testing.expect(!p.fd.isOpen());
+    try testing.expectEqual(@as(usize, 0), mem.files.count());
+    // Only MEMORY and OFF; never a lock to give up.
+    try testing.expectEqual(JournalMode.memory, p.setJournalMode(.delete));
+    try testing.expect(p.lockingMode(false));
+    try testing.expect(!p.walSupported());
+    try testing.expectEqual(JournalMode.off, p.setJournalMode(.off));
+    // Without a journal a rollback keeps the changes, with no error.
+    {
+        const p1 = try beginWrite(p);
+        defer p.unrefPageOne(p1);
+        try fillPages(p, p1, &.{2}, 0x34);
+        try p.rollback();
+    }
+    try p.sharedLock();
+    const p1 = try p.get(1, .{});
+    defer p.unrefPageOne(p1);
+    const pg = try p.get(2, .{});
+    defer p.unref(pg);
+    try expectFilled(pg, 0x34);
+}
+
+test "pager: a temporary database opens its file when a page must be written" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    const p = try Pager.open(testing.allocator, v, null, .{ .page_size = page_size, .cache_size = 10 });
+    defer p.close(.{});
+    try testing.expect(p.lockingMode(false));
+    try commitFill(p, 4, 0x41);
+    try testing.expect(!p.fd.isOpen());
+    // More pages than the cache holds: they are spilled to the file.
+    try commitFill(p, 40, 0x42);
+    try testing.expect(p.fd.isOpen());
+    try expectDb(p, 40, 0x42);
+    {
+        const p1 = try beginWrite(p);
+        defer p.unrefPageOne(p1);
+        try fillPages(p, p1, &range(2, 40), 0x43);
+        try p.rollback();
+    }
+    try expectDb(p, 40, 0x42);
+}
+
+test "pager: journal_mode=MEMORY writes no journal file" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    try commitFill(p, 3, 0x51);
+    try testing.expectEqual(JournalMode.memory, p.setJournalMode(.memory));
+    {
+        const p1 = try beginWrite(p);
+        defer p.unrefPageOne(p1);
+        try p.openSavepoint(1);
+        try fillPages(p, p1, &range(2, 6), 0x52);
+        try p.savepoint(.rollback, 0);
+        try fillPages(p, p1, &.{2}, 0x53);
+        try testing.expect(pager_mod.memjournal.MemJournal.isInMemory(p.jfd.?));
+        try testing.expect(!try v.access(journal_name, .exists));
+        try p.rollback();
+    }
+    try expectDb(p, 3, 0x51);
+    try commitFill(p, 5, 0x54);
+    try testing.expect(!try v.access(journal_name, .exists));
+    try expectDb(p, 5, 0x54);
+    // Another connection sees the commit.
+    const q = try openPager(v, .{});
+    defer q.close(.{});
+    try expectDb(q, 5, 0x54);
+}
+
+test "pager: exclusive locking mode keeps its locks" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    const a = try openPager(v, .{});
+    defer a.close(.{});
+    try commitFill(a, 2, 0x61);
+    const b = try openPager(v, .{});
+    defer b.close(.{});
+
+    try testing.expect(a.lockingMode(true));
+    // After a read, a keeps SHARED: b reads, but cannot commit.
+    try expectDb(a, 2, 0x61);
+    try testing.expectEqual(LockLevel.shared, a.lock.?);
+    try expectDb(b, 2, 0x61);
+    {
+        const b1 = try beginWrite(b);
+        defer b.unrefPageOne(b1);
+        try fillPages(b, b1, &.{2}, 0x62);
+        try testing.expectError(error.Busy, b.commitPhaseOne(false));
+        try b.rollback();
+    }
+    // After a write, a keeps EXCLUSIVE and its journal: b cannot read.
+    try commitFill(a, 3, 0x63);
+    try testing.expectEqual(LockLevel.exclusive, a.lock.?);
+    try testing.expect(try v.access(journal_name, .exists));
+    try testing.expectError(error.Busy, b.sharedLock());
+    try expectDb(a, 3, 0x63);
+    // Back to normal mode: the locks go at the end of the next
+    // transaction.
+    try testing.expect(!a.lockingMode(false));
+    try expectDb(a, 3, 0x63);
+    try testing.expect(a.lock.? == .none);
+    try expectDb(b, 3, 0x63);
+}
+
+test "pager: WAL in exclusive locking mode uses a heap wal-index" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    {
+        const p = try openPager(v, .{});
+        defer p.close(.{});
+        try commitFill(p, 2, 0x71);
+        try testing.expect(p.lockingMode(true));
+        try enterWal(p);
+        try testing.expect(pager_mod.wal.Wal.heapMemory(p.wal));
+        try commitFill(p, 4, 0x72);
+        try testing.expect(try v.access(wal_name, .exists));
+        try expectDb(p, 4, 0x72);
+        // The mode cannot go back to normal while the WAL is open.
+        try testing.expect(p.lockingMode(false));
+        const q = try openPager(v, .{});
+        defer q.close(.{});
+        try testing.expectError(error.Busy, q.sharedLock());
+    }
+    // Closing checkpointed and deleted the WAL.
+    try testing.expect(!try v.access(wal_name, .exists));
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    try expectDb(p, 4, 0x72);
+}
+
+test "pager: pages read through a memory map" {
+    // Memory maps of the POSIX VFS.
+    if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = UnixVfs.init(testing.allocator, testing.io);
+    u.dir = tmp.dir;
+    const v = u.interface();
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    try commitFill(p, 8, 0x81);
+    p.setMmapLimit(1 << 20);
+    try testing.expectEqual(@as(?i64, 1 << 20), try p.mmapSize());
+    // Outside a write transaction pages (but page 1) come from the map.
+    try p.sharedLock();
+    const p1 = try p.get(1, .{});
+    try testing.expect(!p1.flags.mmap);
+    const pg = try p.get(3, .{});
+    try testing.expect(pg.flags.mmap);
+    try expectFilled(pg, 0x81);
+    p.unref(pg);
+    try testing.expectEqual(@as(u32, 0), p.n_mmap_out);
+    // In a write transaction only with read_only, and a page changed in
+    // the cache wins over the map.
+    try p.begin(false);
+    const w = try p.get(3, .{});
+    try testing.expect(!w.flags.mmap);
+    try p.write(w);
+    @memset(w.data, 0x82);
+    const r = try p.get(3, .{ .read_only = true });
+    try testing.expect(r == w);
+    p.unref(r);
+    p.unref(w);
+    // So does a clean page still cached.
+    const r4 = try p.get(4, .{ .read_only = true });
+    try testing.expect(!r4.flags.mmap);
+    p.unref(r4);
+    try p.commitPhaseOne(false);
+    try p.commitPhaseTwo();
+    p.unrefPageOne(p1);
+    // The committed page reads back through the map.
+    try p.sharedLock();
+    const q1 = try p.get(1, .{});
+    defer p.unrefPageOne(q1);
+    const q3 = try p.get(3, .{});
+    defer p.unref(q3);
+    try expectFilled(q3, 0x82);
+    p.setMmapLimit(0);
 }

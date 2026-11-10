@@ -254,11 +254,24 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
             @import("../sql/memdb.zig").state.default_max_size = a;
             return RC.OK;
         },
+        // MMAP_SIZE: the default and the largest PRAGMA mmap_size, each
+        // the compile-time value if negative, the largest no more than
+        // SQLITE_MAX_MMAP_SIZE.
+        22 => {
+            const cfg = @import("xqlite_vfs").vfs.mmap_config;
+            var sz = a;
+            var mx = b;
+            if (mx < 0 or mx > cfg.max_supported) mx = cfg.max_supported;
+            if (sz < 0) sz = 0;
+            if (sz > mx) sz = mx;
+            cfg.max_size = mx;
+            cfg.default_size = sz;
+            return RC.OK;
+        },
         // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, MUTEX, PCACHE,
-        // PCACHE2, COVERING_INDEX_SCAN, SQLLOG, MMAP_SIZE,
-        // WIN32_HEAPSIZE, PMASZ, STMTJRNL_SPILL, SMALL_MALLOC,
-        // SORTERREF_SIZE.
-        6, 7, 8, 10, 14, 18, 20, 21, 22, 23, 25, 26, 27, 28 => return RC.OK,
+        // PCACHE2, COVERING_INDEX_SCAN, SQLLOG, WIN32_HEAPSIZE, PMASZ,
+        // STMTJRNL_SPILL, SMALL_MALLOC, SORTERREF_SIZE.
+        6, 7, 8, 10, 14, 18, 20, 21, 23, 25, 26, 27, 28 => return RC.OK,
         else => return RC.ERROR,
     }
 }

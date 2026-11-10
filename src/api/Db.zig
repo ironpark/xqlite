@@ -92,8 +92,9 @@ pub const OpenOptions = struct {
     diagnostics: ?*errors.Diagnostics = null,
 };
 
-/// Open a connection to the database file `path`; ":memory:" or "" opens
-/// a private, temporary in-memory database. Close it with close().
+/// Open a connection to the database file `path`; ":memory:" opens a
+/// private in-memory database with no file, "" a private temporary one
+/// that spills to a temporary file when it grows. Close it with close().
 pub fn open(gpa: Allocator, io: std.Io, path: []const u8, options: OpenOptions) Error!Db {
     var owned: ?*OwnedVfs = null;
     errdefer if (owned) |o| destroyVfs(gpa, o);

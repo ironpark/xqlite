@@ -1,0 +1,131 @@
+# UTF-16 databases (PRAGMA encoding before the database is made). Text
+# is stored and compared as UTF-16: BINARY compares the stored bytes, so
+# the order of an index differs from UTF-8 (U+0100 sorts before 'a' in
+# UTF-16le); NOCASE and RTRIM are defined for UTF-8 only and compare
+# converted copies. Functions read their arguments as UTF-8 except
+# hex(), octet_length() and the blob forms.
+PRAGMA encoding = 'UTF-16le';
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c TEXT COLLATE NOCASE, d TEXT COLLATE RTRIM, e);
+CREATE INDEX tb ON t(b);
+CREATE INDEX tc ON t(c);
+CREATE INDEX td ON t(d, b);
+CREATE INDEX te ON t(lower(b));
+CREATE TABLE w(k TEXT PRIMARY KEY, v) WITHOUT ROWID;
+INSERT INTO t VALUES(1,'héllo','ABC','x  ',1),(2,'abc','abc','x',2.5),(3,'Zé','zz','y ',x'6100'),(4,'😀x','😀','z',NULL),(5,'ĀĀ','āā','ā','12'),(6,'a','B','b',' 7 '),(7,'',NULL,'',0),(8,'12','12','3.5','é'),(9,'ｆｕｌｌ','Ü','ü',-1),(10,'﻿bom','x','x',3);
+INSERT INTO w SELECT b, a FROM t;
+==
+SELECT a, b, hex(b) FROM t ORDER BY b
+SELECT a, b FROM t ORDER BY b DESC
+SELECT a FROM t WHERE b > 'Z' ORDER BY b
+SELECT a FROM t WHERE b BETWEEN 'a' AND 'zz'
+SELECT a FROM t WHERE b >= 'Ā'
+SELECT a, c FROM t ORDER BY c, a
+SELECT a FROM t WHERE c = 'abc' ORDER BY a
+SELECT a FROM t WHERE c > 'b' ORDER BY c
+SELECT a, d FROM t ORDER BY d, a
+SELECT a FROM t WHERE d = 'x' ORDER BY a
+SELECT a FROM t WHERE lower(b) = 'abc'
+SELECT k, v FROM w ORDER BY k
+SELECT k FROM w WHERE k < 'a' ORDER BY k DESC
+SELECT min(b), max(b), min(c), max(c), min(d), max(d) FROM t
+SELECT b, length(b), octet_length(b), hex(b), upper(b), lower(b), unicode(b) FROM t ORDER BY a
+SELECT substr(b, 2), substr(b, -2, 1), instr(b, 'l'), instr(b, x'6c00'), quote(b), replace(b, 'l', 'L') FROM t ORDER BY a
+SELECT b LIKE 'h%', b LIKE '%É%', b GLOB '*l*', b || '-' || a, a || b, trim(d), rtrim(d) FROM t ORDER BY a
+SELECT a FROM t WHERE b LIKE 'h%'
+SELECT a FROM t WHERE b GLOB 'a*' ORDER BY a
+SELECT a FROM t WHERE c LIKE 'a%' ORDER BY a
+SELECT e, typeof(e), e + 0, CAST(e AS TEXT), hex(CAST(e AS TEXT)), CAST(e AS INTEGER), CAST(e AS REAL), CAST(e AS NUMERIC), quote(e) FROM t ORDER BY a
+SELECT CAST(x'6100620063' AS TEXT), hex(CAST('é' AS BLOB)), hex(x'00ff' || 'a'), '12' + 1, ' 3.5 ' * 2, '1.5é' + 0, CAST('12é' AS INTEGER)
+SELECT printf('%s|%5s|%-3s|%q|%w', b, a, 'é', b, b), format('%.2f', e) FROM t ORDER BY a
+SELECT json_object('b', b, 'a', a), json_array(b, c), json_quote(b), json_extract(json_object('k', b), '$.k') FROM t ORDER BY a
+SELECT key, value, type, fullkey FROM json_each('{"é":"ü","n":[1,"😀"]}')
+SELECT group_concat(b, '·'), string_agg(c, ',') FROM (SELECT * FROM t ORDER BY a)
+SELECT a, b, row_number() OVER (ORDER BY b), first_value(b) OVER (ORDER BY a), lag(c) OVER (ORDER BY a), max(c) OVER (ORDER BY a ROWS 2 PRECEDING) FROM t ORDER BY a
+SELECT DISTINCT c FROM t ORDER BY c
+SELECT c, count(*) FROM t GROUP BY c ORDER BY 2 DESC, 1
+SELECT b FROM t UNION SELECT c FROM t ORDER BY 1
+SELECT b FROM t INTERSECT SELECT 'abc'
+SELECT b FROM t EXCEPT SELECT 'abc' ORDER BY 1
+SELECT 'é' < 'z', 'Ā' < 'a', '😀' < '', 'abc' = 'ABC' COLLATE NOCASE, 'x ' = 'x' COLLATE RTRIM, 'Ā' < 'a' COLLATE NOCASE
+SELECT a FROM t WHERE b IN ('abc', 'héllo', 'Zé') ORDER BY a
+SELECT a FROM t WHERE b IN (SELECT c FROM t) ORDER BY a
+SELECT char(233, 128512), hex(char(233)), unhex('6100'), concat('a', 'é', 3), concat_ws('-', 'é', 'ü'), soundex('Robert'), iif(1, 'yes', 'no')
+SELECT date('2024-01-02'), datetime('2024-01-02 03:04:05', '+1 day'), strftime('%Y/%m', '2024-05-06'), julianday('2024-01-01')
+SELECT name, type, dflt_value FROM pragma_table_info('t')
+SELECT name FROM pragma_index_list('t') ORDER BY name
+SELECT sql FROM sqlite_schema ORDER BY name
+PRAGMA encoding
+INSERT INTO t(b, c) VALUES ('nëw', 'NËW') RETURNING a, b, hex(b), c
+UPDATE t SET b = b || 'ñ' WHERE a < 3 RETURNING a, b, hex(b)
+DELETE FROM t WHERE b = 'abc' RETURNING a
+INSERT INTO w VALUES ('Zé', 0) ON CONFLICT(k) DO UPDATE SET v = excluded.v || 'é' RETURNING k, v
+REPLACE INTO w VALUES ('a', 'r')
+ALTER TABLE t ADD COLUMN f TEXT DEFAULT 'défaut'
+ALTER TABLE t RENAME COLUMN c TO cé
+CREATE TABLE n AS SELECT b, upper(b) AS u FROM t
+CREATE VIEW v AS SELECT b, 'vé' AS k FROM t WHERE a < 5; SELECT * FROM v ORDER BY b
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO w VALUES (new.b || '·t', 'trig'); END; INSERT INTO t(b) VALUES ('trigé'); SELECT k, v FROM w WHERE v = 'trig'
+ANALYZE; SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY tbl, idx
+VACUUM
+REINDEX tb
+REINDEX w
+REINDEX te
+----
+PRAGMA encoding = 'UTF-16be';
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c TEXT COLLATE NOCASE);
+CREATE INDEX tb ON t(b);
+CREATE INDEX tc ON t(c);
+CREATE TABLE w(k TEXT PRIMARY KEY, v) WITHOUT ROWID;
+INSERT INTO t VALUES(1,'héllo','ABC'),(2,'abc','abc'),(3,'Zé','zz'),(4,'😀x','😀'),(5,'ĀĀ','āā'),(6,'a','B'),(7,'',NULL),(8,'12','12'),(9,'ｆｕｌｌ','Ü');
+INSERT INTO w SELECT b, a FROM t;
+==
+SELECT a, b, hex(b) FROM t ORDER BY b
+SELECT a FROM t WHERE b > 'Z' ORDER BY b
+SELECT a, c FROM t ORDER BY c, a
+SELECT k, v FROM w ORDER BY k DESC
+SELECT b, length(b), octet_length(b), hex(b), upper(b), substr(b, 2), instr(b, 'l') FROM t ORDER BY a
+SELECT min(b), max(b), group_concat(b) FROM t
+SELECT a FROM t WHERE b LIKE 'h%'
+SELECT CAST(x'00610062' AS TEXT), hex(CAST('é' AS BLOB)), '12' + 1
+SELECT b FROM t UNION SELECT c FROM t ORDER BY 1
+PRAGMA encoding
+INSERT INTO t(b, c) VALUES ('nëw', 'NËW') RETURNING a, b, hex(b), c
+----
+PRAGMA encoding = 'UTF-16';
+CREATE TABLE t(a TEXT);
+INSERT INTO t VALUES ('x'), ('é');
+==
+PRAGMA encoding
+SELECT a, hex(a) FROM t ORDER BY a
+PRAGMA encoding = 'UTF-8'; PRAGMA encoding
+----
+CREATE TABLE t(a TEXT);
+==
+PRAGMA encoding = 'UTF-16le'; PRAGMA encoding
+PRAGMA encoding = 'bogus'
+SELECT 1; PRAGMA encoding = 'UTF16be'; PRAGMA encoding
+----
+# A column added with a default: the default is a P4 value in UTF-16.
+PRAGMA encoding = 'UTF-16le';
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+INSERT INTO t VALUES (1, 'x'), (2, 'é');
+ALTER TABLE t ADD COLUMN f TEXT DEFAULT 'défaut';
+ALTER TABLE t ADD COLUMN g DEFAULT -3;
+ALTER TABLE t ADD COLUMN h DEFAULT x'6100';
+CREATE TABLE s(k TEXT, v INTEGER);
+CREATE INDEX sk ON s(k COLLATE NOCASE);
+INSERT INTO s VALUES ('Ab', 1), ('aB', 2), ('é', 3), ('É', 4), ('b', 5);
+==
+SELECT b, f, hex(f), g, h, typeof(h), CAST(h AS TEXT) FROM t
+SELECT a FROM t WHERE f = 'défaut'
+SELECT k, v FROM s WHERE k = 'ab' COLLATE NOCASE ORDER BY v
+SELECT k FROM s ORDER BY k COLLATE NOCASE, v
+SELECT k, count(*) FROM s GROUP BY k COLLATE NOCASE ORDER BY 1
+SELECT max(k COLLATE NOCASE), min(k) FROM s
+SELECT k FROM s WHERE k LIKE 'a%' ORDER BY v
+SELECT k FROM s WHERE k LIKE 'é%' ORDER BY v
+SELECT k FROM s WHERE k GLOB '[a-c]*' ORDER BY v
+SELECT * FROM s WHERE k > 'a' AND k < 'c' ORDER BY k
+SELECT group_concat(DISTINCT k) FROM s
+SELECT k FROM s WHERE k IN ('ab', 'b', 'é') ORDER BY v
+SELECT k, rank() OVER (ORDER BY k COLLATE NOCASE) FROM s ORDER BY v

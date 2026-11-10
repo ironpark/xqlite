@@ -128,6 +128,8 @@ const same =
     \\PRAGMA wal_checkpoint;
     \\PRAGMA wal_checkpoint(TRUNCATE);
     \\PRAGMA locking_mode;
+    \\PRAGMA locking_mode=EXCLUSIVE; PRAGMA main.locking_mode; PRAGMA temp.locking_mode; SELECT count(*) FROM c; PRAGMA locking_mode=normal;
+    \\PRAGMA journal_mode=MEMORY; PRAGMA journal_mode; BEGIN; DELETE FROM c; ROLLBACK; SELECT count(*) FROM c;
     \\PRAGMA synchronous;
     \\PRAGMA synchronous=NORMAL;
     \\PRAGMA synchronous;
@@ -137,6 +139,7 @@ const same =
     \\PRAGMA temp_store=MEMORY;
     \\PRAGMA temp_store;
     \\PRAGMA mmap_size;
+    \\PRAGMA mmap_size=1048576; PRAGMA mmap_size; SELECT count(*) FROM c; PRAGMA temp.mmap_size;
     \\PRAGMA busy_timeout=250;
     \\PRAGMA threads;
     \\PRAGMA analysis_limit=50;

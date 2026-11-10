@@ -1579,7 +1579,9 @@ fn windowExprGtZero(p: *Parse, e: ?*Expr) bool {
         p.db.oomFault();
         return false;
     };
-    return if (val) |m| api.valueInt(m) > 0 else false;
+    const m = val orelse return false;
+    defer @import("../vdbe/mem.zig").release(m);
+    return api.valueInt(m) > 0;
 }
 
 /// Port of sqlite3WindowCodeStep(): after sqlite3WhereBegin() of the

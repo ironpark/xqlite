@@ -2678,6 +2678,9 @@ pub fn openTempDatabase(p: *Parse) int.ParseError!void {
     const db = p.db;
     if (db.dbs.items[1].bt == null and p.explain == 0) {
         const bt = btree.Btree.open(@import("malloc.zig").allocator, db.vfs.?, null, .{
+            // temp_store=MEMORY: in memory (sqlite3TempInMemory()).
+            .memory = @import("../vdbe/sorter.zig").tempInMemory(db),
+            .mmap_size = db.sz_mmap,
             .cell_size_check = db.flags.CellSizeCk,
             .n_vdbe_read = &db.n_vdbe_read,
             .autovac_pages = main_mod.btreeAutovacPages(db),

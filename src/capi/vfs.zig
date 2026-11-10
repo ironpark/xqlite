@@ -615,11 +615,18 @@ fn zfFileControl(p: *sqlite3_file, op: c_int, arg: ?*anyopaque) callconv(.c) c_i
 
 // SQLITE_FCNTL_* answered for the engine's files.
 pub const FCNTL_VFSNAME = 12;
+pub const FCNTL_MMAP_SIZE = 18;
 pub const FCNTL_SIZE_LIMIT = 36;
 
-/// The file controls of the engine's files: those of memdb
+/// The file controls of the engine's files: SQLITE_FCNTL_MMAP_SIZE of a
+/// file with memory maps (unixFileControl()), and those of memdb
 /// (memdbFileControl()); the other files have none.
 pub fn fileControl(f: File, op: c_int, arg: ?*anyopaque) c_int {
+    if (op == FCNTL_MMAP_SIZE and f.hasFetch()) {
+        const sz: *i64 = @ptrCast(@alignCast(arg orelse return RC.MISUSE));
+        sz.* = (f.mmapSize(sz.*) catch |err| return errCode(err)) orelse return RC.NOTFOUND;
+        return RC.OK;
+    }
     const m = memdb.fileOf(f) orelse return RC.NOTFOUND;
     switch (op) {
         FCNTL_VFSNAME => {
@@ -640,7 +647,7 @@ pub fn fileControl(f: File, op: c_int, arg: ?*anyopaque) c_int {
 
 /// The sqlite3_file of an engine file opened through a C VFS, or null.
 pub fn cFileOf(f: File) ?*sqlite3_file {
-    if (f.vtable != &c_file_vtable and f.vtable != &c_file_vtable_shm) return null;
+    if (f.vtable != &c_file_vtable and f.vtable != &c_file_vtable_shm and f.vtable != &c_file_vtable_fetch) return null;
     return cf(f.ptr).cfile();
 }
 
@@ -675,12 +682,15 @@ fn zfShmUnmap(p: *sqlite3_file, delete: c_int) callconv(.c) c_int {
     return RC.OK;
 }
 
-fn zfFetch(_: *sqlite3_file, _: i64, _: c_int, out: *?*anyopaque) callconv(.c) c_int {
+fn zfFetch(p: *sqlite3_file, off: i64, n: c_int, out: *?*anyopaque) callconv(.c) c_int {
     out.* = null;
+    const r = zf(p).fetch(@intCast(off), @intCast(n)) catch |err| return errCode(err);
+    out.* = @ptrCast(@constCast(r));
     return RC.OK;
 }
 
-fn zfUnfetch(_: *sqlite3_file, _: i64, _: ?*anyopaque) callconv(.c) c_int {
+fn zfUnfetch(p: *sqlite3_file, off: i64, ptr: ?*anyopaque) callconv(.c) c_int {
+    zf(p).unfetch(@intCast(off), @ptrCast(ptr));
     return RC.OK;
 }
 
@@ -759,7 +769,8 @@ fn cOpen(ptr: *anyopaque, path: ?[]const u8, flags: c.vfs.OpenFlags) Error!File 
         slot.* = @intFromPtr(f.cfile());
     }
     const shm = f.methods().iVersion >= 2 and f.methods().xShmMap != null;
-    return .{ .ptr = f, .vtable = if (shm) &c_file_vtable_shm else &c_file_vtable };
+    const fetch = shm and f.methods().iVersion >= 3 and f.methods().xFetch != null;
+    return .{ .ptr = f, .vtable = if (fetch) &c_file_vtable_fetch else if (shm) &c_file_vtable_shm else &c_file_vtable };
 }
 
 fn withZ(path: []const u8, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
@@ -854,6 +865,38 @@ const c_file_vtable_shm: File.VTable = blk: {
     t.shmUnmap = cfShmUnmap;
     break :blk t;
 };
+
+/// A file of an iVersion 3 C VFS: memory maps too (xFetch, xUnfetch,
+/// SQLITE_FCNTL_MMAP_SIZE).
+const c_file_vtable_fetch: File.VTable = blk: {
+    var t = c_file_vtable_shm;
+    t.fetch = cfFetch;
+    t.unfetch = cfUnfetch;
+    t.mmapSize = cfMmapSize;
+    break :blk t;
+};
+
+fn cfFetch(ptr: *anyopaque, off: u64, n: u32) Error!?[*]const u8 {
+    const f = cf(ptr);
+    var out: ?*anyopaque = null;
+    try check(f.methods().xFetch.?(f.cfile(), @intCast(off), @intCast(n), &out));
+    return @ptrCast(out);
+}
+
+fn cfUnfetch(ptr: *anyopaque, off: u64, p: ?[*]const u8) void {
+    const f = cf(ptr);
+    if (f.methods().xUnfetch) |u| _ = u(f.cfile(), @intCast(off), @ptrCast(@constCast(p)));
+}
+
+fn cfMmapSize(ptr: *anyopaque, new_limit: i64) Error!?i64 {
+    const f = cf(ptr);
+    var sz = new_limit;
+    const fc = f.methods().xFileControl orelse return null;
+    const rc = fc(f.cfile(), FCNTL_MMAP_SIZE, &sz);
+    if (rc == RC.NOTFOUND) return null;
+    try check(rc);
+    return sz;
+}
 
 fn cf(ptr: *anyopaque) *CFile {
     return @ptrCast(@alignCast(ptr));

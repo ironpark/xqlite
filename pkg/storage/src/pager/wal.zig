@@ -170,11 +170,12 @@ pub fn frameOffset(frame: u32, sz_page: u32) u64 {
 /// Wal.exclusive_mode values (exclusiveMode).
 pub const Mode = enum(u8) {
     normal = 0,
-    /// No shared-memory locks are taken: set while closing with an
-    /// EXCLUSIVE lock on the database.
+    /// No shared-memory locks are taken: the pager holds an EXCLUSIVE
+    /// lock on the database (locking_mode=EXCLUSIVE, or while closing).
     exclusive = 1,
-    /// The wal-index is in heap memory: while reading from a private
-    /// index because the shared memory is unreliable.
+    /// The wal-index is in heap memory: the WAL was opened in exclusive
+    /// locking mode, or is read from a private index because the shared
+    /// memory is unreliable.
     heap_memory = 2,
 };
 
@@ -745,9 +746,11 @@ pub const Wal = struct {
     /// Port of sqlite3WalOpen(): open the WAL file `wal_name` (which must
     /// outlive the Wal) of the open database `db_fd`, read-only if the
     /// VFS can only open it so. A SHARED lock must be held, so that no
-    /// one deletes the WAL meanwhile. `sqlite_filename`: the name is the
-    /// pager's, in SQLite's filename layout (vfs.OpenFlags).
-    pub fn open(gpa: Allocator, v: vfs.Vfs, db_fd: vfs.File, wal_name: []const u8, mx_wal_size: i64, sqlite_filename: bool) Error!*Wal {
+    /// one deletes the WAL meanwhile. With `no_shm` (the pager holds an
+    /// EXCLUSIVE lock in exclusive locking mode) the wal-index is kept
+    /// in heap memory. `sqlite_filename`: the name is the pager's, in
+    /// SQLite's filename layout (vfs.OpenFlags).
+    pub fn open(gpa: Allocator, v: vfs.Vfs, db_fd: vfs.File, wal_name: []const u8, no_shm: bool, mx_wal_size: i64, sqlite_filename: bool) Error!*Wal {
         std.debug.assert(wal_name.len > 0);
         const w = try gpa.create(Wal);
         errdefer gpa.destroy(w);
@@ -759,13 +762,44 @@ pub const Wal = struct {
             .wal_fd = wal_fd,
             .mx_wal_size = mx_wal_size,
             .wal_name = wal_name,
-            .exclusive_mode = .normal,
+            .exclusive_mode = if (no_shm) .heap_memory else .normal,
             .read_only = if (wal_fd.isReadOnly()) rdonly else 0,
         };
         const dc = db_fd.deviceCharacteristics();
         if (dc.sequential) w.sync_header = false;
         if (dc.powersafe_overwrite) w.pad_to_sector_boundary = false;
         return w;
+    }
+
+    /// Port of sqlite3WalExclusiveMode(). `op` true: the pager has taken
+    /// an EXCLUSIVE lock on the database, so the read lock is dropped and
+    /// no more shared-memory locks are taken; returns true. `op` false:
+    /// go back to normal mode, taking the read lock again; returns true
+    /// if the mode changed (the pager may then drop its EXCLUSIVE lock).
+    /// Null: returns whether the WAL is in normal mode.
+    pub fn exclusiveMode(w: *Wal, op: ?bool) bool {
+        std.debug.assert(w.write_lock == 0);
+        std.debug.assert(w.exclusive_mode != .heap_memory or op == null);
+        const o = op orelse return w.exclusive_mode == .normal;
+        if (!o) {
+            if (w.exclusive_mode == .normal) return false;
+            w.exclusive_mode = .normal;
+            w.lockShared(readLock(@intCast(w.read_lock))) catch {
+                w.exclusive_mode = .exclusive;
+            };
+            return w.exclusive_mode == .normal;
+        }
+        std.debug.assert(w.exclusive_mode == .normal and w.read_lock >= 0);
+        w.unlockShared(readLock(@intCast(w.read_lock)));
+        w.exclusive_mode = .exclusive;
+        return true;
+    }
+
+    /// Port of sqlite3WalHeapMemory(): the wal-index of `w` is in heap
+    /// memory (opened in exclusive locking mode).
+    pub fn heapMemory(w: ?*const Wal) bool {
+        const x = w orelse return false;
+        return x.exclusive_mode == .heap_memory;
     }
 
     /// Port of sqlite3WalLimit().
@@ -984,6 +1018,10 @@ pub const Wal = struct {
 
         if (result) |_| {
             result = noRetry(w.indexReadHdr(&changed));
+            // The database file may have changed: unmap it.
+            if (result) |_| {
+                if (changed and w.db_fd.hasFetch()) w.db_fd.unfetch(0, null);
+            } else |_| {}
             if (result) |_| {
                 if (w.hdr.mx_frame != 0 and w.pagesize() != buf.len) {
                     result = corrupt(@src());

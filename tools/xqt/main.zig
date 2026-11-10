@@ -9,6 +9,7 @@ const build_options = @import("build_options");
 const interop = @import("interop.zig");
 const planner = @import("planner.zig");
 const slt = @import("slt.zig");
+const tcl = @import("tcl.zig");
 const dialect_diff = @import("dialect_diff.zig");
 const wire_diff = @import("wire_diff.zig");
 const planner_gen = @import("planner_gen.zig");
@@ -25,12 +26,13 @@ const usage =
     \\  planner [FILE...]        results, query plans and bytecode against sqlite3
     \\  planner gen basic|hard SEED NBLOCKS NQUERIES  random planner cases
     \\  slt [opts] PATH... [-- ARGS]  sqllogictest scripts with `xqlite slt`
+    \\  tcl [opts] [PATH...]     SQLite's TCL test suite on libxqlite3 and on SQLite
     \\  dialect-diff pg|mariadb|mssql|oracle [CASES]  a dialect against its server (podman)
     \\  wire-diff pg [CASES...]  psql against PostgreSQL and `xqlite serve --pg` (podman)
     \\  bench [WORKLOAD...]       xqlite against sqlite3 on timed workloads
     \\  wasi [--wasm PATH]       the wasm32-wasi build under wasmtime, against sqlite3
     \\  gen NAME [ARGS]          regenerate test data, opcodes.zig (xqt help gen)
-    \\  fetch sqlite|slt [--dest DIR]  download ref/sqlite or ref/sqllogictest
+    \\  fetch sqlite|slt|tcl [--dest DIR]  download ref/sqlite, ref/sqllogictest, ref/tcl
     \\  list                     the interop modules and planner case files
     \\  help [COMMAND]           this text, or the options of a command
     \\
@@ -65,6 +67,8 @@ pub fn main(init: std.process.Init) !void {
         try planner.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "slt"))
         try slt.run(gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "tcl"))
+        try tcl.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "dialect-diff"))
         try dialect_diff.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "wire-diff"))
@@ -87,6 +91,8 @@ pub fn main(init: std.process.Init) !void {
             planner.usage ++ "\n" ++ planner_gen.usage
         else if (std.mem.eql(u8, topic, "slt"))
             slt.usage
+        else if (std.mem.eql(u8, topic, "tcl"))
+            tcl.usage
         else if (std.mem.eql(u8, topic, "dialect-diff"))
             dialect_diff.usage
         else if (std.mem.eql(u8, topic, "wire-diff"))
@@ -145,6 +151,7 @@ test {
     _ = xqt;
     _ = planner;
     _ = slt;
+    _ = tcl;
     _ = interop;
     _ = dialect_diff;
     _ = wire_diff;

@@ -218,7 +218,7 @@ fn get(c: *VdbeCursor) *Sorter {
 
 /// Port of sqlite3TempInMemory() for SQLITE_TEMP_STORE=1: temporary
 /// files are in memory only with PRAGMA temp_store=MEMORY.
-fn tempInMemory(db: *const int.Sqlite3) bool {
+pub fn tempInMemory(db: *const int.Sqlite3) bool {
     return db.temp_store == 2;
 }
 

@@ -45,19 +45,19 @@ fn argvPtr(argv: []*Mem) ?[*]*Mem {
     return if (argv.len == 0) null else argv.ptr;
 }
 
-// The arguments are registers: what C turned into UTF-16 goes back to
-// UTF-8 before the engine reads them again (common.toUtf8()).
+// The arguments are registers: what C converted goes back to the
+// database encoding before the engine reads them again (common.toDbEnc()).
 
 pub fn scalarThunk(ctx: *Context, argv: []*Mem) void {
     const w = FuncWrap.of(ctx);
     w.x_func.?(ctx, @intCast(argv.len), argvPtr(argv));
-    c.toUtf8(c.api.contextDbHandle(ctx), argv);
+    c.toDbEnc(c.api.contextDbHandle(ctx), argv);
 }
 
 fn stepThunk(ctx: *Context, argv: []*Mem) void {
     const w = FuncWrap.of(ctx);
     w.x_step.?(ctx, @intCast(argv.len), argvPtr(argv));
-    c.toUtf8(c.api.contextDbHandle(ctx), argv);
+    c.toDbEnc(c.api.contextDbHandle(ctx), argv);
 }
 
 fn finalThunk(ctx: *Context) void {
@@ -71,7 +71,7 @@ fn valueThunk(ctx: *Context) void {
 fn inverseThunk(ctx: *Context, argv: []*Mem) void {
     const w = FuncWrap.of(ctx);
     w.x_inverse.?(ctx, @intCast(argv.len), argvPtr(argv));
-    c.toUtf8(c.api.contextDbHandle(ctx), argv);
+    c.toDbEnc(c.api.contextDbHandle(ctx), argv);
 }
 
 const destroyWrap = c.int.destructor(FuncWrap.destroy);
@@ -476,6 +476,8 @@ pub const CCompare = *const fn (?*anyopaque, c_int, ?*const anyopaque, c_int, ?*
 /// A collation registered from C (kept in Ext.colls by name).
 pub const CollWrap = struct {
     name: [:0]u8,
+    /// The text encoding it compares.
+    enc: u8,
     x_compare: CCompare,
     p_arg: ?*anyopaque,
     x_destroy: ?c.CDestructor,
@@ -493,21 +495,27 @@ fn compareThunk(user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order 
     return std.math.order(r, 0);
 }
 
-fn createCollation(db_arg: ?*Handle, name: ?[]const u8, p_arg: ?*anyopaque, x_compare: ?CCompare, x_destroy: ?c.CDestructor) c_int {
+/// Port of createCollation() (main.c): the collation compares text in
+/// encoding `enc_arg` (SQLITE_UTF8, SQLITE_UTF16LE/BE, or SQLITE_UTF16
+/// and SQLITE_UTF16_ALIGNED for the native byte order).
+fn createCollation(db_arg: ?*Handle, name: ?[]const u8, enc_arg: c_int, p_arg: ?*anyopaque, x_compare: ?CCompare, x_destroy: ?c.CDestructor) c_int {
     const lk = c.lock(db_arg);
     defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const z = name orelse return RC.MISUSE;
+    var enc = enc_arg;
+    if (enc == c.vi.ENC.UTF16 or enc == c.vi.ENC.UTF16_ALIGNED) enc = c.utf.UTF16NATIVE;
+    if (enc < c.vi.ENC.UTF8 or enc > c.vi.ENC.UTF16BE) return RC.MISUSE;
+    const enc2: u8 = @intCast(enc);
     const e = c.ext(db);
-    var rc: c_int = RC.OK;
     var new: ?*CollWrap = null;
     if (x_compare) |cmp| {
         const w = c.gpa.create(CollWrap) catch return RC.NOMEM;
         w.* = .{ .name = c.gpa.dupeSentinel(u8, z, 0) catch {
             c.gpa.destroy(w);
             return RC.NOMEM;
-        }, .x_compare = cmp, .p_arg = p_arg, .x_destroy = x_destroy };
-        rc = c.main.apiExit(db, coll.createCollation(db, z, w, compareThunk));
+        }, .enc = enc2, .x_compare = cmp, .p_arg = p_arg, .x_destroy = x_destroy };
+        const rc = c.main.apiExit(db, coll.createCollationEnc(db, z, enc2, w, compareThunk));
         if (rc != RC.OK) {
             // As in SQLite, xDestroy is not called when this fails.
             w.x_destroy = null;
@@ -517,21 +525,14 @@ fn createCollation(db_arg: ?*Handle, name: ?[]const u8, p_arg: ?*anyopaque, x_co
         new = w;
     } else {
         // Delete the collation: it becomes "named but not defined".
-        if (db.n_vdbe_active != 0) {
-            c.main.errorWithMsg(db, RC.BUSY, "unable to delete/modify collation sequence due to active statements", .{});
-            return RC.BUSY;
-        }
-        if (db.colls.get(z)) |cs| {
-            @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
-            cs.cmp = null;
-            cs.user = null;
-        }
+        const rc = c.main.apiExit(db, coll.createCollationEnc(db, z, enc2, null, null));
+        if (rc != RC.OK) return rc;
     }
     // The collation it replaces, if registered from C, is gone.
     var i: usize = 0;
     while (i < e.colls.items.len) {
         const w = e.colls.items[i];
-        if (c.ctype.eqlNoCase(w.name, z)) {
+        if (w.enc == enc2 and c.ctype.eqlNoCase(w.name, z)) {
             _ = e.colls.orderedRemove(i);
             w.destroy();
         } else i += 1;
@@ -540,16 +541,16 @@ fn createCollation(db_arg: ?*Handle, name: ?[]const u8, p_arg: ?*anyopaque, x_co
     return RC.OK;
 }
 
-pub export fn sqlite3_create_collation(db: ?*Handle, z_name: ?[*:0]const u8, _: c_int, p_arg: ?*anyopaque, x_compare: ?CCompare) callconv(.c) c_int {
-    return createCollation(db, c.span(z_name), p_arg, x_compare, null);
+pub export fn sqlite3_create_collation(db: ?*Handle, z_name: ?[*:0]const u8, enc: c_int, p_arg: ?*anyopaque, x_compare: ?CCompare) callconv(.c) c_int {
+    return createCollation(db, c.span(z_name), enc, p_arg, x_compare, null);
 }
 
-pub export fn sqlite3_create_collation_v2(db: ?*Handle, z_name: ?[*:0]const u8, _: c_int, p_arg: ?*anyopaque, x_compare: ?CCompare, x_destroy: ?*const anyopaque) callconv(.c) c_int {
-    return createCollation(db, c.span(z_name), p_arg, x_compare, c.cDestructor(x_destroy));
+pub export fn sqlite3_create_collation_v2(db: ?*Handle, z_name: ?[*:0]const u8, enc: c_int, p_arg: ?*anyopaque, x_compare: ?CCompare, x_destroy: ?*const anyopaque) callconv(.c) c_int {
+    return createCollation(db, c.span(z_name), enc, p_arg, x_compare, c.cDestructor(x_destroy));
 }
 
-pub export fn sqlite3_create_collation16(db: ?*Handle, z_name: ?*const anyopaque, _: c_int, p_arg: ?*anyopaque, x_compare: ?CCompare) callconv(.c) c_int {
+pub export fn sqlite3_create_collation16(db: ?*Handle, z_name: ?*const anyopaque, enc: c_int, p_arg: ?*anyopaque, x_compare: ?CCompare) callconv(.c) c_int {
     const name = c.utf16ToUtf8(c.utf16Slice(z_name orelse return RC.MISUSE, -1), false) orelse return RC.NOMEM;
     defer c.gpa.free(name);
-    return createCollation(db, name, p_arg, x_compare, null);
+    return createCollation(db, name, enc, p_arg, x_compare, null);
 }

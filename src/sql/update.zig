@@ -784,12 +784,15 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
     }
     if (op == TK.REGISTER) op = e.op2;
     const a = v.alloc();
+    // The value is in the database encoding (C's `enc` argument is
+    // always ENC(db) here).
+    const enc = v.db.enc;
 
     if (op == TK.CAST) {
         const cast_aff = build.affinityType(e.token(), null);
         const m = (try valueFromExprImpl(v, e.left.?, cast_aff)) orelse return null;
-        try mem.cast(m, cast_aff, vi.ENC.UTF8);
-        try mem.applyAffinity(m, aff, vi.ENC.UTF8);
+        try mem.cast(m, cast_aff, enc);
+        try mem.applyAffinity(m, aff, enc);
         return m;
     }
 
@@ -835,6 +838,7 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
             try mem.applyAffinity(m, aff, vi.ENC.UTF8);
         }
         if (m.flags.intersects(.{ .Int = true, .IntReal = true, .Real = true })) m.flags.Str = false;
+        if (enc != vi.ENC.UTF8) try mem.changeEncoding(m, enc);
         return m;
     } else if (op == TK.UMINUS) {
         // Several minus signs: -(-5).
@@ -848,7 +852,7 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
         } else {
             m.u.i = -m.u.i;
         }
-        try mem.applyAffinity(m, aff, vi.ENC.UTF8);
+        try mem.applyAffinity(m, aff, enc);
         return m;
     } else if (op == TK.NULL) {
         return try newValue(v);
@@ -862,7 +866,7 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
         const m = try newValue(v);
         m.flags = .{ .Int = true };
         m.u = .{ .i = @intFromBool(e.token().len == 4) };
-        try mem.applyAffinity(m, aff, vi.ENC.UTF8);
+        try mem.applyAffinity(m, aff, enc);
         return m;
     }
     return null;

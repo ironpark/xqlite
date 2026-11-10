@@ -303,7 +303,7 @@ fn xFilter(p: *vtab.VtabCursor, idx_num: i32, idx_str: ?[:0]const u8, argv: []*M
     const cu = Cursor.of(p);
     const t = cu.tab();
     const rc = t.wrap.cmod.xFilter.?(cu.cur, idx_num, if (idx_str) |s| s.ptr else null, @intCast(argv.len), if (argv.len == 0) null else argv.ptr);
-    c.toUtf8(t.db, argv);
+    c.toDbEnc(t.db, argv);
     return t.call(rc);
 }
 
@@ -331,7 +331,7 @@ fn xRowid(p: *vtab.VtabCursor, rowid: *i64) i32 {
 fn xUpdate(base: *vtab.Vtab, argv: []*Mem, rowid: *i64) i32 {
     const t = Tab.of(base);
     const rc = t.wrap.cmod.xUpdate.?(t.cvt, @intCast(argv.len), if (argv.len == 0) null else argv.ptr, rowid);
-    c.toUtf8(t.db, argv);
+    c.toDbEnc(t.db, argv);
     return t.call(rc);
 }
 

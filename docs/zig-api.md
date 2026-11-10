@@ -129,7 +129,7 @@ var db = try xqlite.Db.open(gpa, io, "app.db", .{ .journal_mode = .wal, .busy_ti
 defer db.close();
 ```
 
-`Db.open()`이 필요한 것을 모두 인자로 받으므로 전역 초기화가 필요 없습니다. 경로가 `":memory:"`나 `""`이면 연결 전용 임시 메모리 DB를 엽니다.
+`Db.open()`이 필요한 것을 모두 인자로 받으므로 전역 초기화가 필요 없습니다. 경로가 `":memory:"`이면 파일 없는 인메모리 DB를, `""`이면 연결 전용 임시 DB(커지면 임시 파일에 내보냄)를 엽니다.
 
 | 인자 | 뜻 |
 | --- | --- |

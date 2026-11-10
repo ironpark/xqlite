@@ -15,8 +15,15 @@
 //! SQLite processes too. As in os_unix.c, each inode has at most one
 //! `ShmNode` per process, shared by every handle that maps it.
 //!
-//! Not ported yet: mmap of the database file, proxy/dotfile/flock locking
-//! styles, unix-excl (process-private locks), F_SETLKW timeouts.
+//! Memory-mapped I/O (PRAGMA mmap_size, xFetch/xUnfetch) maps the
+//! database file read-only and shared, as os_unix.c does without
+//! SQLITE_MMAP_READWRITE: reads within the mapping are copied out of it
+//! and the pager may use mapped pages in place; writes still go through
+//! pwrite(2). Growing the mapping maps it anew (C uses mremap() on
+//! Linux and extends the mapping in place elsewhere when it can).
+//!
+//! Not ported yet: proxy/dotfile/flock locking styles, unix-excl
+//! (process-private locks), F_SETLKW timeouts.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -122,6 +129,7 @@ pub const UnixVfs = struct {
             .inode = inode,
             .read_only = read_only,
             .path = path_copy,
+            .mmap_size_max = vfs.mmap_config.default_size,
         };
         return .{ .ptr = handle, .vtable = UnixFile.vtable };
     }
@@ -547,6 +555,14 @@ const UnixFile = struct {
     path: ?[]u8 = null,
     /// This handle's connection to the shared memory (pShm).
     shm: ?*Shm = null,
+    /// The memory map of the file (pMapRegion), its usable size
+    /// (mmapSize, which a truncation may lower below the size mapped,
+    /// mmapSizeActual), the largest size to map (mmapSizeMax) and the
+    /// pointers into it handed out by fetch() (nFetchOut).
+    map_region: ?[]align(std.heap.page_size_min) const u8 = null,
+    mmap_size: u64 = 0,
+    mmap_size_max: i64 = 0,
+    n_fetch_out: u32 = 0,
 
     /// The methods named after those of vfs.File.VTable implement it
     /// (vfs.FileImpl()).
@@ -563,6 +579,7 @@ const UnixFile = struct {
         std.debug.assert(f.shm == null);
         if (f.shm != null) shmUnmap(f, false);
         unlock(f, .none) catch {};
+        f.unmapFile();
         const inode = f.inode;
         inode.mutex.lockUncancelable(io);
         if (inode.n_lock != 0) {
@@ -579,8 +596,23 @@ const UnixFile = struct {
         f.owner.gpa.destroy(f);
     }
 
-    pub fn read(f: *UnixFile, buf: []u8, offset: u64) Error!usize {
-        return f.file.readPositionalAll(f.owner.io, buf, offset) catch error.IoErr;
+    pub fn read(f: *UnixFile, buf_arg: []u8, offset_arg: u64) Error!usize {
+        var buf = buf_arg;
+        var offset = offset_arg;
+        // As much as the memory map holds is copied out of it.
+        if (offset < f.mmap_size) {
+            const map = f.map_region.?;
+            if (offset + buf.len <= f.mmap_size) {
+                @memcpy(buf, map[@intCast(offset)..][0..buf.len]);
+                return buf.len;
+            }
+            const n: usize = @intCast(f.mmap_size - offset);
+            @memcpy(buf[0..n], map[@intCast(offset)..][0..n]);
+            buf = buf[n..];
+            offset += n;
+        }
+        const n = f.file.readPositionalAll(f.owner.io, buf, offset) catch return error.IoErr;
+        return buf_arg.len - buf.len + n;
     }
 
     pub fn write(f: *UnixFile, buf: []const u8, offset: u64) Error!void {
@@ -594,6 +626,8 @@ const UnixFile = struct {
     pub fn truncate(f: *UnixFile, size: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         f.file.setLength(f.owner.io, size) catch return error.IoErr;
+        // Past the new end, read() and write() are used from now on.
+        if (size < f.mmap_size) f.mmap_size = size;
     }
 
     pub fn sync(f: *UnixFile, flags: vfs.SyncFlags) Error!void {
@@ -779,6 +813,83 @@ const UnixFile = struct {
 
     /// Port of unixShmMap(): region `region` of the shared memory, each
     /// region `size` bytes, extending the -shm file if `extend`.
+    // ========================================================= memory map
+
+    /// Port of unixUnmapfile().
+    fn unmapFile(f: *UnixFile) void {
+        std.debug.assert(f.n_fetch_out == 0);
+        if (f.map_region) |r| std.posix.munmap(r);
+        f.map_region = null;
+        f.mmap_size = 0;
+    }
+
+    /// Port of unixRemapfile(): map the first `n_new` bytes of the file.
+    /// A failure leaves the file unmapped and turns memory maps off for
+    /// it, as C assumes later attempts would fail too.
+    fn remapFile(f: *UnixFile, n_new: u64) void {
+        std.debug.assert(f.n_fetch_out == 0 and n_new > 0);
+        f.unmapFile();
+        const m = std.posix.mmap(null, @intCast(n_new), .{ .READ = true }, .{ .TYPE = .SHARED }, f.fd(), 0) catch {
+            f.mmap_size_max = 0;
+            return;
+        };
+        f.map_region = m;
+        f.mmap_size = n_new;
+    }
+
+    /// Port of unixMapfile(): map the file, up to `n_map` bytes or its
+    /// size if `n_map` is null, but no more than `mmap_size_max`. Nothing
+    /// changes while pointers into the map are out.
+    fn mapFile(f: *UnixFile, n_map_arg: ?u64) Error!void {
+        if (f.n_fetch_out > 0) return;
+        var n_map = n_map_arg orelse (f.file.length(f.owner.io) catch return error.IoErr);
+        if (n_map > @as(u64, @intCast(f.mmap_size_max))) n_map = @intCast(f.mmap_size_max);
+        if (n_map == f.mmap_size) return;
+        if (n_map == 0) return f.unmapFile();
+        f.remapFile(n_map);
+    }
+
+    /// Port of unixFetch(): a pointer to `amt` bytes at `offset` in the
+    /// map, if 256 more bytes after them are mapped too (a corrupt page
+    /// may be overread by a few bytes); else null.
+    pub fn fetch(f: *UnixFile, offset: u64, amt: u32) Error!?[*]const u8 {
+        if (f.mmap_size_max <= 0) return null;
+        const eof_buffer = 256;
+        if (f.map_region == null) try f.mapFile(null);
+        if (f.mmap_size >= offset + amt + eof_buffer) {
+            f.n_fetch_out += 1;
+            return f.map_region.?.ptr + @as(usize, @intCast(offset));
+        }
+        return null;
+    }
+
+    /// Port of unixUnfetch().
+    pub fn unfetch(f: *UnixFile, offset: u64, p: ?[*]const u8) void {
+        _ = offset;
+        if (p != null) {
+            f.n_fetch_out -= 1;
+        } else {
+            f.unmapFile();
+        }
+    }
+
+    /// SQLITE_FCNTL_MMAP_SIZE of unixFileControl().
+    pub fn mmapSize(f: *UnixFile, new_limit_arg: i64) Error!?i64 {
+        var new_limit = new_limit_arg;
+        if (new_limit > vfs.mmap_config.max_size) new_limit = vfs.mmap_config.max_size;
+        // mmap() takes a size_t: at most 2 GiB where it is 32 bits.
+        if (new_limit > 0 and @sizeOf(usize) < 8) new_limit &= 0x7fffffff;
+        const old = f.mmap_size_max;
+        if (new_limit >= 0 and new_limit != f.mmap_size_max and f.n_fetch_out == 0) {
+            f.mmap_size_max = new_limit;
+            if (f.mmap_size > 0) {
+                f.unmapFile();
+                try f.mapFile(null);
+            }
+        }
+        return old;
+    }
+
     pub fn shmMap(f: *UnixFile, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
         const io = f.owner.io;
         const cant_init: vfs.ShmRegion = .{ .ptr = null, .read_only = true, .cant_init = true };

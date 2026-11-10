@@ -40,6 +40,16 @@ fn prepare(db_arg: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: c_u
     return rc;
 }
 
+/// sqlite3_prepare_v2() of NUL-terminated text whose length is known:
+/// sqlite3_exec() prepares statement after statement of one text
+/// without measuring the rest of it each time.
+pub fn prepareZ(db: *Handle, text: [:0]const u8, out: *?*Vdbe, tail: *[:0]const u8) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
+    out.* = null;
+    return prepare_mod.prepareV3Z(db, text, 0, out, tail);
+}
+
 pub export fn sqlite3_prepare(db: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) callconv(.c) c_int {
     return prepare(db, z_sql, n_byte, 0, pp_stmt, pz_tail);
 }
@@ -98,7 +108,7 @@ pub export fn sqlite3_step(v_arg: ?*Vdbe) callconv(.c) c_int {
     const lk = c.lockStmt(v_arg);
     defer lk.unlock();
     const v = v_arg orelse return RC.MISUSE;
-    if (c.extOf(v.db)) |e| if (e.utf16) c.rowToUtf8(v);
+    if (c.extOf(v.db)) |e| if (e.utf16) c.rowToDbEnc(v);
     return c.api.step(v);
 }
 
@@ -106,7 +116,7 @@ pub export fn sqlite3_reset(v_arg: ?*Vdbe) callconv(.c) c_int {
     const lk = c.lockStmt(v_arg);
     defer lk.unlock();
     const v = v_arg orelse return RC.OK;
-    c.rowToUtf8(v);
+    c.rowToDbEnc(v);
     return c.api.reset(v);
 }
 
@@ -194,6 +204,8 @@ fn bindText(v_arg: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: i64, del: ?*const 
     switch (enc) {
         2, 3, 4 => {
             const s16 = c.utf16Slice(p, n);
+            // A UTF-16 database: stored as given, then in its byte order.
+            if (v.db.enc != c.vi.ENC.UTF8) return c.api.bindTextEnc(v, idx(i), std.mem.sliceAsBytes(s16), if (enc == 4) c.utf.UTF16NATIVE else enc);
             const s8 = c.utf16ToUtf8(s16, enc == 3) orelse return RC.NOMEM;
             defer c.gpa.free(s8);
             return c.api.bindText(v, idx(i), s8);
@@ -416,8 +428,8 @@ pub export fn sqlite3_column_origin_name16(v: ?*Vdbe, i: c_int) callconv(.c) ?*c
 
 // The UTF-16 results: as in SQLite, the value (or name) is converted to
 // UTF-16 in place, and the text lives until the next type conversion,
-// step or reset. The engine reads only UTF-8, so the registers are
-// converted back before it runs again (common.rowToUtf8()).
+// step or reset. The registers are converted back to the database
+// encoding before the engine runs again (common.rowToDbEnc()).
 
 pub export fn sqlite3_column_text16(v_arg: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
     const lk = c.lockStmt(v_arg);
@@ -535,8 +547,13 @@ fn appendValue(out: *std.ArrayList(u8), m: *Mem) !void {
             try out.appendSlice(a, z);
         },
         c.vi.SQLITE_TEXT => {
+            // A copy in UTF-8: the bound value stays in the database
+            // encoding (sqlite3VdbeExpandSql()).
+            var utf8: c.Mem = .{ .db = m.db, .flags = .{ .Null = true } };
+            c.mem.shallowCopy(&utf8, m, .{ .Ephem = true });
+            defer c.mem.releaseMalloc(&utf8);
             try out.append(a, '\'');
-            for (c.api.valueText(m) orelse "") |ch| {
+            for (c.api.valueText(&utf8) orelse "") |ch| {
                 if (ch == '\'') try out.append(a, '\'');
                 try out.append(a, ch);
             }

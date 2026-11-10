@@ -11,6 +11,7 @@ pub const malloc = @import("../sql/malloc.zig");
 pub const api = @import("../vdbe/api.zig");
 pub const vi = @import("../vdbe/vdbe_int.zig");
 pub const mem = @import("../vdbe/mem.zig");
+pub const utf = @import("../vdbe/utf.zig");
 pub const printf = @import("../sql/printf.zig");
 pub const util = @import("../sql/util.zig");
 pub const ctype = @import("xqlite_base").ctype;
@@ -232,8 +233,9 @@ pub const Ext = struct {
     errmsg16: ?[:0]u16 = null,
     /// A value of the connection was turned into UTF-16 for C
     /// (sqlite3_column_text16() ...): from then on, the registers C was
-    /// handed are brought back to UTF-8 before the engine reads them
-    /// again (toUtf8()).
+    /// handed are brought back to the database encoding before the engine
+    /// reads them again (toDbEnc()). Always so in a UTF-16 database, where
+    /// sqlite3_column_text() converts too.
     utf16: bool = false,
     /// The connection's mutex (db->mutex): a recursive sqlite3_mutex
     /// in serialized mode, held across every API call on the connection
@@ -255,20 +257,21 @@ pub fn noteUtf16(db: ?*Handle) void {
     if (extOf(db)) |e| e.utf16 = true;
 }
 
-/// Bring the values the engine will read again back to UTF-8, if C may
-/// have turned them into UTF-16 (see Ext.utf16).
-pub fn toUtf8(db: ?*Handle, values: []const *Mem) void {
+/// Bring the values the engine will read again back to the database
+/// encoding, if C may have converted them (see Ext.utf16).
+pub fn toDbEnc(db: ?*Handle, values: []const *Mem) void {
     const e = extOf(db) orelse return;
-    if (!e.utf16) return;
-    for (values) |m| mem.toUtf8(m);
+    if (!e.utf16 and db.?.enc == @import("../vdbe/vdbe_int.zig").ENC.UTF8) return;
+    for (values) |m| mem.toDbEnc(m);
 }
 
-/// toUtf8() for the current row of `v`.
-pub fn rowToUtf8(v: *Vdbe) void {
+/// toDbEnc() for the current row of `v` (in a UTF-16 database the engine
+/// does this itself: api.step()).
+pub fn rowToDbEnc(v: *Vdbe) void {
     const e = extOf(v.db) orelse return;
     if (!e.utf16) return;
     const row = v.result_row orelse return;
-    for (row[0..v.n_res_column]) |*m| mem.toUtf8(m);
+    for (row[0..v.n_res_column]) |*m| mem.toDbEnc(m);
 }
 
 pub fn extOf(db: ?*Handle) ?*Ext {

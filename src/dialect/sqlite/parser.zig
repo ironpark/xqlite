@@ -112,7 +112,8 @@ pub fn runParser(p: *Parse, sql: [:0]const u8) (Oom || int.ParseError)!void {
         if (p.err_msg == null) p.err_msg = try p.arena.dupeSentinel(u8, util.errStr(p.rc), 0);
         failed = true;
     }
-    p.tail = std.mem.sliceTo(sql[pos..], 0);
+    // The rest of the text, which ends at a NUL in it (as C's).
+    p.tail = if (pos < sql.len and sql[pos] == 0) sql[pos..pos :0] else sql[pos..];
     if (p.new_table) |t| if (!p.inSpecialParse()) {
         @import("../../sql/build.zig").deleteTable(db, t);
         p.new_table = null;

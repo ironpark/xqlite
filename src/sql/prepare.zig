@@ -221,12 +221,10 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
         var enc: u8 = @intCast(meta[4] & 3);
         if (enc == 0) enc = 1;
         if (i_db == 0 and !db.m_db_flags.EncodingFixed) {
-            if (enc != 1) {
-                setErrMsg(&data, "UTF-16 databases are not supported");
-                return initError(db, i_db, RC.ERROR);
-            }
-            db.enc = enc;
-        } else if (enc != db.enc) {
+            // C calls sqlite3SetTextEncoding() even for the same encoding;
+            // its expiring of the statements matters only for a change.
+            if (enc != db.enc) @import("coll.zig").setTextEncoding(db, enc);
+        } else if (meta[4] & 3 != db.enc) {
             setErrMsg(&data, "attached databases must use the same text encoding as main database");
             return initError(db, i_db, RC.ERROR);
         }
@@ -234,7 +232,8 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
     pdb.schema.enc = db.enc;
 
     if (pdb.schema.cache_size == 0) {
-        var size: i32 = @intCast(@abs(@as(i32, @bitCast(meta[2]))));
+        // sqlite3AbsInt32(): the most negative value becomes the largest.
+        var size: i32 = @intCast(@min(@abs(@as(i32, @bitCast(meta[2]))), std.math.maxInt(i32)));
         if (size == 0) size = int.DEFAULT_CACHE_SIZE;
         pdb.schema.cache_size = size;
         bt.setCacheSize(size);

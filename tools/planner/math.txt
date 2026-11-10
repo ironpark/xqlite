@@ -1,0 +1,56 @@
+# The math functions of SQLITE_ENABLE_MATH_FUNCTIONS (func.c): results
+# and types of every function on integers, reals, text, blobs and NULL
+# (domain errors are NULL), PRAGMA function_list, constant folding of
+# calls with constant arguments, and the functions in an expression
+# index, a generated column, a CHECK, a view and a WHERE clause. The
+# last bit of the trigonometric, hyperbolic and base-10/base-2 log
+# functions is the libm's (xqlite computes musl's, src/sql/func/math.zig;
+# the reference sqlite3 calls its platform's), so those print with
+# printf('%.12g'); ceil(), floor(), trunc(), sqrt(), mod(), radians(),
+# degrees() and the Arm code of exp(), ln() and pow() (musl, glibc) print
+# in full.
+CREATE TABLE n(id INTEGER PRIMARY KEY, x);
+INSERT INTO n(x) VALUES (0), (1), (-1), (2), (10), (100), (0.5), (-0.5), (2.5), (-2.5), (1e-300), (1e300), (-1e300), (9223372036854775807), (-9223372036854775808), (4503599627370497), ('12'), (' 3.5 '), ('abc'), ('1e3'), ('0x10'), (''), (x'31'), (x''), (NULL), (710), (-746), (0.9999999999999999), (180), (3.141592653589793);
+CREATE TABLE p(a, b);
+INSERT INTO p VALUES (2, 10), (2, -1), (-8, 3), (-8, 0.5), (0, 0), (0, -1), (10, 100), (100, 10), (1, 8), (8, 1), (2.5, 0.5), (-2.5, 1), (7, 0), (7, -3), (-7, 3), (1e308, 10), ('2', '3'), ('x', 2), (2, 'x'), (x'32', 3), (3, x'32'), (NULL, 2), (2, NULL), (9223372036854775807, 2), (-9223372036854775808, -1), (0.5, 1e300);
+CREATE TABLE g(x REAL, l AS (log2(x)), s AS (sqrt(x)) STORED, CHECK (ceil(x) >= floor(x)));
+CREATE INDEX g_sin ON g(trunc(x * 10));
+CREATE INDEX g_l ON g(ln(x)) WHERE x > 0;
+INSERT INTO g(x) VALUES (1), (2), (4), (8), (0.5), (-3), (16);
+CREATE VIEW v AS SELECT x, pi() AS p, mod(x, 3) AS m, degrees(radians(x)) AS d FROM g;
+==
+SELECT id, ceil(x), ceiling(x), floor(x), trunc(x), typeof(ceil(x)), typeof(trunc(x)) FROM n
+SELECT id, ln(x), printf('%.12g', log(x)), printf('%.12g', log10(x)), printf('%.12g', log2(x)), typeof(ln(x)), typeof(log2(x)) FROM n
+SELECT id, exp(x), sqrt(x), radians(x), degrees(x) FROM n
+SELECT id, printf('%.12g', sin(x)), printf('%.12g', cos(x)), printf('%.12g', tan(x)), typeof(sin(x)) FROM n
+SELECT id, printf('%.12g', asin(x)), printf('%.12g', acos(x)), printf('%.12g', atan(x)), typeof(asin(x)) FROM n
+SELECT id, printf('%.12g', sinh(x)), printf('%.12g', cosh(x)), printf('%.12g', tanh(x)), typeof(cosh(x)) FROM n
+SELECT id, printf('%.12g', asinh(x)), printf('%.12g', acosh(x)), printf('%.12g', atanh(x)), typeof(atanh(x)) FROM n
+SELECT rowid, pow(a, b), power(a, b), mod(a, b), printf('%.12g', atan2(a, b)), log(a, b), typeof(mod(a, b)), typeof(atan2(a, b)) FROM p
+SELECT quote(ceil(x)), quote(floor(x)), quote(trunc(x)), quote(sqrt(x)) FROM n
+SELECT quote(pow(a, b)), quote(mod(a, b)) FROM p
+SELECT quote(pi()), typeof(pi()), quote(exp(0)), quote(ln(1)), quote(log(1000)), quote(log2(1024)), quote(log(2, 1024)), quote(sin(0)), quote(cos(0)), quote(atan2(0, -1)), quote(acos(-1)), quote(degrees(pi())), quote(radians(180))
+SELECT ceil(-0.5), quote(ceil(-0.5)), floor(-0.0), trunc(-0.7), ceil(9223372036854775807), floor(-9223372036854775808), ceil(1e300), trunc('-12'), floor(' 7 ')
+SELECT sqrt(-1), ln(0), log(-1), log10(0), log2(-0.0), acos(2), asin(-2), acosh(0.5), atanh(1.5), mod(5, 0), pow(-8, 1.0/3), pow(0, -1), exp(1000), exp(-1000)
+SELECT log(2, 'x'), log('x', 8), log(1, 8), log(0.5, 8), log(2, x'38'), log(x'32', 8), log(2, NULL), log(NULL, 2)
+SELECT pi(1)
+SELECT ceil()
+SELECT log(1, 2, 3)
+SELECT mod(1)
+SELECT nosuchmath(1)
+SELECT name, builtin, type, enc, narg, flags FROM pragma_function_list WHERE name IN ('ceil', 'ceiling', 'floor', 'trunc', 'ln', 'log', 'log10', 'log2', 'exp', 'pow', 'power', 'mod', 'acos', 'asin', 'atan', 'atan2', 'cos', 'sin', 'tan', 'cosh', 'sinh', 'tanh', 'acosh', 'asinh', 'atanh', 'sqrt', 'radians', 'degrees', 'pi') ORDER BY name, narg
+SELECT x, ceil(2.5) + floor(x), pi() * x, sqrt(16) FROM n WHERE id < 5
+SELECT x FROM n WHERE sqrt(x) > 1 AND typeof(x) = 'integer'
+SELECT x FROM n WHERE x > exp(2) ORDER BY ln(x)
+SELECT max(sin(x)), min(cos(x)), sum(ceil(x)), avg(floor(x)) FROM n WHERE typeof(x) IN ('integer', 'real')
+SELECT x, l, s FROM g
+SELECT x FROM g WHERE trunc(x * 10) = 20
+SELECT x FROM g WHERE ln(x) > 1 AND x > 0
+SELECT * FROM v
+SELECT x FROM g ORDER BY trunc(x * 10) DESC
+INSERT INTO g(x) VALUES (64), (0.25)
+UPDATE g SET x = x * 2 WHERE ceil(x) = 2
+DELETE FROM g WHERE log2(x) IS NULL
+INSERT INTO g(x) VALUES (-1)
+SELECT CASE WHEN sign(x) < 0 THEN abs(x) ELSE sqrt(x) END FROM n WHERE typeof(x) = 'real'
+SELECT exp(ln(x)), pow(x, 2), x * x FROM n WHERE id BETWEEN 2 AND 9

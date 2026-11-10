@@ -1,8 +1,7 @@
 //! Text encoding conversion between UTF-8 and UTF-16 (port of the
 //! translation loops of utf.c's sqlite3VdbeMemTranslate()). The engine
-//! keeps text in UTF-8; values become UTF-16 only when an interface asks
-//! for it (sqlite3_value_text16() and friends of the C ABI), and go back
-//! to UTF-8 when the engine reads them again.
+//! keeps text in the encoding of the database; values change encoding
+//! when an interface or a function asks for another (mem.changeEncoding()).
 
 const std = @import("std");
 const simd = @import("xqlite_base").simd;

@@ -32,9 +32,22 @@
 //! (Backup): they are told of every page written, and start over when
 //! the cache is discarded.
 //!
-//! Not ported yet: journal_mode=MEMORY,
-//! locking_mode=EXCLUSIVE (and with it the heap-memory WAL mode),
-//! in-memory databases, mmap, WAL snapshots.
+//! journal_mode=MEMORY keeps the journal in memory (memjournal.zig), as
+//! does an in-memory database (`:memory:`, Options.memory, C's memDb),
+//! which has no file at all: its pages never leave the page cache. A
+//! temporary database (no name) opens its file only when a page must be
+//! written out, and its journal stays in memory until it grows past 64
+//! KiB.
+//!
+//! In exclusive locking mode (`lockingMode`, PRAGMA locking_mode), the
+//! locks taken are only dropped when the mode goes back to normal; a
+//! temporary or in-memory database is always in it. The WAL of a
+//! database in exclusive mode keeps its wal-index in heap memory.
+//!
+//! Pages may be read in place from a memory map of the database file
+//! (`setMmapLimit`, PRAGMA mmap_size), when the VFS can map files.
+//!
+//! Not ported yet: WAL snapshots.
 
 const std = @import("std");
 const corrupt = @import("../corrupt.zig").corrupt;
@@ -43,6 +56,8 @@ const pcache_mod = @import("pcache.zig");
 const journal = @import("journal.zig");
 const wal_mod = @import("wal.zig");
 pub const wal = wal_mod;
+const MemJournal = @import("memjournal.zig").MemJournal;
+pub const memjournal = @import("memjournal.zig");
 const root = @import("../root.zig");
 
 const Allocator = std.mem.Allocator;
@@ -74,7 +89,7 @@ pub const JournalMode = enum(u3) {
     off = 2,
     /// Truncate the journal to zero bytes.
     truncate = 3,
-    /// The journal is kept in memory. Not supported yet.
+    /// The journal is kept in memory.
     memory = 4,
     /// Write-ahead log.
     wal = 5,
@@ -131,6 +146,13 @@ pub const Conn = struct {
 pub const CheckpointMode = wal_mod.CheckpointMode;
 
 pub const Options = struct {
+    /// An in-memory database with no file (PAGER_MEMORY): `path` is
+    /// ignored.
+    memory: bool = false,
+    /// The kind of an anonymous temporary database file, opened when it
+    /// is first written (C's vfsFlags: SQLITE_OPEN_TEMP_DB, or
+    /// TRANSIENT_DB for ephemeral tables).
+    temp_kind: vfs.FileKind = .temp_db,
     page_size: u32 = 4096,
     read_only: bool = false,
     /// Create the database file if it does not exist.
@@ -207,11 +229,20 @@ pub const Backup = struct {
 pub const GetFlags = struct {
     /// The caller will overwrite the page, so skip reading it (PAGER_GET_NOCONTENT).
     no_content: bool = false,
+    /// The caller will not write the page, which may then be a page of a
+    /// memory map (PAGER_GET_READONLY).
+    read_only: bool = false,
 };
+
+/// sqlite3Config.nStmtSpill: the journal of a temporary database stays in
+/// memory up to this size.
+const stmt_spill: i64 = 64 * 1024;
 
 pub const Pager = struct {
     gpa: Allocator,
     vfs: vfs.Vfs,
+    /// The database file; `vfs.File.unopened` until a temporary database
+    /// is first written, and for good in an in-memory one.
     fd: vfs.File,
     jfd: ?vfs.File = null,
     /// Empty for a temporary database.
@@ -238,9 +269,19 @@ pub const Pager = struct {
     /// commits, the next two for checkpoints, each 0, 2 (normal) or 3
     /// (full), as wal.walSyncFlags() reads them.
     wal_sync_flags: u8 = 0,
-    /// An anonymous temporary database (tempFile): its journal is anonymous
-    /// too, and there is no hot journal to look for.
+    /// An anonymous temporary database (tempFile), or an in-memory one:
+    /// its journal is anonymous too, there is no hot journal to look
+    /// for, no locks are taken and it is always in exclusive mode.
     temp_file: bool,
+    /// An in-memory database (memDb): no file at all, and a page cache
+    /// that never lets a page go.
+    mem_db: bool = false,
+    /// The kind of the temporary database file, opened on first write.
+    temp_kind: vfs.FileKind = .temp_db,
+    /// locking_mode=EXCLUSIVE (exclusiveMode): locks are kept once taken.
+    exclusive_mode: bool = false,
+    /// Take no file locks (noLock): a temporary database.
+    no_lock: bool = false,
 
     state: State = .open,
     /// Lock held on the database file; null is UNKNOWN_LOCK, which arises
@@ -306,6 +347,16 @@ pub const Pager = struct {
     /// Records in the sub-journal (nSubRec).
     n_sub_rec: u32 = 0,
 
+    /// The largest size of the memory map of the database file
+    /// (szMmap), and whether pages are read from it (bUseFetch): the
+    /// file has memory maps and szMmap > 0.
+    sz_mmap: i64 = 0,
+    use_fetch: bool = false,
+    /// Pages of the memory map referenced (nMmapOut), and the headers
+    /// of those released, for reuse (pMmapFreelist, linked by `dirty`).
+    n_mmap_out: u32 = 0,
+    mmap_freelist: ?*Page = null,
+
     /// Bytes 24..39 of the database file as last seen. Used to detect writes
     /// by other connections.
     db_file_vers: [16]u8 = @splat(0),
@@ -339,9 +390,11 @@ pub const Pager = struct {
         const names = try makeNames(gpa, full, if (path_arg != null) opts.uri_params else "");
         errdefer gpa.free(names.buf);
 
-        const fd = try v.open(if (path_arg != null) names.path else null, .{
-            // A temporary database is SQLITE_OPEN_TEMP_DB, as in sqlite3BtreeOpen().
-            .kind = if (path_arg != null) .main_db else .temp_db,
+        // A temporary or in-memory database has no file yet: act like a
+        // temp file (act_like_temp_file).
+        const temp_file = path_arg == null or opts.memory;
+        const fd = if (temp_file) vfs.File.unopened else try v.open(names.path, .{
+            .kind = .main_db,
             .read_write = !opts.read_only,
             .create = opts.create and !opts.read_only,
             .sqlite_filename = true,
@@ -357,16 +410,31 @@ pub const Pager = struct {
             .journal_path = names.journal,
             .wal_path = names.wal,
             .names = names.buf,
-            .temp_file = path_arg == null,
+            .temp_file = temp_file,
+            .mem_db = opts.memory,
+            .temp_kind = opts.temp_kind,
             .mem_vfs = mem_vfs,
             // The VFS may fall back to read-only (pOutFlags).
             .read_only = opts.read_only or fd.isReadOnly(),
-            // A VFS-implemented in-memory database journals in memory.
-            .journal_mode = if (mem_vfs) .memory else opts.journal_mode,
+            // An in-memory database, or a VFS-implemented one, journals
+            // in memory.
+            .journal_mode = if (opts.memory or mem_vfs) .memory else opts.journal_mode,
             .busy_handler = opts.busy_handler,
             .reiniter = opts.reiniter,
-            .cache = PCache.init(gpa, opts.page_size, std.mem.alignForward(u32, opts.extra_size, 8), .init(p, stressCallback)),
+            // The cache of an in-memory database holds the database: it
+            // is not purgeable and never spills.
+            .cache = PCache.init(gpa, opts.page_size, std.mem.alignForward(u32, opts.extra_size, 8), if (opts.memory) null else .init(p, stressCallback)),
         };
+        p.cache.purgeable = !opts.memory;
+        if (temp_file) {
+            // Pretend to hold an EXCLUSIVE lock already, in exclusive
+            // mode, and take no locks.
+            p.state = .reader;
+            p.lock = .exclusive;
+            p.no_lock = true;
+            p.exclusive_mode = true;
+            p.change_count_done = true;
+        }
         errdefer p.cache.deinit();
         p.cache.setCacheSize(opts.cache_size);
         p.setFlags(.{ .level = opts.synchronous, .full_fsync = opts.full_fsync });
@@ -380,16 +448,22 @@ pub const Pager = struct {
     /// where no write transaction may be open, the last connection
     /// checkpoints and deletes the WAL unless `db` says not to.
     pub fn close(p: *Pager, db: Conn) void {
+        p.freeMapHdrs();
+        p.exclusive_mode = false;
         if (p.wal) |w| {
             const buf: ?[]u8 = if (db.no_ckpt_on_close) null else p.tmp_space[0..p.page_size];
             w.close(db.interrupt, p.wal_sync_flags, buf) catch {};
             p.wal = null;
         }
         p.reset();
-        if (p.jfd != null) {
-            p.syncHotJournal() catch |err| p.noteError(err);
+        if (p.mem_db) {
+            p.unlock();
+        } else {
+            if (p.jfd != null) {
+                p.syncHotJournal() catch |err| p.noteError(err);
+            }
+            p.unlockAndRollback();
         }
-        p.unlockAndRollback();
         if (p.jfd) |j| j.close();
         p.fd.close();
         p.in_journal.deinit(p.gpa);
@@ -437,7 +511,7 @@ pub const Pager = struct {
     /// Port of sqlite3PagerFilename(pPager, 1): the name of the database
     /// as reported to the user, "" for a temporary or in-memory one.
     pub fn filename(p: *const Pager) []const u8 {
-        if (p.mem_vfs) return "";
+        if (p.mem_db or p.mem_vfs) return "";
         return p.path;
     }
 
@@ -448,7 +522,7 @@ pub const Pager = struct {
         const S = struct {
             const fake: [8]u8 = @splat(0);
         };
-        if (p.mem_vfs) return @ptrCast(&S.fake[4]);
+        if (p.mem_db or p.mem_vfs) return @ptrCast(&S.fake[4]);
         return @ptrCast(p.path.ptr);
     }
 
@@ -530,30 +604,25 @@ pub const Pager = struct {
         return p.cache.setSpillSize(n);
     }
 
-    /// Port of sqlite3PagerSetJournalMode(). MEMORY is supported only by
-    /// a VFS-implemented in-memory database (memdb), whose journal is a
-    /// memdb file; elsewhere it leaves the mode unchanged. Opening and
-    /// closing the WAL is the caller's (OP_JournalMode's) business.
-    /// Returns the mode in effect.
+    /// Port of sqlite3PagerSetJournalMode(). An in-memory database only
+    /// takes MEMORY and OFF. Opening and closing the WAL is the caller's
+    /// (OP_JournalMode's) business. Returns the mode in effect.
     pub fn setJournalMode(p: *Pager, mode_arg: JournalMode) JournalMode {
         const old = p.journal_mode;
         std.debug.assert(!p.temp_file or mode_arg != .wal);
-        const mode = switch (mode_arg) {
-            .memory => if (p.mem_vfs) .memory else old,
-            else => mode_arg,
-        };
+        var mode = mode_arg;
+        if (p.mem_db and mode != .memory and mode != .off) mode = old;
         if (mode == old) return old;
         std.debug.assert(p.state != .err);
         p.journal_mode = mode;
         const old_bits = @backingInt(old);
         const new_bits = @backingInt(mode);
-        if (old_bits & 5 == 1 and new_bits & 1 == 0) {
+        if (!p.exclusive_mode and old_bits & 5 == 1 and new_bits & 1 == 0) {
             // Leaving TRUNCATE or PERSIST for DELETE or OFF: delete the
             // journal, under at least a RESERVED lock so that no other
             // connection mistakes it for a hot journal meanwhile.
             if (p.jfd) |j| j.close();
             p.jfd = null;
-            if (p.temp_file) return mode;
             if (p.lock != null and p.lock.?.atLeast(.reserved)) {
                 p.vfs.delete(p.journal_path, false) catch {};
             } else {
@@ -586,6 +655,43 @@ pub const Pager = struct {
         return !(p.jfd != null and p.journal_off > 0);
     }
 
+    /// Port of sqlite3PagerLockingMode(): set exclusive locking mode
+    /// (`mode` true) or normal (false), unless null; returns whether the
+    /// pager is in exclusive mode. A temporary database, and a WAL whose
+    /// wal-index is in heap memory, stay in exclusive mode.
+    pub fn lockingMode(p: *Pager, mode: ?bool) bool {
+        std.debug.assert(p.exclusive_mode or !wal_mod.Wal.heapMemory(p.wal));
+        if (mode) |m| {
+            if (!p.temp_file and !wal_mod.Wal.heapMemory(p.wal)) p.exclusive_mode = m;
+        }
+        return p.exclusive_mode;
+    }
+
+    /// Port of sqlite3PagerSetMmapLimit(): read pages through a memory
+    /// map of up to `sz` bytes of the database file (0: no map).
+    pub fn setMmapLimit(p: *Pager, sz: i64) void {
+        p.sz_mmap = sz;
+        p.fixMaplimit();
+    }
+
+    /// Port of pagerFixMaplimit(): tell the file the map's size, and use
+    /// it if the file has memory maps.
+    fn fixMaplimit(p: *Pager) void {
+        if (p.fd.isOpen() and p.fd.hasFetch()) {
+            const sz = p.sz_mmap;
+            p.use_fetch = sz > 0;
+            _ = p.fd.mmapSize(sz) catch {};
+        }
+    }
+
+    /// The memory map size of the database file (PRAGMA mmap_size, which
+    /// asks the file with SQLITE_FCNTL_MMAP_SIZE), or null if the file
+    /// is not open or has no memory maps (SQLITE_NOTFOUND).
+    pub fn mmapSize(p: *Pager) Error!?i64 {
+        if (!p.fd.isOpen()) return null;
+        return p.fd.mmapSize(-1);
+    }
+
     /// Port of sqlite3PagerJournalSizeLimit(): set the limit if `limit` >=
     /// -1 (negative means no limit), and return it.
     pub fn journalSizeLimit(p: *Pager, limit: i64) i64 {
@@ -613,7 +719,9 @@ pub const Pager = struct {
     /// Port of setSectorSize(). With POWERSAFE_OVERWRITE a crash cannot
     /// damage bytes we did not write, so the minimum of 512 is used.
     fn setSectorSize(p: *Pager) void {
-        p.sector_size = if (p.fd.deviceCharacteristics().powersafe_overwrite)
+        // Sector size does not matter for temporary files, which may not
+        // be open yet.
+        p.sector_size = if (p.temp_file or p.fd.deviceCharacteristics().powersafe_overwrite)
             512
         else
             journal.sectorSize(p.fd.sectorSize());
@@ -623,9 +731,9 @@ pub const Pager = struct {
     /// referenced. `reserve` null keeps the current reserve.
     pub fn setPageSize(p: *Pager, page_size: u32, reserve: ?u8) Error!void {
         std.debug.assert(std.math.isPowerOfTwo(page_size) and page_size >= 512 and page_size <= 65536);
-        if (p.cache.refCount() == 0 and page_size != p.page_size) {
+        if ((!p.mem_db or p.db_size == 0) and p.cache.refCount() == 0 and page_size != p.page_size) {
             var n_byte: u64 = 0;
-            if (p.state.atLeast(.reader)) n_byte = try p.fd.fileSize();
+            if (p.state.atLeast(.reader) and p.fd.isOpen()) n_byte = try p.fd.fileSize();
             const tmp = try p.gpa.alloc(u8, page_size + 8);
             errdefer p.gpa.free(tmp);
             const rec = try p.gpa.alloc(u8, journal.recordSize(page_size));
@@ -646,7 +754,8 @@ pub const Pager = struct {
     /// Port of sqlite3PagerReadFileheader(). A file shorter than `buf`
     /// reads as zeros.
     pub fn readFileHeader(p: *Pager, buf: []u8) Error!void {
-        try readPadded(p.fd, buf, 0);
+        @memset(buf, 0);
+        if (p.fd.isOpen()) try readPadded(p.fd, buf, 0);
     }
 
     /// Number of pages in the database image. Requires a read transaction.
@@ -673,15 +782,16 @@ pub const Pager = struct {
     /// Port of pagerLockDb().
     fn lockDb(p: *Pager, level: LockLevel) Error!void {
         if (p.lock) |held| if (held.atLeast(level)) return;
-        try p.fd.lock(level);
+        if (!p.no_lock) try p.fd.lock(level);
         if (p.lock != null or level == .exclusive) p.lock = level;
     }
 
     /// Port of pagerUnlockDb(). The recorded lock follows the attempt even
     /// if the unlock fails.
     fn unlockDb(p: *Pager, level: LockLevel) Error!void {
-        defer p.change_count_done = false;
-        const r = p.fd.unlock(level);
+        defer p.change_count_done = p.temp_file;
+        if (!p.fd.isOpen()) return;
+        const r = if (p.no_lock) {} else p.fd.unlock(level);
         if (p.lock != null) p.lock = level;
         return r;
     }
@@ -738,9 +848,10 @@ pub const Pager = struct {
         while (it) |b| : (it = b.next) b.restart(b);
     }
 
-    /// Port of sqlite3PagerClearCache(): discard the cache.
+    /// Port of sqlite3PagerClearCache(): discard the cache, unless it
+    /// is all a temporary database has.
     pub fn clearCache(p: *Pager) void {
-        p.reset();
+        if (!p.temp_file) p.reset();
     }
 
     fn inJournal(p: *const Pager, pgno: Pgno) bool {
@@ -776,7 +887,8 @@ pub const Pager = struct {
             // lock held without a read lock.
             if (p.state == .err) w.endWriteTransaction();
             w.endReadTransaction();
-        } else {
+            p.state = .open;
+        } else if (!p.exclusive_mode) {
             // Close the journal so that another connection in DELETE mode
             // can delete it, unless the OS refuses to delete open files
             // and the journal is meant to persist anyway.
@@ -789,11 +901,20 @@ pub const Pager = struct {
             p.unlockDb(.none) catch {
                 if (p.state == .err) p.lock = null;
             };
+            p.state = .open;
         }
-        p.state = .open;
+        // In exclusive mode the pager keeps its state, but an error still
+        // discards what the cache cannot be trusted with.
         if (p.err != null) {
-            p.reset();
-            p.change_count_done = false;
+            std.debug.assert(!p.mem_db);
+            if (!p.temp_file) {
+                p.reset();
+                p.change_count_done = false;
+                p.state = .open;
+            } else {
+                p.state = if (p.jfd != null) .open else .reader;
+            }
+            if (p.use_fetch) p.fd.unfetch(0, null);
             p.err = null;
         }
         p.journal_off = 0;
@@ -806,9 +927,20 @@ pub const Pager = struct {
         if (p.state != .err and p.state != .open) {
             if (p.state.atLeast(.writer_locked)) {
                 p.rollback() catch {};
-            } else {
+            } else if (!p.exclusive_mode) {
                 p.endTransaction(false, false) catch {};
             }
+        } else if (p.state == .err and p.journal_mode == .memory and p.jfd != null) {
+            // A ROLLBACK after an I/O error with an in-memory journal: play
+            // it back now, before closing it forgets everything.
+            const err = p.err;
+            const lock = p.lock;
+            p.state = .open;
+            p.err = null;
+            p.lock = .exclusive;
+            p.playback(true) catch {};
+            p.err = err;
+            p.lock = lock;
         }
         p.unlock();
     }
@@ -826,38 +958,40 @@ pub const Pager = struct {
     pub fn sharedLock(p: *Pager) Error!void {
         std.debug.assert(p.cache.refCount() == 0);
         std.debug.assert(p.state == .open or p.state == .reader);
-        if (p.state == .open) {
-            p.sharedLockOpen() catch |err| {
-                p.unlock();
-                return err;
-            };
-        }
+        p.sharedLockInner() catch |err| {
+            std.debug.assert(!p.mem_db);
+            p.unlock();
+            return err;
+        };
         p.state = .reader;
+        p.has_held_shared_lock = true;
     }
 
-    fn sharedLockOpen(p: *Pager) Error!void {
-        if (p.wal == null) try p.sharedLockRollback();
+    fn sharedLockInner(p: *Pager) Error!void {
+        if (p.wal == null and p.state == .open) try p.sharedLockRollback();
         if (p.wal != null) try p.beginReadTransaction();
         if (!p.temp_file and p.state == .open) p.db_size = try p.pagecountFromFile();
-        p.has_held_shared_lock = true;
     }
 
     /// The rollback-mode part of sqlite3PagerSharedLock(): take SHARED,
     /// roll back a hot journal, check for changes, and switch to WAL mode
-    /// if a WAL exists.
+    /// if a WAL exists. In exclusive mode, a lock above SHARED is still
+    /// held and any journal is treated as hot.
     fn sharedLockRollback(p: *Pager) Error!void {
+        std.debug.assert(!p.mem_db);
         try p.waitOnLock(.shared);
 
         // With an UNKNOWN lock, assume the worst and treat the journal as hot.
-        const hot = if (p.temp_file)
-            false
-        else if (p.lock) |held| held.atLeast(.reserved) or try p.hasHotJournal() else true;
+        var hot = true;
+        if (p.lock) |held| {
+            if (!held.atLeast(.reserved)) hot = try p.hasHotJournal();
+        }
         if (hot) {
             if (p.read_only) return error.ReadOnlyRollback;
             // Go straight to EXCLUSIVE. Passing through RESERVED would tell
             // other connections the file is safe to read mid-rollback.
             try p.lockDb(.exclusive);
-            if (p.jfd == null and p.journal_mode != .off) {
+            if (p.jfd == null and p.journal_mode != .off and !p.temp_file) {
                 if (try p.vfs.access(p.journal_path, .exists)) {
                     p.jfd = try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .sqlite_filename = true });
                 }
@@ -866,9 +1000,9 @@ pub const Pager = struct {
                 // The crashed writer may not have synced the journal, and
                 // we must never play back unsynced content.
                 p.syncHotJournal() catch |err| return p.setError(err);
-                p.playback(true) catch |err| return p.setError(err);
+                p.playback(!p.temp_file) catch |err| return p.setError(err);
                 p.state = .open;
-            } else {
+            } else if (!p.exclusive_mode) {
                 try p.unlockDb(.shared);
             }
         }
@@ -879,7 +1013,11 @@ pub const Pager = struct {
         if (!p.temp_file and p.has_held_shared_lock) {
             var vers: [16]u8 = undefined;
             try readPadded(p.fd, &vers, 24);
-            if (!std.mem.eql(u8, &p.db_file_vers, &vers)) p.reset();
+            if (!std.mem.eql(u8, &p.db_file_vers, &vers)) {
+                p.reset();
+                // Another process may have truncated the file: unmap it.
+                if (p.use_fetch) p.fd.unfetch(0, null);
+            }
         }
 
         // A WAL in the file system means WAL mode.
@@ -946,6 +1084,89 @@ pub const Pager = struct {
     pub fn get(p: *Pager, pgno: Pgno, flags: GetFlags) Error!*Page {
         if (p.err) |e| return e;
         std.debug.assert(p.state.atLeast(.reader));
+        if (p.use_fetch) return p.getMMap(pgno, flags);
+        return p.getNormal(pgno, flags);
+    }
+
+    /// Port of getPageMMap(): a page read with `read_only` outside a
+    /// write transaction (but page 1) comes from the memory map of the
+    /// file if the map holds it and the WAL does not; it is then not in
+    /// the cache.
+    fn getMMap(p: *Pager, pgno: Pgno, flags: GetFlags) Error!*Page {
+        const mmap_ok = pgno > 1 and (p.state == .reader or flags.read_only);
+        if (pgno == 0) return corrupt(@src());
+        var frame: u32 = 0;
+        if (mmap_ok) if (p.wal) |w| {
+            frame = try w.findFrame(pgno);
+        };
+        if (mmap_ok and frame == 0) {
+            const off = @as(u64, pgno - 1) * p.page_size;
+            if (try p.fd.fetch(off, p.page_size)) |data| {
+                var pg: ?*Page = null;
+                if (p.state.atLeast(.writer_locked) or p.temp_file) pg = p.lookup(pgno);
+                if (pg) |cached| {
+                    p.fd.unfetch(off, data);
+                    return cached;
+                }
+                return p.acquireMapPage(pgno, data);
+            }
+        }
+        return p.getNormal(pgno, flags);
+    }
+
+    /// Port of pagerAcquireMapPage(): a page of the memory map, with a
+    /// header from the free list or new. Its extra space starts zeroed.
+    fn acquireMapPage(p: *Pager, pgno: Pgno, data: [*]const u8) Error!*Page {
+        const pg = if (p.mmap_freelist) |f| blk: {
+            p.mmap_freelist = f.dirty;
+            f.dirty = null;
+            @memset(f.extra[0..8], 0);
+            break :blk f;
+        } else blk: {
+            const extra_size = p.cache.extra_size;
+            const block = p.gpa.alignedAlloc(u8, .@"8", std.mem.alignForward(usize, @sizeOf(Page), 8) + extra_size) catch {
+                p.fd.unfetch(@as(u64, pgno - 1) * p.page_size, data);
+                return error.OutOfMemory;
+            };
+            @memset(block, 0);
+            const f: *Page = @ptrCast(block.ptr);
+            f.* = .{
+                .data = &.{},
+                .extra = @alignCast(block[std.mem.alignForward(usize, @sizeOf(Page), 8)..]),
+                .pgno = 0,
+                .flags = .{ .mmap = true },
+                .n_ref = 1,
+                .owner = p,
+                .cache = &p.cache,
+            };
+            break :blk f;
+        };
+        pg.pgno = pgno;
+        pg.data = @constCast(data[0..p.page_size]);
+        p.n_mmap_out += 1;
+        return pg;
+    }
+
+    /// Port of pagerReleaseMapPage().
+    fn releaseMapPage(p: *Pager, pg: *Page) void {
+        p.n_mmap_out -= 1;
+        pg.dirty = p.mmap_freelist;
+        p.mmap_freelist = pg;
+        p.fd.unfetch(@as(u64, pg.pgno - 1) * p.page_size, pg.data.ptr);
+    }
+
+    /// Port of pagerFreeMapHdrs().
+    fn freeMapHdrs(p: *Pager) void {
+        const len = std.mem.alignForward(usize, @sizeOf(Page), 8) + p.cache.extra_size;
+        while (p.mmap_freelist) |pg| {
+            p.mmap_freelist = pg.dirty;
+            const block: [*]align(8) u8 = @ptrCast(@alignCast(pg));
+            p.gpa.free(block[0..len]);
+        }
+    }
+
+    /// Port of getPageNormal().
+    fn getNormal(p: *Pager, pgno: Pgno, flags: GetFlags) Error!*Page {
         if (pgno == 0) return corrupt(@src());
 
         const pg = p.cache.fetch(pgno) catch |err| {
@@ -980,7 +1201,8 @@ pub const Pager = struct {
     fn loadPage(p: *Pager, pg: *Page, flags: GetFlags) Error!void {
         if (p.isLockPage(pg.pgno)) return corrupt(@src());
         pg.owner = p;
-        if (p.db_size < pg.pgno or flags.no_content) {
+        std.debug.assert(!p.fd.isOpen() or !p.mem_db);
+        if (!p.fd.isOpen() or p.db_size < pg.pgno or flags.no_content) {
             if (pg.pgno > p.mx_pgno) return error.DiskFull;
             // The page will be overwritten; no need to journal its old
             // content.
@@ -1020,8 +1242,13 @@ pub const Pager = struct {
         return p.cache.lookup(pgno);
     }
 
-    /// Releases a page other than the last reference to page 1.
+    /// Releases a page other than the last reference to page 1
+    /// (sqlite3PagerUnrefNotNull()).
     pub fn unref(p: *Pager, pg: *Page) void {
+        if (pg.flags.mmap) {
+            std.debug.assert(pg.pgno != 1);
+            return p.releaseMapPage(pg);
+        }
         p.cache.release(pg);
         std.debug.assert(p.cache.refCount() > 0);
     }
@@ -1120,6 +1347,12 @@ pub const Pager = struct {
         if (p.state != .reader) return;
         if (p.read_only) return error.ReadOnly;
         if (p.wal) |w| {
+            // In exclusive mode, take the EXCLUSIVE lock on the database
+            // first, and with it leave the shared-memory locks.
+            if (p.exclusive_mode and w.exclusiveMode(null)) {
+                try p.lockDb(.exclusive);
+                _ = w.exclusiveMode(true);
+            }
             // The busy handler is not invoked if another connection holds
             // the write lock; the b-tree may invoke it.
             try w.beginWriteTransaction();
@@ -1146,10 +1379,17 @@ pub const Pager = struct {
                 p.journal_off = 0;
             }
             if (p.jfd == null) {
-                // A memory journal (sqlite3MemJournalOpen()) is a private
-                // file of the in-memory VFS.
-                p.jfd = if (p.temp_file or p.journal_mode == .memory)
-                    try p.vfs.open(null, .{ .kind = if (p.temp_file) .temp_journal else .main_journal })
+                p.jfd = if (p.journal_mode == .memory)
+                    try MemJournal.openMemory(p.gpa)
+                else if (p.temp_file)
+                    // The journal of a temporary database stays in memory
+                    // until it is large.
+                    try MemJournal.open(p.gpa, p.vfs, null, .{
+                        .kind = .temp_journal,
+                        .create = true,
+                        .exclusive = true,
+                        .delete_on_close = true,
+                    }, stmt_spill)
                 else
                     try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .create = true, .sqlite_filename = true });
             }
@@ -1276,9 +1516,11 @@ pub const Pager = struct {
     }
 
     /// Port of sqlite3PagerWalSupported(): whether the VFS has the shared
-    /// memory WAL mode needs (exclusive locking mode is not ported).
+    /// memory WAL mode needs, or the pager is in exclusive mode, where
+    /// the wal-index is kept in heap memory.
     pub fn walSupported(p: *const Pager) bool {
-        return p.fd.hasShm();
+        if (p.no_lock) return false;
+        return p.exclusive_mode or p.fd.hasShm();
     }
 
     /// Port of pagerUndoCallback(): a page the rolled-back transaction
@@ -1350,9 +1592,13 @@ pub const Pager = struct {
         w.endReadTransaction();
         const changed = w.beginReadTransaction() catch |err| {
             p.reset();
+            if (p.use_fetch) p.fd.unfetch(0, null);
             return err;
         };
-        if (changed) p.reset();
+        if (changed) {
+            p.reset();
+            if (p.use_fetch) p.fd.unfetch(0, null);
+        }
     }
 
     /// Port of pagerOpenWalIfPresent(): with a SHARED lock held, open the
@@ -1374,11 +1620,15 @@ pub const Pager = struct {
         }
     }
 
-    /// Port of pagerOpenWal(): open the WAL on the shared memory.
+    /// Port of pagerOpenWal(): open the WAL. In exclusive mode the
+    /// EXCLUSIVE lock is taken first and the wal-index is kept in heap
+    /// memory rather than in shared memory.
     fn openWalHandle(p: *Pager) Error!void {
         std.debug.assert(p.wal == null and !p.temp_file);
         std.debug.assert(p.lock == .shared or p.lock == .exclusive);
-        p.wal = try wal_mod.Wal.open(p.gpa, p.vfs, p.fd, p.wal_path, p.journal_size_limit, true);
+        if (p.exclusive_mode) try p.exclusiveLockDb();
+        defer p.fixMaplimit();
+        p.wal = try wal_mod.Wal.open(p.gpa, p.vfs, p.fd, p.wal_path, p.exclusive_mode, p.journal_size_limit, true);
     }
 
     /// Port of sqlite3PagerOpenWal(): switch to WAL mode, holding a SHARED
@@ -1422,8 +1672,9 @@ pub const Pager = struct {
         const w = p.wal orelse return;
         try p.exclusiveLockDb();
         p.wal = null;
+        defer p.fixMaplimit();
         w.close(db.interrupt, p.wal_sync_flags, p.tmp_space[0..p.page_size]) catch |err| {
-            p.unlockDb(.shared) catch {};
+            if (!p.exclusive_mode) p.unlockDb(.shared) catch {};
             return err;
         };
     }
@@ -1461,10 +1712,14 @@ pub const Pager = struct {
         p.journal_off = journal.headerOffset(p.journal_off, p.sector_size);
         p.journal_hdr = p.journal_off;
 
-        var rand: [4]u8 = undefined;
-        p.vfs.randomness(&rand);
-        p.cksum_init = std.mem.readInt(u32, &rand, .little);
-        const final_nrec = p.no_sync or p.fd.deviceCharacteristics().safe_append;
+        // An in-memory journal starts empty, so there are no old records
+        // to tell apart.
+        if (p.journal_mode != .memory) {
+            var rand: [4]u8 = undefined;
+            p.vfs.randomness(&rand);
+            p.cksum_init = std.mem.readInt(u32, &rand, .little);
+        }
+        const final_nrec = p.no_sync or p.journal_mode == .memory or p.fd.deviceCharacteristics().safe_append;
         const h: journal.Header = .{
             .n_rec = if (final_nrec) 0xffffffff else 0,
             .cksum_init = p.cksum_init,
@@ -1634,7 +1889,7 @@ pub const Pager = struct {
         // A failed write still updates and releases the cached page, as
         // in C; the error is returned after.
         var write_err: ?Error = null;
-        if (p.mayWriteDb() and is_synced) {
+        if (p.fd.isOpen() and p.mayWriteDb() and is_synced) {
             p.fd.write(data, @as(u64, pgno - 1) * p.page_size) catch |err| {
                 write_err = err;
             };
@@ -1713,7 +1968,8 @@ pub const Pager = struct {
         }
 
         try p.setPageSize(saved_page_size, null);
-        p.change_count_done = false;
+        // The change counter may have just been reverted.
+        p.change_count_done = p.temp_file;
         if (p.mayWriteDb()) try p.syncDb();
         try p.endTransaction(super != null, false);
         if (super) |s| {
@@ -1724,7 +1980,7 @@ pub const Pager = struct {
 
     /// Port of pager_truncate(): make the file exactly `n_page` pages long.
     fn truncateFile(p: *Pager, n_page: Pgno) Error!void {
-        if (!p.mayWriteDb()) return;
+        if (!p.fd.isOpen() or !p.mayWriteDb()) return;
         std.debug.assert(p.lock == .exclusive);
         const cur = try p.fd.fileSize();
         const new = @as(u64, p.page_size) * n_page;
@@ -1747,6 +2003,17 @@ pub const Pager = struct {
     /// the journal can no longer be played back.
     fn finalizeJournal(p: *Pager, has_super: bool) Error!void {
         const j = p.jfd orelse return;
+        // An in-memory journal is simply closed, which destroys it.
+        if (MemJournal.isInMemory(j)) {
+            j.close();
+            p.jfd = null;
+            return;
+        }
+        // In exclusive mode the journal is kept, as with PERSIST.
+        if (p.exclusive_mode and p.journal_mode != .truncate and p.journal_mode != .wal) {
+            defer p.journal_off = 0;
+            return p.zeroJournalHdr(has_super or p.temp_file);
+        }
         switch (p.journal_mode) {
             .truncate => {
                 defer p.journal_off = 0;
@@ -1760,14 +2027,11 @@ pub const Pager = struct {
                 defer p.journal_off = 0;
                 try p.zeroJournalHdr(has_super);
             },
-            // The memory journal is simply closed, which destroys it.
-            .memory => {
-                j.close();
-                p.jfd = null;
-            },
-            // A journal is open in WAL mode only while the transaction
-            // that switches to WAL commits through the rollback journal.
-            .delete, .off, .wal => {
+            // A journal on disk with MEMORY: the hot journal just played
+            // back. A journal is open in WAL mode only while the
+            // transaction that switches to WAL commits through the
+            // rollback journal.
+            .delete, .off, .wal, .memory => {
                 j.close();
                 p.jfd = null;
                 if (!p.temp_file) try p.vfs.delete(p.journal_path, p.extra_sync);
@@ -1783,13 +2047,27 @@ pub const Pager = struct {
         p.releaseAllSavepoints();
 
         const finalized = p.finalizeOrError(has_super, commit);
-        // In WAL mode the database lock stays SHARED (WalExclusiveMode(0)
-        // is false outside exclusive mode).
-        const unlocked = if (p.wal == null) p.unlockDb(.shared) else {};
+        // Outside exclusive mode, drop to SHARED; in WAL mode the lock
+        // stays SHARED, unless the WAL has just left exclusive mode,
+        // where the EXCLUSIVE lock it held goes.
+        var unlocked: Error!void = {};
+        if (!p.exclusive_mode and (p.wal == null or p.wal.?.exclusiveMode(false))) {
+            unlocked = p.unlockDb(.shared);
+        }
         p.state = .reader;
         p.set_super = false;
         try finalized;
         return unlocked;
+    }
+
+    /// Port of pagerFlushOnCommit(): whether a commit writes the dirty
+    /// pages out. A temporary database keeps them in the cache, unless
+    /// its file is open and a quarter of the cache is dirty.
+    fn flushOnCommit(p: *Pager, commit: bool) bool {
+        if (!p.temp_file) return true;
+        if (!commit) return false;
+        if (!p.fd.isOpen()) return false;
+        return p.cache.percentDirty() >= 25;
     }
 
     fn finalizeOrError(p: *Pager, has_super: bool, commit: bool) Error!void {
@@ -1802,7 +2080,11 @@ pub const Pager = struct {
             std.debug.assert(p.wal == null);
             try p.finalizeJournal(has_super);
         }
-        p.cache.cleanAll();
+        if (p.mem_db or p.flushOnCommit(commit)) {
+            p.cache.cleanAll();
+        } else {
+            p.cache.clearWritable();
+        }
         p.cache.truncate(p.db_size);
         if (p.wal == null and commit and p.db_file_size > p.db_size) {
             std.debug.assert(p.lock == .exclusive);
@@ -1867,7 +2149,9 @@ pub const Pager = struct {
         try p.exclusiveLock();
 
         if (!p.no_sync) {
-            if (p.jfd) |j| {
+            std.debug.assert(!p.temp_file);
+            if (p.jfd != null and p.journal_mode != .memory) {
+                const j = p.jfd.?;
                 const dc = p.fd.deviceCharacteristics();
                 if (!dc.safe_append) {
                     // A leftover header from a previous PERSIST-mode
@@ -1905,6 +2189,12 @@ pub const Pager = struct {
     /// `Page.dirty` to the database file.
     fn writePageList(p: *Pager, list: ?*Page) Error!void {
         std.debug.assert(p.lock == .exclusive);
+        // A temporary database opens its file on the first write
+        // (pagerOpentemp()).
+        if (!p.fd.isOpen()) {
+            std.debug.assert(p.temp_file and !p.mem_db);
+            p.fd = try p.vfs.open(null, .{ .kind = p.temp_kind });
+        }
         var it = list;
         while (it) |pg| : (it = pg.dirty) {
             if (pg.pgno > p.db_size or pg.flags.dont_write) continue;
@@ -1953,6 +2243,14 @@ pub const Pager = struct {
         if (p.err) |e| return e;
         if (!p.state.atLeast(.writer_cachemod)) return;
 
+        if (!p.flushOnCommit(true)) {
+            // An in-memory or temporary database keeps its pages in the
+            // cache. Backups must start over, as they would not see the
+            // changes.
+            p.backupRestart();
+            p.state = .writer_finished;
+            return;
+        }
         if (p.wal != null) {
             // A commit needs at least one frame to carry the commit mark.
             var page_one: ?*Page = null;
@@ -1991,6 +2289,12 @@ pub const Pager = struct {
         std.debug.assert(p.state == .writer_locked or p.state == .writer_finished or
             (p.wal != null and p.state == .writer_cachemod));
         p.data_version +%= 1;
+        // Nothing was written in exclusive PERSIST mode: the journal can
+        // stay as it is.
+        if (p.state == .writer_locked and p.exclusive_mode and p.journal_mode == .persist) {
+            p.state = .reader;
+            return;
+        }
         p.endTransaction(p.set_super, true) catch |err| return p.setError(err);
     }
 
@@ -2009,8 +2313,9 @@ pub const Pager = struct {
         if (p.jfd == null or p.state == .writer_locked) {
             const prev = p.state;
             p.endTransaction(false, false) catch |err| return p.setError(err);
-            // journal_mode=OFF: the changes cannot be undone.
-            if (prev.atLeast(.writer_cachemod)) p.enterError(error.Abort);
+            // journal_mode=OFF: the changes cannot be undone. An
+            // in-memory database just keeps them.
+            if (!p.mem_db and prev.atLeast(.writer_cachemod)) p.enterError(error.Abort);
             return;
         }
         p.no_spill_rollback = true;
@@ -2210,6 +2515,8 @@ pub const Pager = struct {
     /// Port of sqlite3PagerFlush(): spill every unreferenced dirty page.
     pub fn flush(p: *Pager) Error!void {
         if (p.err) |e| return e;
+        // The cache is all an in-memory database has.
+        if (p.mem_db) return;
         var it = p.cache.dirtyList();
         while (it) |pg| {
             it = pg.dirty;

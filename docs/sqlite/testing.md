@@ -24,6 +24,7 @@ flowchart TD
 | **`xqt planner`** | 쿼리 플래너 & VDBE | 복잡한 조인 질의의 `EXPLAIN QUERY PLAN` 및 바이트코드 일치 검증. |
 | **`xqt slt`** | sqllogictest | 스크립트 622개, 테스트 5,939,879개 전체 통과 (롤백 저널 및 WAL 모드). |
 | **`xqlite fuzzcheck`** | 퍼징 코퍼스 | 공식 SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`) 상 무결함 검증. |
+| **`xqt tcl`** | SQLite의 TCL 테스트 | `test/*.test` 1186개를 같은 테스트 픽스처로 libxqlite3와 SQLite 3.54.1에서 돌려 테스트마다 분류(두 쪽 통과·두 쪽 실패·xqlite만 실패). 기준선은 [테스트와 검증](../testing.md#기준선). |
 
 ---
 
@@ -63,3 +64,12 @@ zig-out/bin/xqt slt --journal wal
 ```sh
 zig build fuzz -Doptimize=ReleaseSafe -- ir_roundtrip 1 --events 1000
 ```
+
+### 2.5 SQLite의 TCL 테스트 (`tcl`)
+```sh
+zig-out/bin/xqt fetch tcl         # ref/tcl: Tcl 8.6.17 (시스템 tclsh 8.5는 너무 오래됨)
+zig build testfixture             # libxqlite3와 SQLite 아말감에 링크한 테스트 픽스처 두 개
+zig-out/bin/xqt -j 6 tcl --log tcl.log
+```
+
+하네스의 구성과 한계는 [tools/tcl/README.md](../../tools/tcl/README.md), 결과를 읽는 법과 기준선은 [테스트와 검증](../testing.md#sqlite의-tcl-테스트)에 있습니다.

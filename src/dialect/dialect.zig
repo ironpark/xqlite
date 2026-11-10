@@ -687,10 +687,23 @@ pub fn runParser(p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void 
     db.parse = p;
     defer db.parse = parent;
     var failed = false;
-    f.run(p, sql) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.ParseFailed => failed = true,
-    };
+    // The dialects other than SQLite's work on UTF-8 databases only: their
+    // functions and catalog read text as UTF-8. The encoding may become
+    // known only as the statement reads the schema, so the test comes
+    // before and after.
+    if (db.enc != 1) {
+        utf16Unsupported(p);
+        failed = true;
+    } else {
+        f.run(p, sql) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.ParseFailed => failed = true,
+        };
+        if (!failed and db.enc != 1) {
+            utf16Unsupported(p);
+            failed = true;
+        }
+    }
     if (!failed and sql.len - p.tail.len > @as(usize, @intCast(db.limit(.sql_length)))) {
         p.rc = int.RC.TOOBIG;
         p.n_err += 1;
@@ -705,6 +718,11 @@ pub fn runParser(p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void 
         p.new_table = null;
     };
     if (failed) return error.ParseFailed;
+}
+
+/// The error of a dialect other than SQLite's on a UTF-16 database.
+fn utf16Unsupported(p: *Parse) void {
+    @import("../sql/util.zig").errorMsg(p, "the {s} dialect does not support UTF-16 databases", .{@tagName(p.db.xq.lang.dialect)});
 }
 
 /// Whether the first statement of `sql` is one of SQLite's commands that

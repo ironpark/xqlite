@@ -1178,10 +1178,15 @@ pub const Schema = struct {
 /// A collating sequence (CollSeq).
 pub const CollSeq = struct {
     name: [:0]const u8,
+    /// The text encoding `cmp` compares (SQLITE_UTF8, UTF16LE or
+    /// UTF16BE); values in another one are converted first.
     enc: u8 = 1,
     user: ?*anyopaque = null,
     /// Null for a collation named in the schema but not defined.
     cmp: ?CmpFn = null,
+    /// The definition of the same name for another encoding (a
+    /// connection's collations: Sqlite3.colls holds the first).
+    next: ?*CollSeq = null,
 
     pub const CmpFn = *const fn (user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order;
 };
@@ -2494,6 +2499,13 @@ pub const Sqlite3 = struct {
     n_schema_lock: u32 = 0,
     /// PRAGMA temp_store: 0 default, 1 file, 2 memory.
     temp_store: u8 = 0,
+    /// PRAGMA locking_mode without a schema: exclusive (true) or normal,
+    /// for the databases attached from now on (dfltLockMode).
+    dflt_lock_mode: bool = false,
+    /// PRAGMA mmap_size without a schema: the memory map size of the
+    /// databases attached from now on (szMmap). Set from the global
+    /// default when the connection opens.
+    sz_mmap: i64 = 0,
     /// PRAGMA auto_vacuum for databases yet to be created, or -1.
     next_autovac: i8 = -1,
     /// PRAGMA busy_timeout, in milliseconds (busyTimeout).

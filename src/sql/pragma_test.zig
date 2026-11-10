@@ -81,9 +81,14 @@ test "pragma: flags and settings" {
     try c.expectRows("PRAGMA busy_timeout=1500; PRAGMA busy_timeout", "1500\n1500\n");
     try c.expectRows("PRAGMA threads=4; PRAGMA threads=100", "4\n8\n");
     try c.expectRows("PRAGMA analysis_limit=-1; PRAGMA analysis_limit=300", "0\n300\n");
-    try c.expectRows("PRAGMA mmap_size=1000000", "0\n");
+    // The memory VFS has no memory maps (SQLITE_NOTFOUND): no row. On
+    // WebAssembly, as with SQLITE_MAX_MMAP_SIZE=0, always 0.
+    const no_mmap = @import("xqlite_vfs").vfs.mmap_config.max_supported == 0;
+    try c.expectRows("PRAGMA mmap_size=1000000", if (no_mmap) "0\n" else "");
     try c.expectRows("PRAGMA locking_mode; PRAGMA locking_mode=normal", "normal\nnormal\n");
-    try c.expectError("PRAGMA locking_mode=exclusive", "not supported yet: PRAGMA locking_mode=EXCLUSIVE");
+    try c.expectRows("PRAGMA locking_mode=exclusive; PRAGMA main.locking_mode; PRAGMA temp.locking_mode", "exclusive\nexclusive\nexclusive\n");
+    try c.expectRows("PRAGMA locking_mode=normal; PRAGMA locking_mode", "normal\nnormal\n");
+    try c.expectRows("PRAGMA journal_mode=memory; PRAGMA journal_mode; PRAGMA journal_mode=delete", "memory\nmemory\ndelete\n");
     try c.expectRows("PRAGMA journal_size_limit; PRAGMA journal_size_limit=-5; PRAGMA journal_size_limit=4096", "-1\n-1\n4096\n");
     try c.expectRows("PRAGMA cache_size; PRAGMA cache_size=100; PRAGMA cache_size", "-2000\n100\n");
     try c.expectRows("PRAGMA cache_spill=OFF; PRAGMA cache_spill; PRAGMA cache_spill=250; PRAGMA cache_spill", "0\n250\n");

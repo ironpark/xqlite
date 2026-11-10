@@ -1,0 +1,74 @@
+# Pager PRAGMAs: journal_mode=MEMORY, locking_mode, mmap_size, and the
+# journal and locking modes of in-memory (':memory:') and temporary ('')
+# databases, attached to a rollback-journal database.
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+CREATE INDEX tb ON t(b);
+WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<300) INSERT INTO t SELECT i, 'v' || i FROM c;
+.each ATTACH ':memory:' AS m
+==
+PRAGMA journal_mode
+PRAGMA journal_mode=memory
+PRAGMA main.journal_mode=MEMORY; PRAGMA journal_mode
+PRAGMA journal_mode=memory; INSERT INTO t VALUES(1000, 'w'); SELECT count(*) FROM t
+PRAGMA journal_mode=memory; BEGIN; DELETE FROM t; ROLLBACK; SELECT count(*), sum(a) FROM t
+PRAGMA journal_mode=memory; BEGIN; UPDATE t SET b = b || '!'; SAVEPOINT s; DELETE FROM t WHERE a > 10; ROLLBACK TO s; COMMIT; SELECT count(*) FROM t WHERE b LIKE '%!'
+PRAGMA journal_mode=memory; PRAGMA journal_mode=wal; PRAGMA journal_mode
+PRAGMA journal_mode=wal; PRAGMA journal_mode=memory; PRAGMA journal_mode
+PRAGMA m.journal_mode
+PRAGMA m.journal_mode=wal
+PRAGMA m.journal_mode=delete
+PRAGMA m.journal_mode=persist
+PRAGMA m.journal_mode=truncate
+PRAGMA m.journal_mode=memory
+SELECT * FROM pragma_journal_mode('m')
+PRAGMA locking_mode
+PRAGMA locking_mode=exclusive
+PRAGMA locking_mode=EXCLUSIVE; PRAGMA main.locking_mode; PRAGMA m.locking_mode; PRAGMA temp.locking_mode; PRAGMA locking_mode
+PRAGMA main.locking_mode=exclusive; PRAGMA locking_mode; PRAGMA main.locking_mode
+PRAGMA locking_mode=exclusive; PRAGMA locking_mode=normal; PRAGMA main.locking_mode
+PRAGMA locking_mode=bogus
+PRAGMA m.locking_mode=normal
+PRAGMA temp.locking_mode=normal
+PRAGMA locking_mode=exclusive; INSERT INTO t VALUES(1001, 'v'); SELECT count(*) FROM t
+PRAGMA locking_mode=exclusive; BEGIN; DELETE FROM t WHERE a < 100; ROLLBACK; SELECT count(*) FROM t
+PRAGMA locking_mode=exclusive; PRAGMA journal_mode=persist; INSERT INTO t VALUES(1002, 'p'); PRAGMA journal_mode=delete; SELECT count(*) FROM t
+PRAGMA locking_mode=exclusive; PRAGMA journal_mode=wal; INSERT INTO t VALUES(1003, 'u'); PRAGMA locking_mode=normal; PRAGMA locking_mode
+PRAGMA locking_mode=exclusive; PRAGMA journal_mode=wal; PRAGMA journal_mode=delete; PRAGMA locking_mode=normal
+SELECT * FROM pragma_locking_mode
+PRAGMA mmap_size
+PRAGMA mmap_size=1048576
+PRAGMA mmap_size=1048576; SELECT count(*), sum(a), max(b) FROM t
+PRAGMA mmap_size=1048576; SELECT a FROM t WHERE b > 'v5' ORDER BY b LIMIT 5
+PRAGMA mmap_size=1048576; UPDATE t SET b = b || '?' WHERE a % 7 = 0; SELECT count(*) FROM t WHERE b LIKE '%?'
+PRAGMA mmap_size=1048576; BEGIN; DELETE FROM t WHERE a > 50; SELECT count(*) FROM t; ROLLBACK; SELECT count(*) FROM t
+PRAGMA mmap_size=1048576; PRAGMA journal_mode=wal; INSERT INTO t SELECT a + 5000, b FROM t; PRAGMA wal_checkpoint(TRUNCATE); SELECT count(*) FROM t
+PRAGMA main.mmap_size=65536; PRAGMA mmap_size
+PRAGMA mmap_size=-1
+PRAGMA mmap_size=99999999999999
+PRAGMA mmap_size=0x100000
+PRAGMA m.mmap_size
+PRAGMA m.mmap_size=4096
+PRAGMA temp.mmap_size
+SELECT * FROM pragma_mmap_size
+----
+# An in-memory and a temporary database: transactions, savepoints and
+# their modes.
+CREATE TABLE t(a, b);
+INSERT INTO t VALUES(1, 2), (3, 4);
+.each ATTACH ':memory:' AS m
+.each ATTACH '' AS e
+==
+CREATE TABLE m.x(y); INSERT INTO m.x SELECT a FROM t; BEGIN; DELETE FROM m.x; ROLLBACK; SELECT count(*) FROM m.x
+CREATE TABLE m.x(y); BEGIN; INSERT INTO m.x VALUES(1); SAVEPOINT s; INSERT INTO m.x VALUES(2); ROLLBACK TO s; COMMIT; SELECT * FROM m.x
+CREATE TABLE m.x(y); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<3000) INSERT INTO m.x SELECT zeroblob(500) FROM c; PRAGMA m.cache_size=5; SELECT count(*), sum(length(y)) FROM m.x; PRAGMA m.integrity_check
+CREATE TABLE e.x(y); INSERT INTO e.x VALUES(1); BEGIN; INSERT INTO e.x VALUES(2); ROLLBACK; SELECT * FROM e.x
+CREATE TABLE e.x(y); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<3000) INSERT INTO e.x SELECT zeroblob(500) FROM c; BEGIN; DELETE FROM e.x; ROLLBACK; SELECT count(*), sum(length(y)) FROM e.x; PRAGMA e.integrity_check
+PRAGMA e.journal_mode
+PRAGMA e.journal_mode=wal
+PRAGMA e.journal_mode=memory
+PRAGMA e.journal_mode=persist
+PRAGMA e.locking_mode
+PRAGMA e.locking_mode=normal
+PRAGMA e.mmap_size
+CREATE TEMP TABLE tt(z); INSERT INTO tt VALUES(1); PRAGMA temp.journal_mode; PRAGMA temp.locking_mode; PRAGMA temp.mmap_size
+PRAGMA database_list

@@ -17,6 +17,10 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "data_directory" },
     // sqlite3_temp_directory, which the VFS package keeps.
     .{ "pkg/vfs/src/root.zig", "temp_directory" },
+    // sqlite3GlobalConfig.szMmap and mxMmap (SQLITE_CONFIG_MMAP_SIZE),
+    // which the VFS package keeps.
+    .{ "pkg/vfs/src/vfs.zig", "default_size" },
+    .{ "pkg/vfs/src/vfs.zig", "max_size" },
     // The C ABI's VFS registry, for ATTACH's vfs= parameter.
     .{ "src/sql/global.zig", "find_vfs" },
     // The shared stores of the memdb VFS (memdb_g) and its settings.

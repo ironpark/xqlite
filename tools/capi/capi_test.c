@@ -2647,6 +2647,149 @@ static void test_corrupt_log(const char *zDir){
   CHECK_RC(sqlite3_config(SQLITE_CONFIG_LOG, (void*)0, (void*)0), SQLITE_OK, 0);
 }
 
+/* ------------------------------------------------------ UTF-16 databases */
+
+/* A collation that records the byte lengths it was given and compares
+** like memcmp. */
+static int nCollMax = 0;
+static int coll_bytes(void *p, int n1, const void *z1, int n2, const void *z2){
+  int r;
+  (void)p;
+  if( n1>nCollMax ) nCollMax = n1;
+  if( n2>nCollMax ) nCollMax = n2;
+  r = memcmp(z1, z2, n1<n2 ? n1 : n2);
+  return r ? r : n1-n2;
+}
+
+/* enc16(x): the encoding of its argument, and x as UTF-16 text. */
+static void fn_enc16(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  char z[8];
+  (void)argc;
+  snprintf(z, sizeof(z), "%d:", sqlite3_value_encoding(argv[0]));
+  {
+    const unsigned short *p = (const unsigned short*)sqlite3_value_text16(argv[0]);
+    unsigned short out[64];
+    int i, n = 0;
+    for(i=0; z[i]; i++) out[n++] = (unsigned short)z[i];
+    for(i=0; p && p[i] && n<63; i++) out[n++] = p[i];
+    sqlite3_result_text16(ctx, out, n*2, SQLITE_TRANSIENT);
+  }
+}
+
+static void test_utf16_database(const char *zDir){
+  sqlite3 *db = 0, *db2 = 0;
+  sqlite3_stmt *p = 0;
+  sqlite3_backup *b;
+  char zPath[512], zPath8[512], zCopy[512];
+  unsigned short zPath16[512];
+  static const unsigned short zE9[] = { 0x00e9, 'x', 0 };
+  int i;
+  snprintf(zPath, sizeof(zPath), "%s/utf16.db", zDir);
+  snprintf(zPath8, sizeof(zPath8), "%s/utf8.db", zDir);
+  snprintf(zCopy, sizeof(zCopy), "%s/utf16copy.db", zDir);
+  for(i=0; zPath[i]; i++) zPath16[i] = (unsigned char)zPath[i];
+  zPath16[i] = 0;
+
+  /* sqlite3_open16() makes a new database in UTF-16 (native order). */
+  CHECK_RC(sqlite3_open16(zPath16, &db), SQLITE_OK, db);
+  CHECK_STR(one(db, "PRAGMA encoding"), "UTF-16le");
+  exec(db, "CREATE TABLE t(a TEXT, b)");
+  CHECK_RC(sqlite3_prepare_v2(db, "INSERT INTO t VALUES(?1, ?2)", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_text(p, 1, "\xc3\xa9t\xc3\xa9", -1, SQLITE_STATIC), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_int(p, 2, 1), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_DONE, db);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_text16(p, 1, zE9, -1, SQLITE_STATIC), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_int(p, 2, 2), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_DONE, db);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_text(p, 1, "abc", -1, SQLITE_STATIC), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_int(p, 2, 3), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_DONE, db);
+  sqlite3_finalize(p);
+  /* The text is stored as UTF-16le. */
+  CHECK_STR(one(db, "SELECT group_concat(hex(a), ',') FROM (SELECT a FROM t ORDER BY b)"), "E9007400E900,E9007800,610062006300");
+  CHECK_STR(one(db, "SELECT group_concat(a, ',') FROM (SELECT a FROM t ORDER BY a)"), "abc,\xc3\xa9t\xc3\xa9,\xc3\xa9x");
+
+  /* Column values: UTF-8 for sqlite3_column_text(), and the registers go
+  ** back to UTF-16 before the program reads them again. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT a, 'k' FROM t ORDER BY b", -1, &p, 0), SQLITE_OK, db);
+  for(i=0; i<3; i++){
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    CHECK(sqlite3_value_encoding(sqlite3_column_value(p, 1))==SQLITE_UTF16LE);
+    CHECK_STR(sqlite3_column_text(p, 1), "k");
+    CHECK(sqlite3_value_encoding(sqlite3_column_value(p, 1))==SQLITE_UTF8);
+    if( i==1 ){
+      CHECK(sqlite3_column_bytes16(p, 0)==4);
+      CHECK_STR(sqlite3_column_text(p, 0), "\xc3\xa9x");
+      CHECK(sqlite3_column_bytes(p, 0)==3);
+    }
+  }
+  sqlite3_finalize(p);
+
+  /* Functions: a UTF-8 function gets its arguments in UTF-16 (it converts
+  ** them when it reads them as text); its result is stored as UTF-16. */
+  CHECK_RC(sqlite3_create_function(db, "enc16", 1, SQLITE_UTF8, 0, fn_enc16, 0, 0), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT enc16(a) FROM t WHERE b=3"), "2:abc");
+  CHECK_STR(one(db, "SELECT hex(enc16('z'))"), "32003A007A00");
+  CHECK_STR(one(db, "SELECT hex(upper('\xc3\xa9') || lower('A'))"), "E9006100");
+
+  /* Collations: one for UTF-16 gets UTF-16 text, one for UTF-8 UTF-8. */
+  CHECK_RC(sqlite3_create_collation(db, "B16", SQLITE_UTF16, 0, coll_bytes), SQLITE_OK, db);
+  CHECK_RC(sqlite3_create_collation(db, "B8", SQLITE_UTF8, 0, coll_bytes), SQLITE_OK, db);
+  CHECK_RC(sqlite3_create_collation(db, "BAD", 99, 0, coll_bytes), SQLITE_MISUSE, db);
+  nCollMax = 0;
+  CHECK_STR(one(db, "SELECT group_concat(a, ',') FROM (SELECT a FROM t ORDER BY a COLLATE B16)"), "abc,\xc3\xa9t\xc3\xa9,\xc3\xa9x");
+  CHECK(nCollMax==6);
+  nCollMax = 0;
+  CHECK_STR(one(db, "SELECT group_concat(a, ',') FROM (SELECT a FROM t ORDER BY a COLLATE B8)"), "abc,\xc3\xa9t\xc3\xa9,\xc3\xa9x");
+  CHECK(nCollMax==5);
+  CHECK_STR(one(db, "SELECT 'a' < 'B' COLLATE NOCASE, 'x  ' = 'x' COLLATE RTRIM"), "1");
+
+  /* ATTACH of a database in another encoding. */
+  CHECK_RC(sqlite3_open(zPath8, &db2), SQLITE_OK, db2);
+  exec(db2, "CREATE TABLE x(y); INSERT INTO x VALUES('utf8')");
+  CHECK_STR(one(db2, "PRAGMA encoding"), "UTF-8");
+  sqlite3_close(db2);
+  {
+    char zSql[600];
+    snprintf(zSql, sizeof(zSql), "ATTACH '%s' AS a8", zPath8);
+    CHECK_RC(sqlite3_exec(db, zSql, 0, 0, 0), SQLITE_ERROR, db);
+    CHECK_STR(sqlite3_errmsg(db), "attached databases must use the same text encoding as main database");
+  }
+
+  /* Backup into a new connection takes the encoding along. */
+  CHECK_RC(sqlite3_open(zCopy, &db2), SQLITE_OK, db2);
+  b = sqlite3_backup_init(db2, "main", db, "main");
+  CHECK(b!=0);
+  CHECK_RC(sqlite3_backup_step(b, -1), SQLITE_DONE, db2);
+  CHECK_RC(sqlite3_backup_finish(b), SQLITE_OK, db2);
+  CHECK_STR(one(db2, "PRAGMA encoding"), "UTF-16le");
+  CHECK_STR(one(db2, "SELECT group_concat(hex(a), ',') FROM (SELECT a FROM t ORDER BY b)"), "E9007400E900,E9007800,610062006300");
+  CHECK_STR(one(db2, "PRAGMA integrity_check"), "ok");
+  sqlite3_close(db2);
+
+  /* The other dialects refuse a UTF-16 database. */
+  if( dialect_built("postgres") ){
+    CHECK_RC(xqlite_set_dialect(db, "postgres"), SQLITE_OK, db);
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT 1", -1, &p, 0), SQLITE_ERROR, db);
+    CHECK_STR(sqlite3_errmsg(db), "the postgres dialect does not support UTF-16 databases");
+    exec(db, "PRAGMA xq_dialect = 'sqlite'");
+  }
+  sqlite3_close(db);
+
+  /* An existing database keeps its encoding when opened with
+  ** sqlite3_open16(), and PRAGMA encoding cannot change it. */
+  for(i=0; zPath8[i]; i++) zPath16[i] = (unsigned char)zPath8[i];
+  zPath16[i] = 0;
+  CHECK_RC(sqlite3_open16(zPath16, &db), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT y FROM x"), "utf8");
+  CHECK_STR(one(db, "PRAGMA encoding"), "UTF-8");
+  exec(db, "PRAGMA encoding = 'UTF-16be'");
+  CHECK_STR(one(db, "PRAGMA encoding"), "UTF-8");
+  sqlite3_close(db);
+}
+
 int main(int argc, char **argv){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
   if( argc>1 ) zExtPath = argv[1];
@@ -2690,6 +2833,7 @@ int main(int argc, char **argv){
   test_temp_directory(zDir);
   test_scanstatus();
   test_corrupt_log(zDir);
+  test_utf16_database(zDir);
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

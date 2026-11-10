@@ -224,7 +224,9 @@ pub const catalogue: []const Entry = blk: {
         for (dialect.spec(d).hooks.functions) |f| {
             const lname = lower(f.name);
             const defs = callback.functionSearch(callback.funcHash(lname[0], lname.len), lname);
-            if (defs.len == 0) continue;
+            // The math functions are the SQLite dialect's only
+            // (FUNC.XQ_SQLITE_ONLY): no dialect shadows them.
+            if (defs.len == 0 or defs[0].func_flags.XQ_SQLITE_ONLY) continue;
             const dup = for (seen) |x| {
                 if (std.mem.eql(u8, x, lname)) break true;
             } else false;

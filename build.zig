@@ -205,6 +205,9 @@ pub fn build(b: *std.Build) void {
     // `zig build ext`: the loadable extension (addExt()).
     const ext = addExt(b, target, optimize);
     const capi = addCapi(b, target, optimize, sqlite_ref, ext.lib, mod);
+    // `zig build testfixture`: SQLite's TCL test fixture on libxqlite3 and
+    // on SQLite's amalgamation, for `xqt tcl` (addTcl()).
+    addTcl(b, target, sqlite_ref);
     if (!target.result.cpu.arch.isWasm()) examples_step.dependOn(&b.addInstallArtifact(capi.c_example, .{}).step);
     // `zig build wasm`: the WebAssembly module for JavaScript hosts
     // (src/wasm/api.zig, wasm32-freestanding, no libc) in zig-out/wasm,
@@ -901,6 +904,161 @@ fn capiTestRun(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     run.expectExitCode(0);
     run.has_side_effects = true;
     return run;
+}
+
+/// `zig build testfixture`: SQLite's TCL test fixture (tclsqlite.c and the
+/// test*.c helpers that need only the public API, tools/tcl/README.md)
+/// twice, on the same sources: zig-out/bin/testfixture-xqlite on
+/// libxqlite3 (-Dtcl-optimize, default ReleaseSafe) and
+/// zig-out/bin/testfixture-sqlite on SQLite's 3.54.1 amalgamation, so
+/// that `xqt tcl` can tell a test the harness cannot pass from an
+/// incompatibility. Needs ref/sqlite (`xqt fetch sqlite`: test*.c, the
+/// headers, lemon) and ref/tcl (`xqt fetch tcl`: Tcl 8.6).
+fn addTcl(b: *std.Build, target: std.Build.ResolvedTarget, sqlite_ref: ?SqliteRef) void {
+    const step = b.step("testfixture", "Build SQLite's TCL test fixture on libxqlite3 and on SQLite 3.54.1 (zig-out/bin/testfixture-{xqlite,sqlite}) from ref/sqlite and ref/tcl, for xqt tcl");
+    const src_opt = b.option([]const u8, "sqlite-src", "SQLite's source tree for `zig build testfixture` (default: ref/sqlite, from xqt fetch sqlite)") orelse "ref/sqlite";
+    const tcl_opt = b.option([]const u8, "tcl-prefix", "Tcl 8.6 for `zig build testfixture` (default: ref/tcl, from xqt fetch tcl)") orelse "ref/tcl";
+    const lib_optimize = b.option(std.builtin.OptimizeMode, "tcl-optimize", "zig build testfixture: optimization mode of libxqlite3 (default ReleaseSafe)") orelse .safe;
+    const ref = sqlite_ref orelse return;
+    const os = target.result.os.tag;
+    if (target.result.cpu.arch.isWasm() or os == .windows) return;
+
+    const io = b.graph.io;
+    const src_path: std.Build.LazyPath = if (std.fs.path.isAbsolute(src_opt)) .{ .cwd_relative = src_opt } else b.path(src_opt);
+    const tcl_path: std.Build.LazyPath = if (std.fs.path.isAbsolute(tcl_opt)) .{ .cwd_relative = tcl_opt } else b.path(tcl_opt);
+    for ([_][2][]const u8{ .{ src_opt, "src/test1.c" }, .{ tcl_opt, "include/tcl.h" } }) |need| {
+        const p = b.pathJoin(&.{ need[0], need[1] });
+        const found = std.Io.Dir.cwd().access(io, fromRoot(b, p), .{});
+        found catch {
+            step.dependOn(&b.addFail(b.fmt("zig build testfixture: no {s} (zig-out/bin/xqt fetch sqlite, xqt fetch tcl; -Dsqlite-src, -Dtcl-prefix)", .{p})).step);
+            return;
+        };
+    }
+
+    // parse.h (lemon) and opcodes.h (mkopcodeh.tcl), which sqliteInt.h
+    // includes, as SQLite's main.mk makes them.
+    const host = b.graph.host;
+    const lemon = b.addExecutable(.{
+        .name = "lemon",
+        .root_module = b.createModule(.{ .target = host, .optimize = .ReleaseFast, .link_libc = true }),
+    });
+    lemon.root_module.addCSourceFile(.{ .file = src_path.path(b, "tool/lemon.c"), .flags = &.{"-Wno-everything"} });
+    const run_lemon = b.addRunArtifact(lemon);
+    run_lemon.addArgs(&.{ "-S", "-q" });
+    run_lemon.addPrefixedFileArg("-T", src_path.path(b, "tool/lempar.c"));
+    const parse_dir = run_lemon.addPrefixedOutputDirectoryArg("-d", "parse");
+    run_lemon.addFileArg(src_path.path(b, "src/parse.y"));
+    const tclsh = b.addSystemCommand(&.{b.pathJoin(&.{ fromRoot(b, tcl_opt), "bin", "tclsh8.6" })});
+    tclsh.setEnvironmentVariable("TCL_LIBRARY", b.pathJoin(&.{ fromRoot(b, tcl_opt), "lib", "tcl8.6" }));
+    tclsh.addFileArg(b.path("tools/tcl/opcodes.tcl"));
+    tclsh.addFileArg(parse_dir.path(b, "parse.h"));
+    tclsh.addFileArg(src_path.path(b, "src/vdbe.c"));
+    tclsh.addFileArg(src_path.path(b, "tool/mkopcodeh.tcl"));
+    const gen = b.addWriteFiles();
+    _ = gen.addCopyFile(parse_dir.path(b, "parse.h"), "parse.h");
+    _ = gen.addCopyFile(tclsh.captureStdOut(.{}), "opcodes.h");
+
+    // test1.c with its reads of SQLite's structures rewritten.
+    const patch = b.addExecutable(.{
+        .name = "patch_test1",
+        .root_module = b.createModule(.{ .root_source_file = b.path("tools/tcl/patch_test1.zig"), .target = host, .optimize = .Debug }),
+    });
+    const run_patch = b.addRunArtifact(patch);
+    run_patch.addFileArg(src_path.path(b, "src/test1.c"));
+    const test1 = run_patch.addOutputFileArg("test1.c");
+
+    // What the fixture of main.mk compiles (TESTSRC), less the helpers
+    // that need SQLite's internals or modules neither library has
+    // (tools/tcl/README.md), and with the extensions as in TESTSRC.
+    const helpers = [_][]const u8{
+        "test4",          "test6",          "test8",          "test9",        "test_autoext",
+        "test_backup",    "test_bestindex", "test_blob",      "test_config",  "test_delete",
+        "test_demovfs",   "test_devsym",    "test_fs",        "test_func",    "test_hexio",
+        "test_init",      "test_intarray",  "test_journal",   "test_malloc",  "test_md5",
+        "test_multiplex", "test_mutex",     "test_onefile",   "test_osinst",  "test_pcache",
+        "test_quota",     "test_schema",    "test_superlock", "test_syscall", "test_tclsh",
+        "test_tclvar",    "test_thread",    "test_vdbecov",   "test_vfs",     "test_window",
+        "test_wsd",
+    };
+    const misc = [_][]const u8{
+        "amatch",   "appendvfs", "basexx",   "cksumvfs", "closure",    "csv",       "decimal",
+        "diskused", "eval",      "explain",  "fileio",   "fuzzer",     "ieee754",   "mmapwarm",
+        "nextchar", "normalize", "prefixes", "qpvtab",   "randomjson", "regexp",    "remember",
+        "series",   "spellfix",  "stmtrand", "strdup",   "totype",     "unionvtab", "wholenumber",
+    };
+    // The optional parts both libraries have (docs/c-api.md), so that
+    // test_config.c's sqlite_options and the amalgamation agree.
+    const features = [_][]const u8{
+        "-DSQLITE_ENABLE_COLUMN_METADATA",
+        "-DSQLITE_ENABLE_NORMALIZE",
+        "-DSQLITE_ENABLE_BYTECODE_VTAB",
+        "-DSQLITE_ENABLE_CARRAY",
+        "-DSQLITE_ENABLE_SNAPSHOT",
+    };
+    const lib = capiLib(b, target, lib_optimize, "xqlite3", .static, buildConfig(b));
+    for ([_][]const u8{ "xqlite", "sqlite" }) |engine| {
+        const xq = std.mem.eql(u8, engine, "xqlite");
+        const exe = b.addExecutable(.{
+            .name = b.fmt("testfixture-{s}", .{engine}),
+            .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libc = true }),
+        });
+        const m = exe.root_module;
+        const flags = std.mem.concat(b.allocator, []const u8, &.{ &.{
+            "-DSQLITE_TEST=1",
+            "-DSQLITE_CORE",
+            "-DSQLITE_PRIVATE=",
+            "-DBUILD_sqlite",
+            "-DSQLITE_CKSUMVFS_STATIC",
+            "-DSQLITE_STATIC_RANDOMJSON",
+            "-DSQLITE_SERIES_CONSTRAINT_VERIFY=1",
+            "-Wno-everything",
+        }, &features }) catch @panic("OOM");
+        // The engine's sqlite3.h first: include/ or the amalgamation's.
+        m.addIncludePath(if (xq) b.path("include") else ref.dep.path("."));
+        m.addIncludePath(gen.getDirectory());
+        for ([_][]const u8{ "src", "ext/qrf", "ext/expert", "ext/misc" }) |d| m.addIncludePath(src_path.path(b, d));
+        m.addIncludePath(tcl_path.path(b, "include"));
+        m.addCSourceFile(.{ .file = test1, .flags = flags });
+        for (helpers) |h| m.addCSourceFile(.{ .file = src_path.path(b, b.fmt("src/{s}.c", .{h})), .flags = flags });
+        for (misc) |e| m.addCSourceFile(.{ .file = src_path.path(b, b.fmt("ext/misc/{s}.c", .{e})), .flags = flags });
+        for ([_][]const u8{ "ext/expert/sqlite3expert.c", "ext/expert/test_expert.c", "ext/qrf/qrf.c" }) |f|
+            m.addCSourceFile(.{ .file = src_path.path(b, f), .flags = flags });
+        const with = struct {
+            fn f(bb: *std.Build, base: []const []const u8, more: []const []const u8) []const []const u8 {
+                return std.mem.concat(bb.allocator, []const u8, &.{ base, more }) catch @panic("OOM");
+            }
+        }.f;
+        m.addCSourceFile(.{ .file = src_path.path(b, "src/tclsqlite.c"), .flags = with(b, flags, &.{"-DTCLSH_INIT_PROC=xqtclTestInit"}) });
+        m.addCSourceFile(.{ .file = b.path("tools/tcl/shim.c"), .flags = with(b, flags, &.{b.fmt("-DXQTCL_ENGINE=\"{s}\"", .{engine})}) });
+        if (xq) {
+            m.linkLibrary(lib);
+        } else {
+            // As SQLite's configure builds it (sqliteRef()), with the
+            // same optional parts.
+            m.addCSourceFile(.{ .file = ref.dep.path("sqlite3.c"), .flags = with(b, &features, &.{
+                "-DSQLITE_THREADSAFE=1",
+                "-DHAVE_ISNAN=1",
+                "-DHAVE_LOCALTIME_R=1",
+                "-DHAVE_GMTIME_R=1",
+                "-DHAVE_USLEEP=1",
+                "-DSQLITE_WITHOUT_ZONEMALLOC",
+                "-Wno-everything",
+            }) });
+        }
+        m.addObjectFile(tcl_path.path(b, "lib/libtcl8.6.a"));
+        m.linkSystemLibrary("z", .{});
+        m.linkSystemLibrary("pthread", .{});
+        m.linkSystemLibrary("m", .{});
+        if (os == .macos) m.linkFramework("CoreFoundation", .{});
+        if (os == .linux) m.linkSystemLibrary("dl", .{});
+        step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
+}
+
+/// `path` if absolute, else relative to the build root.
+fn fromRoot(b: *std.Build, path: []const u8) []const u8 {
+    if (std.fs.path.isAbsolute(path)) return path;
+    return b.root.joinString(b.allocator, path) catch @panic("OOM");
 }
 
 /// The reference sqlite3 shells of the cross-checks, built from the

@@ -15,7 +15,19 @@
 //!   ref/sqllogictest; $SLT_REPO names another repository. git is the one
 //!   program this runs. (Was tools/fetch-slt.sh.)
 //!
-//! The destination is replaced only once the new tree is complete.
+//! - tcl: the Tcl 8.6 that SQLite's TCL test suite needs (macOS ships
+//!   Tcl 8.5), for `xqt tcl`. The source release (tcl-core, without the
+//!   bundled packages) comes from SourceForge, where tcl-lang.org keeps
+//!   its downloads, and must have the SHA-256 pinned below (checked
+//!   against the MD5 SourceForge publishes for the file). It is unpacked
+//!   into DEST/src and built with the system C compiler: `sh configure
+//!   --prefix=DEST --disable-shared`, `make`, `make install` in
+//!   DEST/src/tcl8.6.N/unix. DEST (default ref/tcl) then has
+//!   bin/tclsh8.6, lib/libtcl8.6.a, lib/tclConfig.sh and include/tcl.h.
+//!   $CC chooses the compiler (default cc).
+//!
+//! The destination is replaced only once the new tree is complete (tcl:
+//! once the build has succeeded, then `make install` fills it).
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,13 +35,16 @@ const Allocator = std.mem.Allocator;
 const xqt = @import("xqt");
 
 pub const usage =
-    \\usage: xqt fetch sqlite|slt [--dest DIR]
+    \\usage: xqt fetch sqlite|slt|tcl [--dest DIR]
     \\
     \\  sqlite   SQLite's source tree into ref/sqlite ($SQLITE_VERSION, default
     \\           3540100; $SQLITE_YEAR, default 2026)
     \\  slt      the sqllogictest scripts (about 1.2 GB) into ref/sqllogictest,
     \\           with git clone --depth 1 ($SLT_REPO, default
     \\           https://github.com/gregrahn/sqllogictest.git)
+    \\  tcl      Tcl 8.6.17 (source checked against a pinned SHA-256), built
+    \\           with the system C compiler ($CC, default cc) into ref/tcl,
+    \\           for xqt tcl
     \\  --dest   another destination (the directory is replaced)
     \\
 ;
@@ -38,6 +53,12 @@ pub const usage =
 const sqlite_version = "3540100";
 const sqlite_year = "2026";
 const slt_repo = "https://github.com/gregrahn/sqllogictest.git";
+
+const tcl_version = "8.6.17";
+const tcl_url = "https://prdownloads.sourceforge.net/tcl/tcl-core" ++ tcl_version ++ "-src.tar.gz";
+/// SHA-256 of tcl-core8.6.17-src.tar.gz (MD5 509597025ee2e4395f369a334b9089fd,
+/// as SourceForge lists it).
+const tcl_sha256 = "a1d8cbe44b38beaa29fc2130c4e7b79b8bf02e2bcc028ffefd7a25a2122202a0";
 
 pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args: []const []const u8) !u8 {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -64,6 +85,10 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         const dest = try absolute(arena, io, dest_flag orelse try std.fs.path.join(arena, &.{ cfg.root, "ref", "sqllogictest" }));
         return fetchSlt(arena, io, cfg, out, dest);
     }
+    if (std.mem.eql(u8, name, "tcl")) {
+        const dest = try absolute(arena, io, dest_flag orelse try std.fs.path.join(arena, &.{ cfg.root, "ref", "tcl" }));
+        return fetchTcl(gpa, arena, io, cfg, out, dest);
+    }
     return usageError(out);
 }
 
@@ -83,7 +108,9 @@ fn absolute(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
 /// place is a rename on the same file system.
 fn stagingDir(arena: Allocator, io: Io, dest: []const u8) ![]const u8 {
     const parent = std.fs.path.dirname(dest) orelse ".";
-    try Io.Dir.cwd().createDirPath(io, parent);
+    // createDirPath fails on a symbolic link to a directory (a worktree's
+    // ref/ links to the main checkout's, AGENTS.md).
+    if (Io.Dir.cwd().openDir(io, parent, .{})) |d| d.close(io) else |_| try Io.Dir.cwd().createDirPath(io, parent);
     const dir = try std.fmt.allocPrint(arena, "{s}/.xqt-fetch-{s}-{d}", .{ parent, std.fs.path.basename(dest), std.c.getpid() });
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     try Io.Dir.cwd().createDirPath(io, dir);
@@ -142,6 +169,8 @@ fn download(gpa: Allocator, io: Io, url: []const u8, path: []const u8) !void {
     const result = client.fetch(.{
         .location = .{ .url = url },
         .response_writer = &fw.interface,
+        // SourceForge sends a download through two or three redirects.
+        .redirect_behavior = @fromBackingInt(8),
     }) catch |err| switch (err) {
         error.WriteFailed => return fw.err orelse err,
         else => return err,
@@ -211,4 +240,91 @@ fn fetchSlt(arena: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, d
     try moveInto(io, clone, dest);
     try out.print("sqllogictest -> {s}\n", .{dest});
     return 0;
+}
+
+fn fetchTcl(gpa: Allocator, arena: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, dest_arg: []const u8) !u8 {
+    try out.print("fetching {s}\n", .{tcl_url});
+    try out.flush();
+    const staging = try stagingDir(arena, io, dest_arg);
+    // The prefix is compiled into tclsh: the real path, not one through a
+    // worktree's link to ref/ (xqt tcl sets $TCL_LIBRARY anyway).
+    const dest = try std.fs.path.join(arena, &.{
+        try Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(dest_arg).?, arena),
+        std.fs.path.basename(dest_arg),
+    });
+    defer Io.Dir.cwd().deleteTree(io, staging) catch {};
+    const tarball = try std.fs.path.join(arena, &.{ staging, "tcl.tar.gz" });
+    download(gpa, io, tcl_url, tarball) catch |err| {
+        try out.print("xqt fetch: {s}: {t}\n", .{ tcl_url, err });
+        return 1;
+    };
+
+    // The pinned checksum, before anything of the archive is used.
+    const got = try sha256File(io, tarball);
+    if (!std.mem.eql(u8, &got, tcl_sha256)) {
+        try out.print("xqt fetch: {s}: SHA-256 {s}, want {s}\n", .{ tcl_url, &got, tcl_sha256 });
+        return 1;
+    }
+
+    const src = try std.fs.path.join(arena, &.{ staging, "src" });
+    try Io.Dir.cwd().createDirPath(io, src);
+    {
+        var src_dir = try Io.Dir.cwd().openDir(io, src, .{});
+        defer src_dir.close(io);
+        const file = try Io.Dir.cwd().openFile(io, tarball, .{});
+        defer file.close(io);
+        var buf: [16 << 10]u8 = undefined;
+        var reader = file.reader(io, &buf);
+        var window: [std.compress.flate.max_window_len]u8 = undefined;
+        var gz: std.compress.flate.Decompress = .init(&reader.interface, .gzip, &window);
+        try std.tar.extract(io, src_dir, &gz.reader, .{ .mode_mode = .executable_bit_only });
+    }
+
+    // Built in the staging directory with the final prefix (tclsh finds
+    // its script library there), installed under INSTALL_ROOT, and then
+    // moved into place.
+    const unix = try std.fmt.allocPrint(arena, "{s}/tcl{s}/unix", .{ src, tcl_version });
+    const prefix = try std.fmt.allocPrint(arena, "--prefix={s}", .{dest});
+    const jobs = try std.fmt.allocPrint(arena, "-j{d}", .{@min(cfg.jobs, 8)});
+    const root = try std.fs.path.join(arena, &.{ staging, "install" });
+    const install_root = try std.fmt.allocPrint(arena, "INSTALL_ROOT={s}", .{root});
+    const cc = try std.fmt.allocPrint(arena, "CC={s}", .{cfg.environ.get("CC") orelse "cc"});
+    const steps = [_][]const []const u8{
+        &.{ "sh", "configure", prefix, "--disable-shared", cc },
+        &.{ "make", jobs },
+        &.{ "make", install_root, "install" },
+    };
+    for (steps) |argv| {
+        try out.print("tcl: {s}\n", .{try std.mem.join(arena, " ", argv)});
+        try out.flush();
+        // configure and make print their progress on the terminal.
+        var child = try std.process.spawn(io, .{ .argv = argv, .cwd = .{ .path = unix } });
+        const term = try child.wait(io);
+        if (term != .exited or term.exited != 0) {
+            try out.print("xqt fetch: {s} in {s}: {f}\n", .{ argv[0], unix, term });
+            return 1;
+        }
+    }
+    const installed = try std.fs.path.join(arena, &.{ root, dest });
+    try moveInto(io, installed, dest);
+    try out.print("tcl {s} -> {s} (tclsh: {s}/bin/tclsh8.6)\n", .{ tcl_version, dest, dest });
+    return 0;
+}
+
+/// The SHA-256 of a file, in lower-case hex.
+fn sha256File(io: Io, path: []const u8) ![64]u8 {
+    const file = try Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var buf: [64 << 10]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    while (true) {
+        const chunk = reader.interface.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+        h.update(chunk);
+        reader.interface.toss(chunk.len);
+    }
+    return std.fmt.bytesToHex(h.finalResult(), .lower);
 }

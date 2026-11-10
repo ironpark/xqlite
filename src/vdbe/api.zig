@@ -102,6 +102,7 @@ const max_schema_retry = 50;
 /// statement that finds the schema changed is compiled again and rerun.
 pub fn step(v: *Vdbe) i32 {
     const db = v.db;
+    if (db.enc != ENC.UTF8) rowToDbEnc(v);
     var cnt: u32 = 0;
     var rc = stepOnce(v);
     while (rc == RC.SCHEMA and cnt < max_schema_retry) : (rc = stepOnce(v)) {
@@ -149,10 +150,20 @@ noinline fn invokeProfileCallback(db: *Sqlite3, v: *Vdbe) void {
 
 /// Port of sqlite3_reset().
 pub fn reset(v: *Vdbe) i32 {
+    if (v.db.enc != ENC.UTF8) rowToDbEnc(v);
     checkProfileCallback(v.db, v);
     const rc = aux.reset(v);
     aux.rewind(v);
     return rc;
+}
+
+/// xqlite: in a UTF-16 database, bring the values of the last result row
+/// that sqlite3_column_text() turned into UTF-8 back to the database
+/// encoding before the program reads its registers again.
+fn rowToDbEnc(v: *Vdbe) void {
+    @branchHint(.cold);
+    const row = v.result_row orelse return;
+    for (row[0..v.n_res_column]) |*m| mem.toDbEnc(m);
 }
 
 /// Port of sqlite3_finalize().
@@ -339,7 +350,7 @@ pub fn valueText(m: *Mem) ?[:0]const u8 {
 /// sqlite3_value_text16be(): the value as NUL-terminated UTF-16 text in
 /// `enc` (ENC.UTF16LE or UTF16BE), null for NULL. As in SQLite the value
 /// is converted in place, so the text lives until the value is converted
-/// again or changes (mem.toUtf8()).
+/// again or changes (mem.toDbEnc()).
 pub fn valueText16(m: *Mem, enc: u8) ?[*]const u8 {
     const z = mem.valueText(m, enc) catch {
         if (m.db) |db| db.oomFault();
@@ -510,14 +521,25 @@ pub fn bindBlob(v: *Vdbe, i: usize, blob: []const u8) i32 {
     return bindStr(v, i, blob, 0);
 }
 
+/// Text (`enc` nonzero) is stored in the database encoding, as C's
+/// bindText() does.
 fn bindStr(v: *Vdbe, i: usize, z: []const u8, enc: u8) i32 {
     const rc = unbind(v, i);
     if (rc != RC.OK) return rc;
-    mem.setStr(&v.vars[i - 1], z, enc, .transient) catch |err| {
+    const m = &v.vars[i - 1];
+    mem.setStr(m, z, enc, .transient) catch |err| {
         const code = int.errorCode(err);
         main_mod.setError(v.db, code);
         return code;
     };
+    if (enc != 0 and m.enc != v.db.enc) {
+        mem.changeEncoding(m, v.db.enc) catch {
+            main_mod.setError(v.db, RC.NOMEM);
+            return RC.NOMEM;
+        };
+    } else if (enc == 0) {
+        m.enc = v.db.enc;
+    }
     return RC.OK;
 }
 
@@ -541,17 +563,10 @@ pub fn bindValue(v: *Vdbe, i: usize, value: *Mem) i32 {
     };
 }
 
-/// bindText() of text in encoding `enc`, converted to UTF-8 (C's
-/// bindText() with an encoding: sqlite3VdbeChangeEncoding()).
-fn bindTextEnc(v: *Vdbe, i: usize, text: []const u8, enc: u8) i32 {
-    if (enc == ENC.UTF8 or enc == 0) return bindText(v, i, text);
-    const rc = bindStr(v, i, text, enc);
-    if (rc != RC.OK) return rc;
-    mem.changeEncoding(&v.vars[i - 1], ENC.UTF8) catch {
-        main_mod.setError(v.db, RC.NOMEM);
-        return RC.NOMEM;
-    };
-    return RC.OK;
+/// bindText() of text in encoding `enc`, converted to the database
+/// encoding (C's bindText() with an encoding).
+pub fn bindTextEnc(v: *Vdbe, i: usize, text: []const u8, enc: u8) i32 {
+    return bindStr(v, i, text, if (enc == 0) ENC.UTF8 else enc);
 }
 
 /// Port of sqlite3_bind_parameter_count().

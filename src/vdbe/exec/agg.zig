@@ -33,6 +33,9 @@ pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
     }
     out.setTypeFlag(.{ .Null = true });
     ctx.func.x_sfunc.?(ctx, ctx.argv);
+    // A UTF-16 database: the result in its encoding (C's
+    // setResultStrOrError() converts to Context.enc).
+    if (e.encoding != vi.ENC.UTF8) try resultToEnc(e, out);
     if (ctx.is_error != 0) {
         // The function's result code, converted inward.
         var rc: i32 = RC.OK;
@@ -47,6 +50,11 @@ pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
         try e.check(rc);
     }
     return .next;
+}
+
+fn resultToEnc(e: *Exec, out: *Mem) error{OutOfMemory}!void {
+    @branchHint(.cold);
+    try mem.changeEncoding(out, e.encoding);
 }
 
 /// The first run of an OP_AggStep or OP_AggInverse: make the context of

@@ -13,6 +13,7 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 - [sqlite3 교차 검증](#sqlite3-교차-검증)
 - [플래너 차등 테스트](#플래너-차등-테스트)
 - [sqllogictest](#sqllogictest)
+- [SQLite의 TCL 테스트](#sqlite의-tcl-테스트)
 - [퍼징](#퍼징)
 - [방언 차등 테스트](#방언-차등-테스트)
 - [WebAssembly](#webassembly)
@@ -39,6 +40,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `xqt planner [FILE...]` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드 | `--sq`/`SQ` (3.54.1, 주석 없는 빌드) |
 | `xqt planner gen basic\|hard ...` | 무작위 플래너 케이스 생성 | — |
 | `xqt slt [PATH...]` | sqllogictest | `--ref` (선택) |
+| `xqt tcl [PATH...]` | SQLite의 TCL 테스트(`ref/sqlite/test`)를 libxqlite3와 SQLite에 링크한 같은 테스트 픽스처로 돌려 테스트 케이스마다 분류 | 같은 하네스의 SQLite 3.54.1 (`zig build testfixture`) |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스에서 크래시·메모리 누수·close 실패 | — |
 | `zig build fuzz` | 시드 퍼저: `btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`, `ir_ext`(`$XQT_EXT`의 확장으로) | — |
 | `xqt dialect-diff pg [--live\|--record]` | PostgreSQL 방언을 PostgreSQL 18의 출력과 차등 비교. 기본은 저장소의 기록(`tools/dialect/pg-expected`)과 | 기록; `--live`·`--record`는 PostgreSQL 서버(podman) |
@@ -61,7 +63,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `zig build capi-shell` | SQLite의 `shell.c`를 `libxqlite3`에 링크해 스모크 스크립트 실행 | 아말감 `shell.c` |
 | `zig build capi-sortbench` | 정렬 벤치마크(`tools/capi/sortbench.c`)를 SQLite와 ReleaseFast `libxqlite3`에서 돌려 시간과 결과 순서 비교 | 아말감 `sqlite3.c` |
 | `zig build bench-btree` | 엔진 없이 B-tree 커서의 삽입·탐색·스캔·삭제 시간(`pkg/storage/bench/btree.zig`) | — |
-| `xqt fetch sqlite\|slt` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | — |
+| `xqt fetch sqlite\|slt\|tcl` | `ref/sqlite`, `ref/sqllogictest` 내려받기, `ref/tcl`에 Tcl 8.6 빌드 | — |
 
 ## 준비
 
@@ -73,6 +75,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 zig build tools
 zig-out/bin/xqt fetch sqlite    # ref/sqlite (SQLITE_VERSION, SQLITE_YEAR로 버전 변경)
 zig-out/bin/xqt fetch slt       # ref/sqllogictest (약 1.2GB, git clone --depth 1; SLT_REPO로 저장소 변경)
+zig-out/bin/xqt fetch tcl       # ref/tcl: Tcl 8.6.17을 소스에서 빌드(SHA-256 확인, 시스템 C 컴파일러, 약 1분)
 ```
 
 `--dest DIR`로 다른 곳에 받을 수 있습니다. 새 트리를 다 받은 뒤에야 대상을 바꿉니다. `fuzzcheck`의 코퍼스(`ref/sqlite/test/fuzzdata*.db`)도 `ref/sqlite`에 들어 있습니다.
@@ -128,6 +131,8 @@ xqlite를 의존성으로 쓰는 프로젝트의 빌드는 SQLite를 내려받�
 | `dialect-diff` | podman 컨테이너의 클라이언트(`PG_PSQL`, `MARIA_CLIENT`, `ORA_SQLPLUS`) |
 | `wire-diff` | psql을 `sh -c`로 돌리는 명령(`PG_WIRE_EXEC`), 컨테이너에서 본 호스트(`PG_WIRE_HOST`), xqlite가 받는 주소(`PG_WIRE_LISTEN`), 회귀 테스트 디렉터리(`PG_REGRESS_DIR`) |
 | `fetch slt` | `git` |
+| `fetch tcl` | `sh`, `make`, C 컴파일러(`$CC`, 기본 `cc`) |
+| `tcl` | `zig build testfixture`의 두 픽스처(`--fixture`, `--ref`), `ref/tcl`의 Tcl 스크립트 라이브러리(`--tcl-library`) |
 
 ### 그 밖의 환경 변수
 
@@ -306,7 +311,7 @@ zig-out/bin/xqt planner --known tools/planner/known-failures.list   # vtablog.tx
 zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt    # 무작위 케이스(basic 또는 hard)
 ```
 
-`-k res,eqp,code`로 비교할 것을 고르고, `--known`은 [알려진 차이](#known-failureslist)를 받습니다. 케이스 파일 형식, 케이스 모음(`vtab.txt`, `json.txt`, `window.txt`, `wal.txt`, `attach.txt`, `vacuum.txt` ...), 무작위 케이스 생성기, `SQOPT`·`XQ_WHERETRACE` 같은 옵션은 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.
+`-k res,eqp,code`로 비교할 것을 고르고, `--known`은 [알려진 차이](#known-failureslist)를 받습니다. 케이스 파일 형식, 케이스 모음(`vtab.txt`, `json.txt`, `window.txt`, `wal.txt`, `pager.txt`, `utf16.txt`, `math.txt`, `attach.txt`, `vacuum.txt` ...), 무작위 케이스 생성기, `SQOPT`·`XQ_WHERETRACE` 같은 옵션은 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.
 
 ## sqllogictest
 
@@ -320,6 +325,54 @@ zig-out/bin/xqt slt ref/sqllogictest/test -- --wal    # -- 뒤는 xqlite slt의 
 ```
 
 C 실행기와의 대조(`--ref`), WAL 모드 실행 같은 옵션은 [tools/slt/README.md](../tools/slt/README.md)에 있습니다.
+
+## SQLite의 TCL 테스트
+
+SQLite가 자기 저장소에서 쓰는 TCL 테스트(`ref/sqlite/test/*.test`, 1199개)를 C ABI(`libxqlite3`)에서 돌립니다. SQLite의 testfixture(`tclsqlite.c`와 `test*.c` 도우미)를 공개 API만으로 링크되게 다듬은 하네스를 `libxqlite3`와 SQLite 3.54.1 아말감에 각각 링크하고, 테스트 케이스마다 두 결과를 맞춰 **두 쪽 통과**, **두 쪽 실패**(하네스가 통과시킬 수 없는 것), **xqlite만 실패**(비호환)로 나눕니다.
+
+```sh
+zig build tools
+zig-out/bin/xqt fetch sqlite                  # ref/sqlite (test/, src/test*.c, tool/lemon.c)
+zig-out/bin/xqt fetch tcl                     # ref/tcl: Tcl 8.6.17 (시스템 tclsh는 8.5라 쓸 수 없음)
+zig build testfixture                         # zig-out/bin/testfixture-xqlite, testfixture-sqlite
+zig-out/bin/xqt -j 6 tcl --log tcl.log        # test/*.test 전부, 파일마다 시간 제한 300초
+zig-out/bin/xqt tcl --set veryquick           # permutations.test의 veryquick 집합
+zig-out/bin/xqt tcl ref/sqlite/test/where.test
+```
+
+- `xqt fetch tcl`은 Tcl 소스(`tcl-core8.6.17-src.tar.gz`)를 받아 고정한 SHA-256을 확인하고 시스템 C 컴파일러(`$CC`)로 `ref/tcl`에 빌드합니다. 시스템에는 아무것도 설치하지 않습니다.
+- `zig build testfixture`는 `ref/sqlite`의 `parse.y`와 `vdbe.c`로 `parse.h`·`opcodes.h`를 만들고(lemon, `mkopcodeh.tcl`), 같은 소스를 두 라이브러리에 링크합니다. `libxqlite3`는 `-Dtcl-optimize`(기본 ReleaseSafe)로 빌드하므로 엔진의 패닉이 메시지와 위치를 남깁니다.
+- 파일 하나와 픽스처 하나가 프로세스 하나이고, 자기 임시 디렉터리에서 돕니다. 결과는 파일마다 `ok`, `fail`, `error`(스크립트가 Tcl 오류로 멈춤), `crash`(패닉이면 메시지와 엔진의 함수), `timeout`이고, 끝에 남은 메모리(`Unfreed memory`)를 따로 셉니다.
+- 요약은 xqlite에서만 실패한 테스트를 원인별(오류 메시지에서 숫자와 이름을 지운 것)·파일별로, xqlite에서만 멈춘 파일을 이유별로 묶습니다. `--log`는 파일마다의 상태와 실패한 테스트 전부(기대값과 실제값)를 씁니다.
+
+하네스의 구성(어떤 `test*.c`를 그대로 쓰고, 무엇을 공개 API로 다시 쓰고, 무엇을 뺐는지)과 두 쪽 모두 실패하는 이유는 [tools/tcl/README.md](../tools/tcl/README.md)에 있습니다. 주된 것은 SQLITE_TEST 빌드의 코어만 세는 카운터(`sqlite_search_count` 등), SQLite testfixture의 1024바이트 기본 페이지, OOM·I/O 오류 주입, 페이저·B-tree 내부 명령입니다. 이 실행은 `zig build check`에 들어 있지 않습니다(약 20분, `-j 6`).
+
+### 기준선
+
+2026-11, `-j 6`, 시간 제한 300초, `--set all`(1186개 파일)의 결과입니다. 전체 목록은 `--log`로 다시 만들 수 있습니다.
+
+| | xqlite | SQLite |
+| --- | --- | --- |
+| 끝까지 돈 파일(`ok` + `fail`) | 1141 (927 + 214) | 1162 (1020 + 142) |
+| 도중에 멈춘 파일(`error`, `crash`, `timeout`) | 30, 9, 6 | 18, 0, 6 |
+| 통과한 테스트 케이스(출력 줄) | 2,003,071 | 2,034,621 |
+| 실패한 테스트 케이스 | 5,916 | 4,708 |
+
+시간 제한을 넘는 것은 두 쪽 모두 `crash.test`, `crash4.test`, `crash9.test`, `corruptC.test`, `misc7.test`, `savepoint4.test`처럼 반복이 많은 파일입니다. 테스트 이름으로 맞추면 두 쪽 통과 2,000,327, 두 쪽 실패 4,572, xqlite만 실패 1,215, SQLite만 실패 4이고, xqlite에서 파일이 먼저 멈춰 돌지 못한 것이 24,692입니다(xqlite에서 오류·패닉으로 멈춘 파일, 그리고 시간 제한까지 돌아 두 쪽이 돈 반복 수가 다른 파일).
+
+처음 기준선(UTF-16, `journal_mode=MEMORY`, `locking_mode=EXCLUSIVE`가 없던 때)은 xqlite만 실패 2,209, xqlite에서만 멈춘 파일 43개였습니다. 그때 가장 많던 `not supported yet`(3,170줄)과, 임시 DB에서 `SQLITE_FULL` 뒤 인덱스가 깨지던 `tempfault-2-full.*`가 없어졌고, `sqlite3_exec()`가 문장마다 남은 SQL의 길이를 다시 재던 것(문장 수의 제곱 시간, `speed1.test`·`speed2.test`가 시간 초과)도 고쳤습니다. 지금 xqlite만 실패하는 주된 원인은 다음과 같습니다.
+
+| 원인 | 예 |
+| --- | --- |
+| 공유 캐시가 없음: `database table is locked`·`database schema is locked` 대신 `database is locked`나 오류 없음 | `thread005.test`(`SQLITE_LOCKED` 대신 `SQLITE_OK`, 499개), `shared.test`, `shared6.test`, `incrblob2.test` |
+| `SQLITE_FCNTL_FILE_POINTER`가 기본 VFS에서 파일을 주지 않음(하네스가 크래시 대신 오류로 바꿈) | `shmlock.test`(`vfs_shmlock` 29개), `external_reader.test` 등의 `SQLITE_NOTFOUND` |
+| `unix-excl` VFS 없음 | `unixexcl.test`, `sysfault.test` |
+| `sqlite3_log()`의 경고가 없음 | `autoindex1-113`: `SQLITE_WARNING_AUTOINDEX {automatic index on t2(c)}` 대신 빈 값 |
+| 손상된 DB에서 SQLite보다 엄격함 | `expridx1-1.1.2`: 임포스터로 어긋나게 한 식 인덱스의 행 `DELETE`가 `index corruption`, `incrvacuum-17.1`: `database disk image is malformed` |
+| `INDEXED BY`의 `no query solution` | `indexedby-7.6`, `e_delete-0.1.8` |
+| 엔진 패닉(ReleaseSafe) | `vtab4-1.2`: echo 가상 테이블에 `INSERT`하면 `insertImpl`(insert.zig)의 index out of bounds(`vtab1`, `vtabJ`, `vtab_err`도), `aggerror-1.4`: `sqlite3_result_error16`의 incorrect alignment, `backup-5.1.5.3`: `backup.zig`의 integer does not fit |
+| 크래시(SEGV) | `misc4-1.3`, `tableapi-3.7`, `init-2.transient.0` |
+| C API | `SQLITE_CONFIG_GETMALLOC`의 메서드가 `sqlite3_malloc()`을 다시 부름(`--faultsim`, `init.test`에서 재귀), `GETMUTEX` 없음(`mutex1.test` 크래시), 모든 연결을 닫은 뒤 144바이트(할당 3개)가 남음(xqlite 1141개 파일) |
 
 ## 퍼징
 

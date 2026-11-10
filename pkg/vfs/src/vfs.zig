@@ -120,6 +120,21 @@ pub const ShmLockTable = struct {
     }
 };
 
+/// The memory-map limits of sqlite3GlobalConfig (SQLITE_CONFIG_MMAP_SIZE):
+/// the default of PRAGMA mmap_size (szMmap, SQLITE_DEFAULT_MMAP_SIZE) and
+/// the largest it may be (mxMmap). A file of a VFS with memory maps
+/// starts with `default_size`. `max_size` is SQLITE_MAX_MMAP_SIZE.
+pub const mmap_config = struct {
+    /// SQLITE_MAX_MMAP_SIZE (0x7fff0000). WebAssembly has no memory maps
+    /// (C builds there with 0).
+    pub const max_supported: i64 = switch (@import("builtin").os.tag) {
+        .wasi, .freestanding => 0,
+        else => 0x7fff0000,
+    };
+    pub var default_size: i64 = 0;
+    pub var max_size: i64 = max_supported;
+};
+
 /// SQLite file lock levels. Ordering matters: a higher value is a stronger lock.
 ///
 ///     NONE -> SHARED
@@ -268,7 +283,96 @@ pub const File = struct {
         /// xOpen's pOutFlags): the pager then keeps its journal in memory
         /// too (memVfs). Null means no.
         isMemory: ?*const fn (ptr: *anyopaque) bool = null,
+        /// Memory-mapped I/O (xFetch, xUnfetch, and the file control
+        /// SQLITE_FCNTL_MMAP_SIZE as `mmapSize`). Null in a backend
+        /// without memory maps, as on WebAssembly.
+        fetch: ?*const fn (ptr: *anyopaque, offset: u64, amt: u32) Error!?[*]const u8 = null,
+        unfetch: ?*const fn (ptr: *anyopaque, offset: u64, p: ?[*]const u8) void = null,
+        mmapSize: ?*const fn (ptr: *anyopaque, new_limit: i64) Error!?i64 = null,
     };
+
+    /// A file that is not open (C: pMethods == 0), as the pager's
+    /// database file of a temporary database before its first write and
+    /// of an in-memory database for good. Only closing, the size (0) and
+    /// the characteristics (none) may be asked of it.
+    pub const unopened: File = .{ .ptr = @ptrCast(@constCast(&unopened_vtable)), .vtable = &unopened_vtable };
+
+    const unopened_vtable: VTable = .{
+        .close = Unopened.close,
+        .read = Unopened.read,
+        .write = Unopened.write,
+        .truncate = Unopened.truncate,
+        .sync = Unopened.sync,
+        .fileSize = Unopened.fileSize,
+        .lock = Unopened.lock,
+        .unlock = Unopened.unlock,
+        .checkReservedLock = Unopened.checkReservedLock,
+        .sectorSize = Unopened.sectorSize,
+        .deviceCharacteristics = Unopened.deviceCharacteristics,
+        .isReadOnly = Unopened.isReadOnly,
+    };
+
+    const Unopened = struct {
+        fn close(_: *anyopaque) void {}
+        fn read(_: *anyopaque, _: []u8, _: u64) Error!usize {
+            return 0;
+        }
+        fn write(_: *anyopaque, _: []const u8, _: u64) Error!void {
+            return error.IoErr;
+        }
+        fn truncate(_: *anyopaque, _: u64) Error!void {}
+        fn sync(_: *anyopaque, _: SyncFlags) Error!void {}
+        fn fileSize(_: *anyopaque) Error!u64 {
+            return 0;
+        }
+        fn lock(_: *anyopaque, _: LockLevel) Error!void {}
+        fn unlock(_: *anyopaque, _: LockLevel) Error!void {}
+        fn checkReservedLock(_: *anyopaque) Error!bool {
+            return false;
+        }
+        fn sectorSize(_: *anyopaque) u32 {
+            return 512;
+        }
+        fn deviceCharacteristics(_: *anyopaque) DeviceCharacteristics {
+            return .{};
+        }
+        fn isReadOnly(_: *anyopaque) bool {
+            return false;
+        }
+    };
+
+    /// Whether the file is open (isOpen(): not `unopened`).
+    pub fn isOpen(f: File) bool {
+        return f.vtable != &unopened_vtable;
+    }
+
+    /// Whether the backend maps files into memory (iVersion >= 3 with
+    /// xFetch).
+    pub fn hasFetch(f: File) bool {
+        return f.vtable.fetch != null;
+    }
+
+    /// Port of sqlite3OsFetch(): a pointer to `amt` bytes of the file at
+    /// `offset` in a memory map, or null if the backend will not map
+    /// them. Each non-null pointer is handed back with `unfetch`.
+    pub fn fetch(f: File, offset: u64, amt: u32) Error!?[*]const u8 {
+        const m = f.vtable.fetch orelse return null;
+        return m(f.ptr, offset, amt);
+    }
+
+    /// Port of sqlite3OsUnfetch(): release a pointer from `fetch`; a null
+    /// `p` unmaps the file (no pointer may be out).
+    pub fn unfetch(f: File, offset: u64, p: ?[*]const u8) void {
+        if (f.vtable.unfetch) |m| m(f.ptr, offset, p);
+    }
+
+    /// SQLITE_FCNTL_MMAP_SIZE: set the largest size the backend maps to
+    /// `new_limit` (if >= 0) and return the limit before. Null if the
+    /// backend has no memory maps (SQLITE_NOTFOUND).
+    pub fn mmapSize(f: File, new_limit: i64) Error!?i64 {
+        const m = f.vtable.mmapSize orelse return null;
+        return m(f.ptr, new_limit);
+    }
 
     /// Closes the handle, dropping any lock it holds.
     pub fn close(f: File) void {

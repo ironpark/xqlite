@@ -615,7 +615,9 @@ pub fn displayP4(a: std.mem.Allocator, op: *const Op) error{OutOfMemory}![:0]u8 
         .funcctx => |ctx| w.print("{s}({d})", .{ ctx.func.name, ctx.func.n_arg }),
         .int32 => |i| w.print("{d}", .{i}),
         .mem => |m| blk: {
-            if (m.flags.Str) break :blk w.writeAll(m.bytes());
+            // C prints z as a C string: up to a NUL (in UTF-16 text,
+            // after the first byte of an ASCII character).
+            if (m.flags.Str) break :blk w.writeAll(m.bytes()[0 .. std.mem.indexOfScalar(u8, m.bytes(), 0) orelse m.bytes().len]);
             if (m.flags.intersects(.{ .Int = true, .IntReal = true })) break :blk w.print("{d}", .{m.u.i});
             if (m.flags.Real) {
                 const printf = @import("../sql/printf.zig");

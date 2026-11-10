@@ -459,6 +459,7 @@ pub fn opIntegrityCk(e: *Exec, op: *Op) Error!Flow {
         n_err_reg.u.i -= @as(i64, report.n_err) - 1;
         try mem.setStr(in1, report.message, ENC.UTF8, .transient);
     }
+    try mem.changeEncoding(in1, e.encoding);
     return .check_interrupt;
 }
 
@@ -500,8 +501,9 @@ pub fn opJournalMode(e: *Exec, op: *Op) Error!Flow {
     var new: @TypeOf(old) = if (op.p3 < 0) old else cast.enumFromInt(@TypeOf(old), op.p3);
     if (!pager.okToChangeJournalMode()) new = old;
 
-    // No WAL for a temporary database or without shared memory.
-    if (new == .wal and (pager.path.len == 0 or !pager.walSupported())) new = old;
+    // No WAL for a temporary or in-memory database or without shared
+    // memory (sqlite3PagerFilename(pPager, 1)).
+    if (new == .wal and (pager.filename().len == 0 or !pager.walSupported())) new = old;
 
     var failure: ?Error = null;
     if (new != old and (old == .wal or new == .wal)) {
@@ -536,6 +538,7 @@ pub fn opJournalMode(e: *Exec, op: *Op) Error!Flow {
     out.z = @constCast(name.ptr);
     out.n = @intCast(name.len);
     out.enc = ENC.UTF8;
+    try mem.changeEncoding(out, e.encoding);
     if (failure) |err| return err;
     return .next;
 }

@@ -59,7 +59,7 @@ pub fn opConcat(e: *Exec, op: *Op) Error!Flow {
     }
     @memcpy(out.z.?[n2..][0..@intCast(in1.n)], in1.bytes());
     in1.flags = flags1;
-    const nb: usize = @intCast(n_byte);
+    const nb: usize = @intCast(if (e.encoding != vi.ENC.UTF8) n_byte & ~@as(i64, 1) else n_byte);
     out.z.?[nb] = 0;
     out.z.?[nb + 1] = 0;
     out.flags.Term = true;

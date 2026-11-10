@@ -40,13 +40,30 @@ pub fn opReal(e: *Exec, op: *Op) Flow {
 }
 
 /// OP_String8 becomes OP_String, with the length in P1, on its first run.
+/// In a UTF-16 database the string is first converted, once, into a
+/// buffer of the program that becomes P4.
 pub fn opString8(e: *Exec, op: *Op) Error!Flow {
     _ = e.out2Prerelease(op);
     op.p1 = @intCast(std.mem.len(op.p4.z));
-    std.debug.assert(e.encoding == ENC.UTF8);
+    if (e.encoding != ENC.UTF8) try string8ToUtf16(e, op);
     if (op.p1 > e.db.limit(.length)) return error.TooBig;
     op.opcode = OP.String;
     return opString(e, op);
+}
+
+fn string8ToUtf16(e: *Exec, op: *Op) Error!void {
+    @branchHint(.cold);
+    if (op.p1 > e.db.limit(.length)) return error.TooBig;
+    const utf = @import("../utf.zig");
+    const in = op.p4.z[0..@intCast(op.p1)];
+    // Aligned for a C reader of sqlite3_value_text16() (C: a malloc).
+    const buf = try e.v.alloc().alignedAlloc(u8, .@"8", utf.maxLen(in.len, e.encoding));
+    const n = utf.translate(in, ENC.UTF8, e.encoding, buf);
+    // The program's arena owns the buffer (C: P4_DYNAMIC).
+    if (op.p4type == .dynamic) e.db.gpa.free(std.mem.span(op.p4.dynamic));
+    op.p4type = .z;
+    op.p4 = .{ .z = @ptrCast(buf.ptr) };
+    op.p1 = @intCast(n);
 }
 
 pub fn opString(e: *Exec, op: *Op) Flow {

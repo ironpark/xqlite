@@ -162,6 +162,10 @@ pub fn opOpenEphemeral(e: *Exec, op: *Op) Error!Flow {
     const c = try allocateCursor(e, op.p1, op.p2, .btree);
     c.is_ephemeral = true;
     const bt = try btree.Btree.open(malloc.allocator, db.vfs.?, null, .{
+        // SQLITE_OPEN_TRANSIENT_DB, in memory with temp_store=MEMORY.
+        .memory = @import("../sorter.zig").tempInMemory(db),
+        .temp_kind = .transient_db,
+        .mmap_size = db.sz_mmap,
         .single = true,
         .journal_mode = .off,
         .synchronous = .off,

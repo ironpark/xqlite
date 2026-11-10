@@ -1,6 +1,6 @@
 //! PRAGMA statements (port of pragma.c and the generated pragma.h).
 //!
-//! Pragmas that need missing subsystems (exclusive locking, UTF-16) fail
+//! Pragmas that need missing subsystems (exclusive locking) fail
 //! with "not supported yet".
 
 const std = @import("std");
@@ -445,7 +445,7 @@ fn pragmaFunclistLine(v: *Vdbe, f: *const int.FuncDef, is_builtin: bool, show_in
         .{ .s = typ },
         .{ .s = enc_names[f.func_flags.enc] },
         .{ .i = f.n_arg },
-        .{ .i = @bitCast((if (show_intern_funcs) f.func_flags else f.func_flags.only(shown)).int() ^ FN.INNOCUOUS.int()) },
+        .{ .i = @bitCast((if (show_intern_funcs) f.func_flags.without(.{ .XQ_SQLITE_ONLY = true }) else f.func_flags.only(shown)).int() ^ FN.INNOCUOUS.int()) },
     }, false);
 }
 
@@ -504,7 +504,14 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
 
     db.busy_handler.n_busy = 0;
     // The SQLITE_FCNTL_PRAGMA file control is not supported by the VFS
-    // layer, which is as if every VFS answered SQLITE_NOTFOUND.
+    // layer, which is as if every VFS answered SQLITE_NOTFOUND. But
+    // sqlite3_file_control() fails with SQLITE_ERROR when the database
+    // has no b-tree: TEMP, not opened under EXPLAIN.
+    if (db.dbs.items[i_db].bt == null) {
+        p.n_err += 1;
+        p.rc = int.RC.ERROR;
+        return;
+    }
 
     // Unknown pragmas are silently ignored.
     const pn = pragmaLocate(left) orelse {
@@ -607,12 +614,28 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             _ = aux.addOp2(v, OP.ResultRow, reg, 1);
         },
 
-        // PRAGMA [schema.]locking_mode[=NORMAL|EXCLUSIVE]. The pager only
-        // has the NORMAL mode.
+        // PRAGMA [schema.]locking_mode[=NORMAL|EXCLUSIVE]. Without a
+        // schema, the mode is set on main and every attached database
+        // (not TEMP, always exclusive) and becomes the default for those
+        // attached later; the query alone reports that default.
         .locking_mode => {
-            const mode = getLockingMode(right);
-            if (mode == .exclusive) return pending.notYet(p, "PRAGMA locking_mode=EXCLUSIVE");
-            returnSingleText(v, "normal");
+            const mode: ?bool = switch (getLockingMode(right)) {
+                .query => null,
+                .normal => false,
+                .exclusive => true,
+            };
+            var exclusive: bool = undefined;
+            if (id2.n == 0 and mode == null) {
+                exclusive = db.dflt_lock_mode;
+            } else {
+                if (id2.n == 0) {
+                    std.debug.assert(i_db == 0);
+                    for (db.dbs.items[2..]) |d| _ = d.bt.?.pager.lockingMode(mode);
+                    db.dflt_lock_mode = mode.?;
+                }
+                exclusive = pdb.bt.?.pager.lockingMode(mode);
+            }
+            returnSingleText(v, if (exclusive) "exclusive" else "normal");
         },
 
         // PRAGMA [schema.]journal_mode[=DELETE|PERSIST|OFF|TRUNCATE|MEMORY|WAL].
@@ -632,7 +655,6 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     mode = journalmode_query;
                 }
             }
-            if (mode == @backingInt(pager_mod.JournalMode.memory)) return pending.notYet(p, "PRAGMA journal_mode=MEMORY");
             if (mode == journalmode_query and id2.n == 0) {
                 // "PRAGMA journal_mode" means "PRAGMA main.journal_mode".
                 i_db = 0;
@@ -739,9 +761,34 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             }
         },
 
-        // PRAGMA [schema.]mmap_size(N): memory mapping is not supported,
-        // as in a build with SQLITE_MAX_MMAP_SIZE=0.
-        .mmap_size => returnSingleInt(v, 0),
+        // PRAGMA [schema.]mmap_size(N): the largest memory map of the
+        // database file; without a schema, of every database and of those
+        // attached later. The size reported is the file's
+        // (SQLITE_FCNTL_MMAP_SIZE): no row if it has no memory maps, as
+        // a temporary database not yet written or an in-memory one. On
+        // WebAssembly there are none, as in a build with
+        // SQLITE_MAX_MMAP_SIZE=0: always 0.
+        .mmap_size => {
+            const mmap_config = @import("xqlite_vfs").vfs.mmap_config;
+            if (comptime mmap_config.max_supported == 0) return returnSingleInt(v, 0);
+            if (right) |z| {
+                var sz: i64 = 0;
+                _ = util.decOrHexToI64(z, &sz);
+                if (sz < 0) sz = mmap_config.default_size;
+                if (id2.n == 0) db.sz_mmap = sz;
+                var ii = db.dbs.items.len;
+                while (ii > 0) {
+                    ii -= 1;
+                    if (db.dbs.items[ii].bt) |bt| if (ii == i_db or id2.n == 0) bt.pager.setMmapLimit(sz);
+                }
+            }
+            const sz = pdb.bt.?.pager.mmapSize() catch |err| {
+                p.n_err += 1;
+                p.rc = int.errorCode(err);
+                return;
+            };
+            if (sz) |n| returnSingleInt(v, n);
+        },
 
         // PRAGMA temp_store[=DEFAULT|FILE|MEMORY].
         .temp_store => {
@@ -1101,9 +1148,8 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     for (encnames) |e| {
                         if (!ctype.eqlNoCase(z, e.name)) continue;
                         const enc = if (e.enc != 0) e.enc else if (builtin.cpu.arch.endian() == .little) vi.ENC.UTF16LE else vi.ENC.UTF16BE;
-                        if (enc != vi.ENC.UTF8) return pending.notYet(p, "PRAGMA encoding=UTF-16");
                         db.dbs.items[0].schema.enc = enc;
-                        db.enc = enc;
+                        coll.setTextEncoding(db, enc);
                         break;
                     } else util.errorMsg(p, "unsupported encoding: {s}", .{z});
                 }

@@ -2,10 +2,12 @@
 //! substr() and like(), the aggregates count(), sum(), group_concat() and
 //! friends, and the table that registers them.
 //!
-//! Only what a default build includes is here: soundex(), the math
-//! functions (SQLITE_ENABLE_MATH_FUNCTIONS), median()/percentile()
-//! (SQLITE_ENABLE_PERCENTILE), unknown(), sqlite_offset() and the
-//! SQLITE_DEBUG helpers are compiled out by default and so are omitted.
+//! What a default build includes is here, and the math functions of
+//! SQLITE_ENABLE_MATH_FUNCTIONS (math.zig), which SQLite's configure
+//! turns on, as the sqlite3 shells of macOS and the distributions have
+//! them. soundex(), median()/percentile() (SQLITE_ENABLE_PERCENTILE),
+//! unknown(), sqlite_offset() and the SQLITE_DEBUG helpers are compiled
+//! out by default and so are omitted.
 //! load_extension() loads through the C ABI (global.load_extension) and
 //! fails without it.
 
@@ -18,6 +20,7 @@ const numeric = @import("xqlite_base").numeric;
 const util = @import("../util.zig");
 const ctype = @import("xqlite_base").ctype;
 const simd = @import("xqlite_base").simd;
+const math = @import("math.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const api = @import("../../vdbe/api.zig");
 const mem = @import("../../vdbe/mem.zig");
@@ -245,9 +248,10 @@ fn bytelengthFunc(ctx: *Context, argv: []*Mem) void {
             const m: i64 = if (api.contextDbHandle(ctx).enc <= ENC.UTF8) 1 else 2;
             api.resultInt64(ctx, @as(i64, @intCast(api.valueBytes(argv[0]))) * m);
         },
-        // Only UTF-8 text exists so far, so sqlite3_value_bytes16() is
-        // never needed.
-        SQLITE_TEXT => api.resultInt64(ctx, @intCast(api.valueBytes(argv[0]))),
+        SQLITE_TEXT => if (argv[0].enc <= ENC.UTF8)
+            api.resultInt64(ctx, @intCast(api.valueBytes(argv[0])))
+        else
+            api.resultInt64(ctx, @intCast(api.valueBytes16(argv[0]))),
         else => api.resultNull(ctx),
     }
 }
@@ -1763,6 +1767,12 @@ fn function2(name: [:0]const u8, n_arg: i16, i_arg: usize, bnc: u1, x: FuncDef.S
     return f;
 }
 
+/// MFUNCTION() of SQLITE_ENABLE_MATH_FUNCTIONS: FUNCTION(), and xqlite's
+/// FUNC.XQ_SQLITE_ONLY, which keeps it from the other dialects.
+fn mfunction(name: [:0]const u8, n_arg: i16, i_arg: usize, x: FuncDef.StepFn) FuncDef {
+    return function2(name, n_arg, i_arg, 0, x, .{ .XQ_SQLITE_ONLY = true });
+}
+
 /// INLINE_FUNC(): coded in-line by the code generator; user data is the
 /// INLINEFUNC_* number.
 fn inlineFunc(name: [:0]const u8, n_arg: i16, i_arg: usize, m_flags: FUNC) FuncDef {
@@ -1897,6 +1907,40 @@ pub const funcs = [_]FuncDef{
     likeFuncDef("glob", 2, &glob_info, .{ .LIKE = true, .CASE = true }),
     likeFuncDef("like", 2, &like_info_norm, .{ .LIKE = true }),
     likeFuncDef("like", 3, &like_info_norm, .{ .LIKE = true }),
+    // SQLITE_ENABLE_MATH_FUNCTIONS (math.zig). func.c registers ln() and
+    // the log functions with FUNCTION() and the others with MFUNCTION(),
+    // whose user data is the libm function: the same flags, so all are
+    // mfunction() here, with the libm function in the step function.
+    mfunction("ceil", 1, 0, math.ceilingFunc(math.m.ceil)),
+    mfunction("ceiling", 1, 0, math.ceilingFunc(math.m.ceil)),
+    mfunction("floor", 1, 0, math.ceilingFunc(math.m.floor)),
+    mfunction("trunc", 1, 0, math.ceilingFunc(math.m.trunc)),
+    mfunction("ln", 1, 0, math.logFunc),
+    mfunction("log", 1, 1, math.logFunc),
+    mfunction("log10", 1, 1, math.logFunc),
+    mfunction("log2", 1, 2, math.logFunc),
+    mfunction("log", 2, 0, math.logFunc),
+    mfunction("exp", 1, 0, math.math1Func(math.m.exp)),
+    mfunction("pow", 2, 0, math.math2Func(math.m.pow)),
+    mfunction("power", 2, 0, math.math2Func(math.m.pow)),
+    mfunction("mod", 2, 0, math.math2Func(math.m.fmod)),
+    mfunction("acos", 1, 0, math.math1Func(math.m.acos)),
+    mfunction("asin", 1, 0, math.math1Func(math.m.asin)),
+    mfunction("atan", 1, 0, math.math1Func(math.m.atan)),
+    mfunction("atan2", 2, 0, math.math2Func(math.m.atan2)),
+    mfunction("cos", 1, 0, math.math1Func(math.m.cos)),
+    mfunction("sin", 1, 0, math.math1Func(math.m.sin)),
+    mfunction("tan", 1, 0, math.math1Func(math.m.tan)),
+    mfunction("cosh", 1, 0, math.math1Func(math.m.cosh)),
+    mfunction("sinh", 1, 0, math.math1Func(math.m.sinh)),
+    mfunction("tanh", 1, 0, math.math1Func(math.m.tanh)),
+    mfunction("acosh", 1, 0, math.math1Func(math.m.acosh)),
+    mfunction("asinh", 1, 0, math.math1Func(math.m.asinh)),
+    mfunction("atanh", 1, 0, math.math1Func(math.m.atanh)),
+    mfunction("sqrt", 1, 0, math.math1Func(math.m.sqrt)),
+    mfunction("radians", 1, 0, math.math1Func(math.radians)),
+    mfunction("degrees", 1, 0, math.math1Func(math.degrees)),
+    mfunction("pi", 0, 0, math.piFunc),
     function("sign", 1, 0, 0, signFunc),
     inlineFunc("coalesce", -4, INLINEFUNC_coalesce, .{}),
     inlineFunc("iif", -4, INLINEFUNC_iif, .{}),
@@ -2146,6 +2190,99 @@ test "func: round, abs and sign" {
     try expectInt(&db, -1, "sign", .{tReal(&db, -0.1)});
     try expectInt(&db, 1, "sign", .{tText(&db, "7")});
     try expectNull(&db, "sign", .{tText(&db, "x")});
+}
+
+test "func: math functions (SQLITE_ENABLE_MATH_FUNCTIONS)" {
+    var db: Sqlite3 = undefined;
+    testDb(&db);
+    defer callback.freeFunctions(&db);
+    // ceil(), floor(), trunc(): an integer stays an integer, a real is a
+    // real, text is its number, anything else NULL.
+    try expectInt(&db, 7, "ceil", .{tInt(&db, 7)});
+    try expectInt(&db, largest_int64, "ceiling", .{tInt(&db, largest_int64)});
+    try expectInt(&db, smallest_int64, "floor", .{tInt(&db, smallest_int64)});
+    try expectReal(&db, 3.0, "ceil", .{tReal(&db, 2.5)});
+    try expectReal(&db, -0.0, "ceil", .{tReal(&db, -0.5)});
+    try expectReal(&db, -3.0, "floor", .{tReal(&db, -2.5)});
+    try expectReal(&db, -2.0, "trunc", .{tReal(&db, -2.5)});
+    try expectInt(&db, 12, "floor", .{tText(&db, "12")});
+    try expectReal(&db, 12.0, "floor", .{tText(&db, " 12.5 ")});
+    try expectNull(&db, "ceil", .{tText(&db, "abc")});
+    try expectNull(&db, "ceil", .{tBlob(&db, "1")});
+    try expectNull(&db, "trunc", .{tNull(&db)});
+    // ln(), log(), log10(), log2(), log(B,X): NULL unless positive.
+    try expectReal(&db, 0.0, "ln", .{tInt(&db, 1)});
+    try expectReal(&db, 2.0, "log", .{tInt(&db, 100)});
+    try expectReal(&db, 3.0, "log10", .{tText(&db, "1000")});
+    try expectReal(&db, 10.0, "log2", .{tInt(&db, 1024)});
+    // Subnormal arguments (compiler-rt's log2 and log10 get them wrong).
+    try expectReal(&db, -1074.0, "log2", .{tReal(&db, std.math.floatTrueMin(f64))});
+    try expectReal(&db, -1073.0, "log2", .{tReal(&db, 2 * std.math.floatTrueMin(f64))});
+    try expectReal(&db, -310.0, "log10", .{tReal(&db, 1e-310)});
+    try expectReal(&db, 3.0, "log", .{ tInt(&db, 2), tInt(&db, 8) });
+    try expectNull(&db, "ln", .{tInt(&db, 0)});
+    try expectNull(&db, "log", .{tReal(&db, -1.0)});
+    try expectNull(&db, "log", .{ tInt(&db, 1), tInt(&db, 8) });
+    try expectNull(&db, "log", .{ tInt(&db, 2), tInt(&db, -8) });
+    // func.c checks the type of B twice and not that of X: text X is
+    // its number, a blob X its text's.
+    try expectReal(&db, 3.0, "log", .{ tInt(&db, 2), tText(&db, "8") });
+    try expectReal(&db, 3.0, "log", .{ tInt(&db, 2), tBlob(&db, "8") });
+    try expectNull(&db, "log", .{ tText(&db, "x"), tInt(&db, 8) });
+    // The others are reals, NULL for an argument that is not a number
+    // and for a domain error (NaN).
+    try expectReal(&db, 1.0, "exp", .{tInt(&db, 0)});
+    try expectReal(&db, 1024.0, "pow", .{ tInt(&db, 2), tInt(&db, 10) });
+    try expectReal(&db, 0.25, "power", .{ tInt(&db, 2), tInt(&db, -2) });
+    try expectReal(&db, -2.0, "mod", .{ tInt(&db, -8), tInt(&db, 3) });
+    try expectReal(&db, 0.5, "mod", .{ tReal(&db, 2.5), tInt(&db, 1) });
+    try expectNull(&db, "mod", .{ tInt(&db, 1), tInt(&db, 0) });
+    try expectNull(&db, "pow", .{ tInt(&db, -8), tReal(&db, 0.5) });
+    try expectNull(&db, "pow", .{ tInt(&db, 2), tText(&db, "x") });
+    try expectReal(&db, 3.0, "sqrt", .{tInt(&db, 9)});
+    try expectNull(&db, "sqrt", .{tInt(&db, -1)});
+    try expectNull(&db, "acos", .{tInt(&db, 2)});
+    try expectNull(&db, "asin", .{tBlob(&db, "\x00")});
+    try expectNull(&db, "atanh", .{tInt(&db, 2)});
+    try expectReal(&db, std.math.inf(f64), "exp", .{tInt(&db, 1000)});
+    try expectReal(&db, 0.0, "sin", .{tInt(&db, 0)});
+    try expectReal(&db, 1.0, "cos", .{tInt(&db, 0)});
+    try expectReal(&db, 0.0, "tan", .{tInt(&db, 0)});
+    try expectReal(&db, std.math.pi, "atan2", .{ tInt(&db, 0), tInt(&db, -1) });
+    try expectReal(&db, std.math.pi / 2.0, "acos", .{tInt(&db, 0)});
+    try expectReal(&db, 0.0, "asinh", .{tInt(&db, 0)});
+    try expectReal(&db, 0.0, "acosh", .{tInt(&db, 1)});
+    try expectReal(&db, 180.0, "degrees", .{tReal(&db, std.math.pi)});
+    try expectReal(&db, std.math.pi, "radians", .{tInt(&db, 180)});
+    try expectReal(&db, std.math.pi, "pi", .{});
+    // The digits of musl: tan(1) is correctly rounded, the last digit of
+    // exp(1) is e's.
+    try expectReal(&db, @bitCast(@as(u64, 0x3ff8eb245cbee3a6)), "tan", .{tInt(&db, 1)});
+    try expectReal(&db, std.math.e, "exp", .{tInt(&db, 1)});
+}
+
+test "func: the math functions are the SQLite dialect's only" {
+    var db: Sqlite3 = undefined;
+    testDb(&db);
+    defer callback.freeFunctions(&db);
+    try testing.expect(callback.findFunction(&db, "log2", 1, ENC.UTF8, false) != null);
+    try testing.expect(callback.findFunction(&db, "sign", 1, ENC.UTF8, false) != null);
+    for (std.enums.values(@import("../../dialect/dialect.zig").Dialect)) |d| {
+        if (d == .sqlite or !d.built()) continue;
+        db.xq.lang.dialect = d;
+        // Another dialect finds its own function of the name or none
+        // (log2() is not PostgreSQL's), as before the math functions;
+        // sign() (a default build's) stays visible.
+        for ([_][]const u8{ "pi", "log2", "trunc", "atanh" }) |name| {
+            if (callback.findFunction(&db, name, -2, ENC.UTF8, false)) |f| try testing.expect(!f.func_flags.XQ_SQLITE_ONLY);
+        }
+        try testing.expect(callback.findFunction(&db, "sign", 1, ENC.UTF8, false) != null);
+        try testing.expect(callback.findFunction(&db, "xq_sqlite_log2", 1, ENC.UTF8, false) == null);
+        // The engine's own SQL sees them.
+        db.m_db_flags.PreferBuiltin = true;
+        try testing.expect(callback.findFunction(&db, "log2", 1, ENC.UTF8, false).?.func_flags.XQ_SQLITE_ONLY);
+        db.m_db_flags.PreferBuiltin = false;
+    }
 }
 
 test "func: sum, total, avg and count" {

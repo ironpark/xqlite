@@ -125,6 +125,13 @@ pub const AutoVacuum = enum(u2) {
 };
 
 pub const Options = struct {
+    /// An in-memory database (BTREE_MEMORY): `path` is ignored.
+    memory: bool = false,
+    /// The kind of the file of a temporary database (see Pager.Options).
+    temp_kind: vfs.FileKind = .temp_db,
+    /// The largest memory map of the file (sqlite3PagerSetMmapLimit()
+    /// with db->szMmap); 0 for none.
+    mmap_size: i64 = 0,
     /// Page size for a new database. Existing files use their own.
     page_size: u32 = header.default_page_size,
     read_only: bool = false,
@@ -259,6 +266,8 @@ pub const Btree = struct {
         const bt = try gpa.create(Btree);
         errdefer gpa.destroy(bt);
         const p = try Pager.open(gpa, v, path, .{
+            .memory = opts.memory,
+            .temp_kind = opts.temp_kind,
             .page_size = opts.page_size,
             .read_only = opts.read_only,
             .create = opts.create,
@@ -272,6 +281,7 @@ pub const Btree = struct {
             .uri_params = opts.uri_params,
         });
         errdefer p.close(.{});
+        p.setMmapLimit(opts.mmap_size);
 
         var hdr: [header.size]u8 = undefined;
         try p.readFileHeader(&hdr);

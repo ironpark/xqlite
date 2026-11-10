@@ -329,12 +329,12 @@ pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, comptim
     // Then the built-ins; xqlite: not those of the SQLite dialect only
     // (FUNC.XQ_SQLITE_ONLY) in another dialect, unless the engine runs
     // its own SQL (the schema's).
-    const sqlite_only = db.xq.lang.dialect == .sqlite or db.m_db_flags.PreferBuiltin;
+    const see_sqlite_only = db.xq.lang.dialect == .sqlite or db.m_db_flags.PreferBuiltin;
     if (found == null or db.m_db_flags.PreferBuiltin) {
         best_score = 0;
         const h = funcHash(ctype.toLower(if (name.len > 0) name[0] else 0), name.len);
         for (functionSearch(h, name)) |*f| {
-            if (f.func_flags.XQ_SQLITE_ONLY and !sqlite_only) continue;
+            if (f.func_flags.XQ_SQLITE_ONLY and !see_sqlite_only) continue;
             const score = matchQuality(f, n_arg, enc);
             if (score > best_score) {
                 found = f;

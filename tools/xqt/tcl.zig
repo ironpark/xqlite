@@ -49,6 +49,11 @@ const Status = enum {
     timeout,
     /// Did not run (--no-ref).
     none,
+
+    /// Whether the file stopped before finish_test.
+    fn stopped(st: Status) bool {
+        return st == .@"error" or st == .crash or st == .timeout;
+    }
 };
 
 const Failure = struct {
@@ -78,7 +83,6 @@ const FileResult = struct {
 };
 
 const Ctx = struct {
-    cfg: *const xqt.Config,
     timeout_ms: i64,
     fixtures: std.EnumArray(Engine, ?[]const u8),
     env: *const std.process.Environ.Map,
@@ -173,7 +177,6 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     const results = try arena.alloc(FileResult, files.items.len);
     for (results, files.items) |*r, f| r.* = .{ .path = f };
     var ctx: Ctx = .{
-        .cfg = cfg,
         .timeout_ms = timeout_s * std.time.ms_per_s,
         .fixtures = .init(.{ .xqlite = fixture, .sqlite = ref }),
         .env = env,
@@ -523,7 +526,7 @@ fn summarize(arena: Allocator, out: *Io.Writer, log: ?*Io.Writer, results: []Fil
                 try count(arena, &causes, try cause(arena, fl), try example(arena, name, fl), name);
                 if (log) |w| try logFailure(w, "FAIL", fl);
             }
-            if (xq.status == .@"error" or xq.status == .crash or xq.status == .timeout)
+            if (xq.status.stopped())
                 try count(arena, &stops, try stopCause(arena, xq), name, name);
             continue;
         }
@@ -565,8 +568,8 @@ fn summarize(arena: Allocator, out: *Io.Writer, log: ?*Io.Writer, results: []Fil
             if (!xq_names.contains(kv.key_ptr.*)) classes.getPtr(.sqlite_ran_only).* += 1;
         }
         // The file stopped early on xqlite only.
-        const xq_stopped = xq.status == .@"error" or xq.status == .crash or xq.status == .timeout;
-        const sq_stopped = sq.status == .@"error" or sq.status == .crash or sq.status == .timeout;
+        const xq_stopped = xq.status.stopped();
+        const sq_stopped = sq.status.stopped();
         if (xq_stopped and !sq_stopped) {
             files_xq_only += 1;
             try count(arena, &stops, try stopCause(arena, xq), name, name);
@@ -713,12 +716,10 @@ fn normalize(arena: Allocator, s: []const u8) ![]const u8 {
     }
     // "no such table: main.t1" and the like: the name after the colon.
     const text = out.items;
-    for ([_][]const u8{ "no such table: ", "no such column: ", "no such function: ", "no such index: ", "no such view: ", "no such module: ", "no such collation sequence: ", "no such trigger: ", "no such savepoint: ", "invalid command name ", "unknown database " }) |p| {
+    for ([_][]const u8{ "no such table: ", "no such column: ", "no such function: ", "no such index: ", "no such view: ", "no such module: ", "no such collation sequence: ", "no such trigger: ", "no such savepoint: ", "unknown database " }) |p| {
         if (std.mem.indexOf(u8, text, p)) |k| {
             const start = k + p.len;
             var end = start;
-            // Not for a command name: which command is the cause.
-            if (std.mem.eql(u8, p, "invalid command name ")) break;
             while (end < text.len and text[end] != ' ' and text[end] != ',' and text[end] != ')') end += 1;
             return std.mem.concat(arena, u8, &.{ text[0..start], "X", text[end..] });
         }

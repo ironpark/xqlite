@@ -91,7 +91,7 @@ pub const m = struct {
 };
 
 /// M_PI.
-const pi: f64 = 3.141592653589793238462643383279502884;
+const pi: f64 = std.math.pi;
 
 /// degToRad(): x*(M_PI/180.0), the quotient a double as in C.
 fn degToRad(x: f64) f64 {

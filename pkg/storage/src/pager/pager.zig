@@ -1114,6 +1114,10 @@ pub const Pager = struct {
         return p.getNormal(pgno, flags);
     }
 
+    /// The header of a page of the memory map: a Page, then (8-aligned)
+    /// the extra space. No data, which is the map's.
+    const map_hdr_size = std.mem.alignForward(usize, @sizeOf(Page), 8);
+
     /// Port of pagerAcquireMapPage(): a page of the memory map, with a
     /// header from the free list or new. Its extra space starts zeroed.
     fn acquireMapPage(p: *Pager, pgno: Pgno, data: [*]const u8) Error!*Page {
@@ -1124,7 +1128,7 @@ pub const Pager = struct {
             break :blk f;
         } else blk: {
             const extra_size = p.cache.extra_size;
-            const block = p.gpa.alignedAlloc(u8, .@"8", std.mem.alignForward(usize, @sizeOf(Page), 8) + extra_size) catch {
+            const block = p.gpa.alignedAlloc(u8, .@"8", map_hdr_size + extra_size) catch {
                 p.fd.unfetch(@as(u64, pgno - 1) * p.page_size, data);
                 return error.OutOfMemory;
             };
@@ -1132,7 +1136,7 @@ pub const Pager = struct {
             const f: *Page = @ptrCast(block.ptr);
             f.* = .{
                 .data = &.{},
-                .extra = @alignCast(block[std.mem.alignForward(usize, @sizeOf(Page), 8)..]),
+                .extra = @alignCast(block[map_hdr_size..]),
                 .pgno = 0,
                 .flags = .{ .mmap = true },
                 .n_ref = 1,
@@ -1157,7 +1161,7 @@ pub const Pager = struct {
 
     /// Port of pagerFreeMapHdrs().
     fn freeMapHdrs(p: *Pager) void {
-        const len = std.mem.alignForward(usize, @sizeOf(Page), 8) + p.cache.extra_size;
+        const len = map_hdr_size + p.cache.extra_size;
         while (p.mmap_freelist) |pg| {
             p.mmap_freelist = pg.dirty;
             const block: [*]align(8) u8 = @ptrCast(@alignCast(pg));

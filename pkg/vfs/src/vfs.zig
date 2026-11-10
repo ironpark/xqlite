@@ -297,46 +297,33 @@ pub const File = struct {
     /// the characteristics (none) may be asked of it.
     pub const unopened: File = .{ .ptr = @ptrCast(@constCast(&unopened_vtable)), .vtable = &unopened_vtable };
 
-    const unopened_vtable: VTable = .{
-        .close = Unopened.close,
-        .read = Unopened.read,
-        .write = Unopened.write,
-        .truncate = Unopened.truncate,
-        .sync = Unopened.sync,
-        .fileSize = Unopened.fileSize,
-        .lock = Unopened.lock,
-        .unlock = Unopened.unlock,
-        .checkReservedLock = Unopened.checkReservedLock,
-        .sectorSize = Unopened.sectorSize,
-        .deviceCharacteristics = Unopened.deviceCharacteristics,
-        .isReadOnly = Unopened.isReadOnly,
-    };
+    const unopened_vtable = FileImpl(Unopened).vtable;
 
     const Unopened = struct {
-        fn close(_: *anyopaque) void {}
-        fn read(_: *anyopaque, _: []u8, _: u64) Error!usize {
+        pub fn close(_: *anyopaque) void {}
+        pub fn read(_: *anyopaque, _: []u8, _: u64) Error!usize {
             return 0;
         }
-        fn write(_: *anyopaque, _: []const u8, _: u64) Error!void {
+        pub fn write(_: *anyopaque, _: []const u8, _: u64) Error!void {
             return error.IoErr;
         }
-        fn truncate(_: *anyopaque, _: u64) Error!void {}
-        fn sync(_: *anyopaque, _: SyncFlags) Error!void {}
-        fn fileSize(_: *anyopaque) Error!u64 {
+        pub fn truncate(_: *anyopaque, _: u64) Error!void {}
+        pub fn sync(_: *anyopaque, _: SyncFlags) Error!void {}
+        pub fn fileSize(_: *anyopaque) Error!u64 {
             return 0;
         }
-        fn lock(_: *anyopaque, _: LockLevel) Error!void {}
-        fn unlock(_: *anyopaque, _: LockLevel) Error!void {}
-        fn checkReservedLock(_: *anyopaque) Error!bool {
+        pub fn lock(_: *anyopaque, _: LockLevel) Error!void {}
+        pub fn unlock(_: *anyopaque, _: LockLevel) Error!void {}
+        pub fn checkReservedLock(_: *anyopaque) Error!bool {
             return false;
         }
-        fn sectorSize(_: *anyopaque) u32 {
+        pub fn sectorSize(_: *anyopaque) u32 {
             return 512;
         }
-        fn deviceCharacteristics(_: *anyopaque) DeviceCharacteristics {
+        pub fn deviceCharacteristics(_: *anyopaque) DeviceCharacteristics {
             return .{};
         }
-        fn isReadOnly(_: *anyopaque) bool {
+        pub fn isReadOnly(_: *anyopaque) bool {
             return false;
         }
     };

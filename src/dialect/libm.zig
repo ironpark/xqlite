@@ -601,38 +601,6 @@ pub fn atanh(x: f64) f64 {
 
 // ---------------------------------------------------------------- sin/cos kernels
 
-/// sin on [-pi/4, pi/4] (musl __sin.c with iy == 0).
-fn kernelSin(x: f64) f64 {
-    const S1 = bits(0xBFC5555555555549);
-    const S2 = bits(0x3F8111111110F8A6);
-    const S3 = bits(0xBF2A01A019C161D5);
-    const S4 = bits(0x3EC71DE357B1FE7D);
-    const S5 = bits(0xBE5AE5E68A2B9CEB);
-    const S6 = bits(0x3DE5D93A5ACFD57C);
-    const z = x * x;
-    const w = z * z;
-    const r = S2 + z * (S3 + z * S4) + z * w * (S5 + z * S6);
-    const v = z * x;
-    return x + v * (S1 + z * r);
-}
-
-/// cos on [-pi/4, pi/4] (musl __cos.c with y == 0).
-fn kernelCos(x: f64) f64 {
-    const C1 = bits(0x3FA555555555554C);
-    const C2 = bits(0xBF56C16C16C15177);
-    const C3 = bits(0x3EFA01A019CB1590);
-    const C4 = bits(0xBE927E4F809C52AD);
-    const C5 = bits(0x3E21EE9EBDB4B1C4);
-    const C6 = bits(0xBDA8FAE9BE8838D4);
-    const y: f64 = 0;
-    const z = x * x;
-    const w = z * z;
-    const r = z * (C1 + z * (C2 + z * C3)) + w * w * (C4 + z * (C5 + z * C6));
-    const hz = 0.5 * z;
-    const ww = 1.0 - hz;
-    return ww + (((1.0 - ww) - hz) + (z * r - x * y));
-}
-
 /// sin(pi*x) for x > 0x1p-100 (tgamma.c sinpi and lgamma_r.c sin_pi, which
 /// compute the same thing).
 fn sinPi(x_in: f64) f64 {
@@ -643,10 +611,10 @@ fn sinPi(x_in: f64) f64 {
     x -= @as(f64, @floatFromInt(n)) * 0.5;
     x *= gamma_pi;
     return switch (n) {
-        1 => kernelCos(x),
-        2 => kernelSin(-x),
-        3 => -kernelCos(x),
-        else => kernelSin(x),
+        1 => kcos(x, 0),
+        2 => ksin(-x, 0, 0),
+        3 => -kcos(x, 0),
+        else => ksin(x, 0, 0),
     };
 }
 

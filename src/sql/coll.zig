@@ -103,23 +103,25 @@ pub fn findCollSeq(db: *Sqlite3, name: ?[]const u8, create: bool) ?*const CollSe
     const enc = db.enc;
     const user = db.colls.get(z);
     // Those of the connection first: they shadow the built-in ones.
-    var it = user;
-    while (it) |c| : (it = c.next) if (c.enc == enc) return c;
-    for (&builtin) |*c| {
-        if (c.enc == enc and std.ascii.eqlIgnoreCase(c.name, z)) return c;
-    }
+    if (userCollSeq(db, z, enc)) |c| return c;
+    if (builtinColl(z, enc)) |c| return c;
     for ([_]u8{ ENC.UTF16BE, ENC.UTF16LE, ENC.UTF8 }) |e| {
-        it = user;
+        if (e == enc) continue;
+        var it = user;
         while (it) |c| : (it = c.next) if (c.enc == e and c.cmp != null) return c;
-        for (&builtin) |*c| {
-            if (c.enc == e and std.ascii.eqlIgnoreCase(c.name, z)) return c;
-        }
+        if (builtinColl(z, e)) |c| return c;
     }
     if (user) |c| return c;
     // xqlite: then those of the connection's dialect.
     if (@import("../dialect/dialect.zig").findCollation(db, z)) |c| return c;
     if (!create) return null;
     return addCollSeq(db, z, .{ .name = undefined, .enc = enc });
+}
+
+/// The built-in collation `name` for encoding `enc`, if any.
+fn builtinColl(name: []const u8, enc: u8) ?*const CollSeq {
+    for (&builtin) |*c| if (c.enc == enc and std.ascii.eqlIgnoreCase(c.name, name)) return c;
+    return null;
 }
 
 /// The definition of collation `name` for encoding `enc` made by the

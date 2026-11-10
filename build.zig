@@ -924,8 +924,8 @@ fn addTcl(b: *std.Build, target: std.Build.ResolvedTarget, sqlite_ref: ?SqliteRe
     if (target.result.cpu.arch.isWasm() or os == .windows) return;
 
     const io = b.graph.io;
-    const src_path: std.Build.LazyPath = if (std.fs.path.isAbsolute(src_opt)) .{ .cwd_relative = src_opt } else b.path(src_opt);
-    const tcl_path: std.Build.LazyPath = if (std.fs.path.isAbsolute(tcl_opt)) .{ .cwd_relative = tcl_opt } else b.path(tcl_opt);
+    const src_path = optPath(b, src_opt);
+    const tcl_path = optPath(b, tcl_opt);
     for ([_][2][]const u8{ .{ src_opt, "src/test1.c" }, .{ tcl_opt, "include/tcl.h" } }) |need| {
         const p = b.pathJoin(&.{ need[0], need[1] });
         const found = std.Io.Dir.cwd().access(io, fromRoot(b, p), .{});
@@ -1023,27 +1023,17 @@ fn addTcl(b: *std.Build, target: std.Build.ResolvedTarget, sqlite_ref: ?SqliteRe
         for (misc) |e| m.addCSourceFile(.{ .file = src_path.path(b, b.fmt("ext/misc/{s}.c", .{e})), .flags = flags });
         for ([_][]const u8{ "ext/expert/sqlite3expert.c", "ext/expert/test_expert.c", "ext/qrf/qrf.c" }) |f|
             m.addCSourceFile(.{ .file = src_path.path(b, f), .flags = flags });
-        const with = struct {
-            fn f(bb: *std.Build, base: []const []const u8, more: []const []const u8) []const []const u8 {
-                return std.mem.concat(bb.allocator, []const u8, &.{ base, more }) catch @panic("OOM");
-            }
-        }.f;
-        m.addCSourceFile(.{ .file = src_path.path(b, "src/tclsqlite.c"), .flags = with(b, flags, &.{"-DTCLSH_INIT_PROC=xqtclTestInit"}) });
-        m.addCSourceFile(.{ .file = b.path("tools/tcl/shim.c"), .flags = with(b, flags, &.{b.fmt("-DXQTCL_ENGINE=\"{s}\"", .{engine})}) });
+        m.addCSourceFile(.{ .file = src_path.path(b, "src/tclsqlite.c"), .flags = concatFlags(b, flags, &.{"-DTCLSH_INIT_PROC=xqtclTestInit"}) });
+        m.addCSourceFile(.{ .file = b.path("tools/tcl/shim.c"), .flags = concatFlags(b, flags, &.{b.fmt("-DXQTCL_ENGINE=\"{s}\"", .{engine})}) });
         if (xq) {
             m.linkLibrary(lib);
         } else {
             // As SQLite's configure builds it (sqliteRef()), with the
             // same optional parts.
-            m.addCSourceFile(.{ .file = ref.dep.path("sqlite3.c"), .flags = with(b, &features, &.{
-                "-DSQLITE_THREADSAFE=1",
-                "-DHAVE_ISNAN=1",
-                "-DHAVE_LOCALTIME_R=1",
-                "-DHAVE_GMTIME_R=1",
-                "-DHAVE_USLEEP=1",
+            m.addCSourceFile(.{ .file = ref.dep.path("sqlite3.c"), .flags = concatFlags(b, &features, &(configure_flags ++ .{
                 "-DSQLITE_WITHOUT_ZONEMALLOC",
                 "-Wno-everything",
-            }) });
+            })) });
         }
         m.addObjectFile(tcl_path.path(b, "lib/libtcl8.6.a"));
         m.linkSystemLibrary("z", .{});
@@ -1054,6 +1044,28 @@ fn addTcl(b: *std.Build, target: std.Build.ResolvedTarget, sqlite_ref: ?SqliteRe
         step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
 }
+
+/// An option's path as a LazyPath: absolute, or relative to the build
+/// root.
+fn optPath(b: *std.Build, path: []const u8) std.Build.LazyPath {
+    return if (std.fs.path.isAbsolute(path)) .{ .cwd_relative = path } else b.path(path);
+}
+
+/// `base` then `more`.
+fn concatFlags(b: *std.Build, base: []const []const u8, more: []const []const u8) []const []const u8 {
+    return std.mem.concat(b.allocator, []const u8, &.{ base, more }) catch @panic("OOM");
+}
+
+/// The options sqlite_cfg.h gives on macOS and Linux that make a
+/// difference, as SQLite's configure builds it (sqliteRef(), and the
+/// reference SQLite of zig build testfixture).
+const configure_flags = [_][]const u8{
+    "-DSQLITE_THREADSAFE=1",
+    "-DHAVE_ISNAN=1",
+    "-DHAVE_LOCALTIME_R=1",
+    "-DHAVE_GMTIME_R=1",
+    "-DHAVE_USLEEP=1",
+};
 
 /// `path` if absolute, else relative to the build root.
 fn fromRoot(b: *std.Build, path: []const u8) []const u8 {
@@ -1084,17 +1096,11 @@ const SqliteRef = struct {
 fn sqliteRef(b: *std.Build, target: std.Build.ResolvedTarget) ?SqliteRef {
     if (b.pkg_hash.len != 0) return null;
     const dep = b.lazyDependency("sqlite", .{}) orelse return null;
-    const shell = sqliteShell(b, target, dep, "sqlite3-ref", &.{
-        // OPT_FEATURE_FLAGS, and the options sqlite_cfg.h gives on macOS
-        // and Linux that make a difference.
+    const shell = sqliteShell(b, target, dep, "sqlite3-ref", &(configure_flags ++ .{
+        // OPT_FEATURE_FLAGS.
         "-DNDEBUG",
-        "-DSQLITE_THREADSAFE=1",
         "-DSQLITE_ENABLE_MATH_FUNCTIONS",
         "-DSQLITE_ENABLE_PERCENTILE",
-        "-DHAVE_ISNAN=1",
-        "-DHAVE_LOCALTIME_R=1",
-        "-DHAVE_GMTIME_R=1",
-        "-DHAVE_USLEEP=1",
         // SHELL_OPT.
         "-DSQLITE_DQS=0",
         "-DSQLITE_ENABLE_BYTECODE_VTAB",
@@ -1107,7 +1113,7 @@ fn sqliteRef(b: *std.Build, target: std.Build.ResolvedTarget) ?SqliteRef {
         "-DSQLITE_ENABLE_STMTVTAB",
         "-DSQLITE_ENABLE_UNKNOWN_SQL_FUNCTION",
         "-DSQLITE_STRICT_SUBTYPE=1",
-    });
+    }));
     return .{
         .dep = dep,
         .shell = shell,

@@ -691,18 +691,13 @@ pub fn runParser(p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void 
     // functions and catalog read text as UTF-8. The encoding may become
     // known only as the statement reads the schema, so the test comes
     // before and after.
-    if (db.enc != 1) {
+    if (db.enc == 1) f.run(p, sql) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.ParseFailed => failed = true,
+    };
+    if (!failed and db.enc != 1) {
         utf16Unsupported(p);
         failed = true;
-    } else {
-        f.run(p, sql) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            error.ParseFailed => failed = true,
-        };
-        if (!failed and db.enc != 1) {
-            utf16Unsupported(p);
-            failed = true;
-        }
     }
     if (!failed and sql.len - p.tail.len > @as(usize, @intCast(db.limit(.sql_length)))) {
         p.rc = int.RC.TOOBIG;

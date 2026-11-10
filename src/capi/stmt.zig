@@ -108,7 +108,7 @@ pub export fn sqlite3_step(v_arg: ?*Vdbe) callconv(.c) c_int {
     const lk = c.lockStmt(v_arg);
     defer lk.unlock();
     const v = v_arg orelse return RC.MISUSE;
-    if (c.extOf(v.db)) |e| if (e.utf16) c.rowToDbEnc(v);
+    c.rowToDbEnc(v);
     return c.api.step(v);
 }
 
@@ -547,13 +547,13 @@ fn appendValue(out: *std.ArrayList(u8), m: *Mem) !void {
             try out.appendSlice(a, z);
         },
         c.vi.SQLITE_TEXT => {
-            // A copy in UTF-8: the bound value stays in the database
-            // encoding (sqlite3VdbeExpandSql()).
+            // Another encoding is read from a copy in UTF-8: the bound
+            // value stays in the database encoding (sqlite3VdbeExpandSql()).
             var utf8: c.Mem = .{ .db = m.db, .flags = .{ .Null = true } };
-            c.mem.shallowCopy(&utf8, m, .{ .Ephem = true });
+            if (m.enc != c.vi.ENC.UTF8) c.mem.shallowCopy(&utf8, m, .{ .Ephem = true });
             defer c.mem.releaseMalloc(&utf8);
             try out.append(a, '\'');
-            for (c.api.valueText(&utf8) orelse "") |ch| {
+            for (c.api.valueText(if (m.enc != c.vi.ENC.UTF8) &utf8 else m) orelse "") |ch| {
                 if (ch == '\'') try out.append(a, '\'');
                 try out.append(a, ch);
             }

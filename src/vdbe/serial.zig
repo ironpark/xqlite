@@ -131,15 +131,20 @@ pub fn recordUnpack(key: []const u8, r: *UnpackedRecord) void {
     r.n_field = u;
 }
 
-/// Port of vdbeCompareMemString(): compare strings with a collation.
-fn compareMemString(m1: *const Mem, m2: *const Mem, coll: *const CollSeq) i32 {
-    if (m1.enc != coll.enc) return compareMemStringWithEncodingChange(m1, m2, coll);
-    const cmp = coll.cmp.?;
-    return switch (cmp(coll.user, m1.bytes(), m2.bytes())) {
+/// -1, 0 or 1 for an order (std.math.Order).
+inline fn orderInt(o: std.math.Order) i32 {
+    return switch (o) {
         .lt => -1,
         .eq => 0,
         .gt => 1,
     };
+}
+
+/// Port of vdbeCompareMemString(): compare strings with a collation.
+fn compareMemString(m1: *const Mem, m2: *const Mem, coll: *const CollSeq) i32 {
+    if (m1.enc != coll.enc) return compareMemStringWithEncodingChange(m1, m2, coll);
+    const cmp = coll.cmp.?;
+    return orderInt(cmp(coll.user, m1.bytes(), m2.bytes()));
 }
 
 /// Port of vdbeCompareMemStringWithEncodingChange(): compare copies in
@@ -158,11 +163,7 @@ noinline fn compareMemStringWithEncodingChange(m1: *const Mem, m2: *const Mem, c
         if (m1.db) |db| db.oomFault();
         return 0;
     }
-    return switch (coll.cmp.?(coll.user, c1.bytes(), c2.bytes())) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    };
+    return orderInt(coll.cmp.?(coll.user, c1.bytes(), c2.bytes()));
 }
 
 fn isAllZero(z: []const u8) bool {
@@ -192,11 +193,7 @@ pub fn blobCompare(b1: *const Mem, b2: *const Mem) i32 {
 
 /// Port of sqlite3IntFloatCompare() as a difference (record.intFloatCompare).
 pub fn intFloatCompare(i: i64, r: f64) i32 {
-    return switch (record.intFloatCompare(i, r)) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    };
+    return orderInt(record.intFloatCompare(i, r));
 }
 
 /// Port of sqlite3MemCompare(): NULLs first, then numbers, then text by

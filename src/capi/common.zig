@@ -261,15 +261,15 @@ pub fn noteUtf16(db: ?*Handle) void {
 /// encoding, if C may have converted them (see Ext.utf16).
 pub fn toDbEnc(db: ?*Handle, values: []const *Mem) void {
     const e = extOf(db) orelse return;
-    if (!e.utf16 and db.?.enc == @import("../vdbe/vdbe_int.zig").ENC.UTF8) return;
+    if (!e.utf16 and db.?.enc == vi.ENC.UTF8) return;
     for (values) |m| mem.toDbEnc(m);
 }
 
-/// toDbEnc() for the current row of `v` (in a UTF-16 database the engine
-/// does this itself: api.step()).
+/// toDbEnc() for the current row of `v`, in a UTF-8 database (in a
+/// UTF-16 one the engine does this itself: api.step(), api.reset()).
 pub fn rowToDbEnc(v: *Vdbe) void {
     const e = extOf(v.db) orelse return;
-    if (!e.utf16) return;
+    if (!e.utf16 or v.db.enc != vi.ENC.UTF8) return;
     const row = v.result_row orelse return;
     for (row[0..v.n_res_column]) |*m| mem.toDbEnc(m);
 }

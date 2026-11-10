@@ -1456,7 +1456,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
 /// window functions.
 fn multiSelectValues(p: *Parse, s_arg: *Select, dest: *SelectDest) i32 {
     var s = s_arg;
-    var n_row: i16 = 1;
+    var n_row: i32 = 1;
     const show_all = s.limit == null;
     while (true) {
         if (s.win != null) return -1;
@@ -1469,7 +1469,7 @@ fn multiSelectValues(p: *Parse, s_arg: *Select, dest: *SelectDest) i32 {
     while (it) |x| {
         selectInnerLoop(p, x, -1, null, null, dest, 1, 1);
         if (!show_all) break;
-        x.n_select_row = n_row;
+        x.n_select_row = @truncate(n_row); // C stores the int into a LogEst
         it = x.next;
     }
     return 0;

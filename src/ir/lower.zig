@@ -971,7 +971,7 @@ pub const Lowerer = struct {
                         const renamed = try dz.renamed(s, alias_cols) orelse
                             return l.failState(if (alias_cols.len > 0) alias_cols[0].pos else 0, .of("0A000"), "column aliases of this LATERAL subquery are not supported", .{});
                         break :lat try l.select(renamed);
-                    } else if (alias_cols.len > 0) try l.renameColumns(try l.select(s), alias_cols) else try l.select(s);
+                    } else if (alias_cols.len > 0) try l.renameColumns(s, alias_cols) else try l.select(s);
                     list = try ir.from.appendTerm(p, list, null, null, alias, sel, &ou);
                     // LATERAL: the subquery may name the items before it
                     // (the core runs it as a co-routine of their rows).
@@ -1023,12 +1023,14 @@ pub const Lowerer = struct {
     }
 
     /// `(s) AS x(a, b)`: (WITH xq_alias(a, b) AS (s) SELECT * FROM
-    /// xq_alias).
-    fn renameColumns(l: *Lowerer, s: *IrSelect, cols: []const tree.Name) Error!*IrSelect {
+    /// xq_alias). As in the text, the WITH comes before `s`: its
+    /// multi-row VALUES are UNION ALL (insert.multiValues()).
+    fn renameColumns(l: *Lowerer, s_tree: *const tree.Select, cols: []const tree.Name) Error!*IrSelect {
         const p = l.p;
+        p.has_with = true;
+        const s = try l.select(s_tree);
         var names: ?*ExprList = null;
         for (cols) |c| names = try ir.list.addIdTerm(p, names, try l.nameTok(c), false, SO.undef);
-        p.has_with = true;
         const cte = try ir.with.cte(p, Token.init("xq_alias"), names, s, .any);
         const w = try ir.with.add(p, null, cte);
         const src = try ir.from.appendTerm(p, null, Token.init("xq_alias"), null, .{}, null, null);

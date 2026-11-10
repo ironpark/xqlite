@@ -1,43 +1,44 @@
-# SQLite 호환: 차이점 및 제한 사항
+# SQLite 호환: 차이와 제한
 
-xqlite SQLite 방언과 C 언어로 작성된 표준 SQLite 3.54.1 간의 세부 차이점, 미지원 PRAGMA 및 제약 사항입니다.
+xqlite의 SQLite 방언이 SQLite 3.54.1과 다른 점입니다. 기준은 옵션 없이 빌드한 SQLite이고, 비교에는 `zig build tools`가 만드는 `zig-out/bin/sqlite3-planner`(3.54.1, `SQLITE_ENABLE_MATH_FUNCTIONS` 등 몇 가지만 켬)를 씁니다.
 
----
+## 같은 것
 
-## 1. 세부 동작 차이점
+- 파일 형식, 저널·WAL 형식. sqlite3가 만든 핫 저널과 WAL을 복구합니다.
+- 바이트코드(`EXPLAIN`)와 실행 계획(`EXPLAIN QUERY PLAN`). `tools/planner`의 케이스 4,170개가 sqlite3와 같고 알려진 차이는 없습니다([testing.md](../testing.md#known-failureslist)).
+- 결과와 오류 문구. sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)와 SQLite의 퍼즈 코퍼스(fuzzcheck)를 통과합니다.
+- C ABI: `sqlite3.h`의 함수 308개 중 297개([c-api.md](../c-api.md)). 스냅숏, `vfs_register`, 권한 검사기, 직렬화도 있습니다.
 
-| 항목 | 표준 SQLite 3.54.1 (C) | xqlite SQLite 방언 (Zig) | 설명 및 이유 |
-| --- | --- | --- | --- |
-| **정렬기 성능 최적화** | vdbesort 기반 레코드 전체 비교 | 64비트 정규화 정렬 키(Normalized Key) 선행 비교 후 레코드 비교 | 정렬 및 `ORDER BY` 시 첫 번째 열의 64비트 정규화 키를 먼저 비교하여 대부분의 레코드 디코딩 비용을 건너뜁니다. 결과 행 순서와 바이트코드는 네이티브와 100% 동일합니다. |
-| **인메모리 DB 임시 파일** | 힙 메모리 전용 구조 | 임시 파일 기반 저널링 사용 | `":memory:"` 지정 시 임시 파일 기반으로 구동되어 기본 `journal_mode`가 `memory`가 아닌 `delete`로 설정될 수 있습니다. |
-| **`ANALYZE` 통계 테이블** | `sqlite_stat1` 및 `sqlite_stat4` 수집 | `sqlite_stat1` 전용 수집 | 대부분의 임베디드 배포 환경과 동일하게 `SQLITE_ENABLE_STAT4`는 비활성화되어 있습니다. |
+## 다른 것
 
----
+| 항목 | SQLite | xqlite |
+| --- | --- | --- |
+| `:memory:` 데이터베이스의 저널 | `journal_mode`는 `memory`이고 바꿀 수 없음 | 임시 파일 저널. `journal_mode`는 `delete`이고 `persist`, `truncate`, `wal`로 바뀜 |
+| `PRAGMA journal_mode = MEMORY` | 저널을 메모리에 둠 | `not supported yet` 오류 |
+| `PRAGMA locking_mode = EXCLUSIVE` | 첫 읽기·쓰기 뒤 잠금을 놓지 않음 | `not supported yet` 오류 |
+| `PRAGMA encoding = 'UTF-16...'` | UTF-16 데이터베이스를 만듦 | `not supported yet` 오류. UTF-8만. UTF-16 데이터베이스 파일은 열지 못함 |
+| `PRAGMA mmap_size` | 메모리 맵 I/O의 크기 | 늘 0. 메모리 맵을 쓰지 않음 |
+| 수학 함수(`sin`, `pow`, `log` ...) | `SQLITE_ENABLE_MATH_FUNCTIONS` 빌드에 있음(배포판 셸은 대개 켬) | 없음 |
+| `PRAGMA compile_options` | 빌드의 옵션 | `ATOMIC_INTRINSICS=1`, `COMPILER=zig-...`, `SYSTEM_MALLOC`, `THREADSAFE=1` |
+| `EXPLAIN`의 트리거 서브프로그램 | 메인 프로그램 뒤에 나열 | 메인 프로그램만 |
+| Windows | win32 VFS | 없음(POSIX, WASI, 메모리 VFS) |
 
-## 2. 미지원 PRAGMA 및 옵션
+공유 캐시(`cache=shared`)는 받고 무시합니다. SQLite도 기본 빌드에서 권하지 않는 기능입니다.
 
-현재 실행 시 `not supported yet` 오류를 반환하거나 지원되지 않는 기능 목록입니다.
+## 없는 확장
 
-- **잠금 및 저널 모드**:
-  - `PRAGMA locking_mode = EXCLUSIVE`: 미지원 (기본 `NORMAL` 공유 잠금 사용).
-  - `PRAGMA journal_mode = MEMORY`: 미지원 (`DELETE`, `TRUNCATE`, `PERSIST`, `WAL`, `OFF` 지원).
-- **텍스트 인코딩**:
-  - `PRAGMA encoding = 'UTF-16'`: 미지원 (xqlite는 고성능 UTF-8 인코딩만 지원).
-- **고급 I/O 및 메모리 맵**:
-  - `PRAGMA mmap_size`: 항상 0을 돌려주며 mmap I/O는 사용하지 않습니다.
-  - WAL 스냅샷 API (`sqlite3_snapshot_*`): 미지원.
-- **가상 파일 시스템 및 캐시**:
-  - 커스텀 VFS 등록 (`sqlite3_vfs_register`): URI의 `vfs=` 파라미터는 `no such vfs` 오류를 반환합니다.
-  - 공유 캐시(Shared Cache): URI의 `cache=shared`는 검사 후 무시됩니다.
-  - 작성자 인가 콜백(Authorizer Callback): 미지원.
-- **운영체제 대상**:
-  - Windows VFS (`win32`): 현재 POSIX 및 WASI 대상 우선 지원.
+옵션 없는 SQLite 빌드에도 없는 것들입니다. 배포판의 sqlite3(예: macOS의 `/usr/bin/sqlite3`)는 대개 켜고 빌드하므로, 그런 셸과 비교하면 차이입니다.
 
----
+- 전문 검색 FTS3/4/5, R*Tree, Geopoly, session, `dbstat`, `sqlite_dbpage`
+- `median()`/`percentile()`(`SQLITE_ENABLE_PERCENTILE`), `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`의 `DELETE ... ORDER BY ... LIMIT`
+- preupdate 훅(`SQLITE_ENABLE_PREUPDATE_HOOK`, [c-api.md](../c-api.md#preupdate-훅))
 
-## 3. 권장 대응책
+다른 확장은 `sqlite3_load_extension()`으로 올릴 수 있습니다([load-extension.md](../load-extension.md)).
 
-1. **UTF-8 인코딩 사용**:
-   - 데이터베이스 생성 시 항상 표준인 `UTF-8` 인코딩을 사용하세요.
-2. **동시성 설정**:
-   - 높은 동시성 읽기/쓰기가 필요한 환경에서는 `PRAGMA journal_mode = WAL;`을 적용하여 쓰기 중에도 읽기 트래픽을 차단하지 않도록 설정하는 것이 좋습니다.
+## 내부 구현의 차이
+
+결과와 바이트코드는 같고, 실행 방식만 다릅니다.
+
+- 정렬기는 레코드마다 첫 정렬 열의 64비트 정규화 키를 함께 두고 먼저 비교합니다([internals.md](internals.md)).
+- `ANALYZE`는 `sqlite_stat1`만 만듭니다. SQLite 기본 빌드처럼 `SQLITE_ENABLE_STAT4`가 꺼져 있습니다.
+- 검증 방법은 [testing.md](testing.md)에 있습니다. SQLite의 TCL 테스트 스위트는 아직 돌리지 않습니다.

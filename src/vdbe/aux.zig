@@ -876,6 +876,7 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.n_var = @intCast(n_var);
     v.xq_param_types = @import("../sql/typing.zig").paramTypes(p, a, n_var) catch return oom(v);
     v.xq_exact_numeric = p.xq_exact_numeric;
+    v.xq_values_coroutine = p.xq_values_coroutine;
     v.xq_no_columns = p.xq_no_columns and p.explain == 0;
     v.xq_binary_rows = p.xq_binary_rows and p.explain == 0;
     v.xq_notices = copyNotices(a, p.xq_notices.items) catch return oom(v);

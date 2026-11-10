@@ -171,7 +171,7 @@ zig build check -Dfast=true     # capi-fast도 (약 90초)
 
 ### known-failures.list
 
-`tools/planner/known-failures.list`는 플래너가 아직 sqlite3와 다른 것으로 알려진 쿼리의 목록입니다. 한 줄에 `케이스파일 종류 쿼리` 하나이고, 쿼리는 케이스 파일에 쓴 그대로입니다. 지금은 `eqp_select.txt`의 `VALUES(1),(2),(3)`(sqlite3 3.54.1은 여러 행 VALUES를 co-routine으로 돌리고, xqlite는 아직 행마다 `ResultRow`를 냄) 하나의 `code`, `eqp` 두 줄뿐입니다.
+`tools/planner/known-failures.list`는 플래너가 아직 sqlite3와 다른 것으로 알려진 쿼리의 목록입니다. 한 줄에 `케이스파일 종류 쿼리` 하나이고, 쿼리는 케이스 파일에 쓴 그대로입니다. 지금은 비어 있습니다.
 
 - 항목 하나는 실패 하나와 정확히 맞아야 합니다(파일, 종류, 쿼리).
 - 목록에 있는 실패는 `KNOWN`으로 출력하고 실패로 세지 않습니다.
@@ -410,6 +410,7 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 - 상수가 파라미터와 다르게 해석되는 ORDER BY/GROUP BY가 있는 트리의 파라미터 비교. 정수 상수는 열 번호이기 때문입니다.
 - 뷰가 서브쿼리와 달리 실행 중 오류가 나는 식을 계산하지 않는 경우(sqlite3도 같음)
 - 방언의 타입이 값의 뜻을 정한 문장: PostgreSQL의 정확한 십진수를 계산하거나(`Parse.xq_exact_numeric`) 불리언과 만난 문자열 상수를 불리언으로 읽은 문장(`xq_pg_bool()` 호출: `true IN ('yes', 'no')`, `coalesce(NULL, 'on')`, `VALUES (true), ('no')`). 같은 트리의 SQLite 텍스트(다른 방언이 만든 뷰·CHECK)는 실수와 텍스트로, 텍스트로 바인딩한 파라미터는 텍스트로 계산합니다.
+- 두 쪽 중 한쪽만 여러 행 `VALUES`를 co-routine으로 돌렸고(`Parse.xq_values_coroutine`) 결과가 다른 경우. SQLite는 같은 행을 `WITH` 아래, 뷰, 파라미터가 있을 때는 `UNION ALL`로 돌리는데, 그때는 열의 affinity와 collation이 달라질 수 있습니다(sqlite3도 같음: NOCASE 열 `c`에 대한 `VALUES (1, 'abc') UNION SELECT 1, c`는 바로 돌리면 두 행을, 뷰로는 한 행을 남김). 결과가 같으면 그대로 비교합니다.
 
 
 ## 방언 차등 테스트

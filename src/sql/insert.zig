@@ -393,28 +393,105 @@ pub fn codeStore(p: *Parse, st: typing.Conv, reg: i32) void {
     expr_mod.releaseTempReg(p, tmp);
 }
 
-/// Port of sqlite3MultiValuesEnd(). VALUES lists are always compound
-/// selects here (the co-routine method is not ported), so nothing to do.
+/// Port of sqlite3MultiValuesEnd(): if `val` is a VALUES clause coded
+/// as a co-routine by multiValues(), finish the co-routine.
 pub fn multiValuesEnd(p: *Parse, val: ?*Select) void {
-    _ = .{ p, val };
+    const s = val orelse return;
+    if (s.src.?.len() == 0) return;
+    const item = s.src.?.at(0);
+    if (item.fg.is_subquery) {
+        const subq = item.u4.subq.?;
+        aux.endCoroutine(p.vdbe.?, subq.reg_return);
+        aux.jumpHere(p.vdbe.?, subq.addr_fill_sub - 1);
+    }
 }
 
-/// Port of sqlite3MultiValues(): add a row to a multi-row VALUES clause,
-/// with the "UNION ALL" method.
-pub fn multiValues(p: *Parse, left_arg: *Select, row: ?*ExprList) Oom!*Select {
+/// Port of exprListIsNoAffinity(): every expression of `row` is constant
+/// and has no affinity.
+fn exprListIsNoAffinity(p: *Parse, row: *ExprList) bool {
+    if (!expr_mod.listIsConstant(p, row, false)) return false;
+    for (row.slice()) |item| if (expr_mod.affinity(item.expr.?) != 0) return false;
+    return true;
+}
+
+/// Port of sqlite3MultiValues(): add a row to a multi-row VALUES clause.
+/// Each row is coded at once into a co-routine, and the result reads
+/// it: `SELECT * FROM (co-routine)`. The "UNION ALL" method (`left
+/// UNION ALL SELECT row`) is used instead under a WITH clause, while
+/// the schema is parsed, for a row that is not constant, for a first
+/// row with an affinity and in a special parse. xqlite: also when only
+/// checking the syntax (no code), and in a dialect with types, whose
+/// INSERT types each row for its column (typeParams()).
+pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Select {
     var left = left_arg;
-    var f: SF = .{ .Values = true, .MultiValue = true };
-    if (left.src.?.len() != 0) {
-        multiValuesEnd(p, left);
-        f = .{ .Values = true };
-    } else if (left.prior != null) {
-        f = f.only(left.sel_flags);
+    const row = row_arg.?;
+    // The flags first: a dialect with types never walks the rows.
+    if (typing.active(p.db) or p.syntax_only or p.has_with or p.db.init.busy or p.inSpecialParse() or
+        !expr_mod.listIsConstant(p, row, true) or
+        (left.src.?.len() == 0 and !exprListIsNoAffinity(p, left.e_list.?)))
+    {
+        var f: SF = .{ .Values = true, .MultiValue = true };
+        if (left.src.?.len() != 0) {
+            multiValuesEnd(p, left);
+            f = .{ .Values = true };
+        } else if (left.prior != null) {
+            f = f.only(left.sel_flags);
+        }
+        const s = try select_mod.selectNew(p, row, null, null, null, null, null, f, null);
+        left.sel_flags.MultiValue = false;
+        s.op = TK.ALL;
+        s.prior = left;
+        return s;
     }
-    const s = try select_mod.selectNew(p, row, null, null, null, null, null, f, null);
-    left.sel_flags.MultiValue = false;
-    s.op = TK.ALL;
-    s.prior = left;
-    left = s;
+
+    var item: *int.SrcItem = undefined;
+    if (left.src.?.len() == 0) {
+        // Start the co-routine and the Select that reads it.
+        const v = build.getVdbe(p) orelse return left;
+        const ret = try select_mod.selectNew(p, null, null, null, null, null, null, .{}, null);
+        // The schema gives the text encoding.
+        if (!p.db.m_db_flags.SchemaKnownOk) prepare.readSchema(p) catch {};
+        try ret.src.?.items.append(p.arena, .{});
+        ret.prior = left.prior;
+        ret.op = left.op;
+        if (ret.prior != null) ret.sel_flags.Values = true;
+        left.prior = null;
+        left.op = TK.SELECT;
+        item = ret.src.?.at(0);
+        item.fg.via_coroutine = true;
+        item.i_cursor = -1;
+        item.u1 = .{ .n_row = 2 };
+        try build.srcItemAttachSubquery(p, item, left);
+        const subq = item.u4.subq.?;
+        subq.addr_fill_sub = aux.currentAddr(v) + 1;
+        p.n_mem += 1;
+        subq.reg_return = p.n_mem;
+        _ = aux.addOp3(v, OP.InitCoroutine, subq.reg_return, 0, subq.addr_fill_sub);
+        var dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
+        // Two unused registers before the output, so that insert() can
+        // use them as they are (rowid and the row of a virtual table).
+        dest.i_sdst = p.n_mem + 3;
+        dest.n_sdst = @intCast(left.e_list.?.len());
+        p.n_mem += 2 + dest.n_sdst;
+        left.sel_flags.MultiValue = true;
+        p.xq_values_coroutine = true;
+        select_mod.select(p, left, &dest) catch {};
+        subq.reg_result = dest.i_sdst;
+        left = ret;
+    } else {
+        item = left.src.?.at(0);
+        item.u1.n_row += 1;
+    }
+
+    if (p.n_err == 0) {
+        const subq = item.u4.subq.?;
+        if (subq.select.e_list.?.len() != row.len()) {
+            select_mod.selectWrongNumTermsError(p, subq.select);
+        } else {
+            _ = ec.codeExprList(p, row, subq.reg_result, 0, 0);
+            _ = aux.addOp1(p.vdbe.?, OP.Yield, subq.reg_return);
+        }
+    }
     return left;
 }
 
@@ -512,27 +589,43 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     var use_temp_table = false;
     var dest: select_mod.SelectDest = undefined;
     if (sel) |s| {
-        p.n_mem += 1;
-        const reg_yield = p.n_mem;
-        const addr_top = aux.currentAddr(v) + 1;
-        _ = aux.addOp3(v, OP.InitCoroutine, reg_yield, 0, addr_top);
-        dest = select_mod.selectDestInit(SRT.Coroutine, reg_yield);
-        dest.i_sdst = if (b_id_list_in_order) reg_data else 0;
-        dest.n_sdst = @intCast(t.cols.len);
-        const saved_values = p.xq_insert_values;
-        if (s.sel_flags.Values) p.xq_insert_values = s;
-        const rc = select_mod.select(p, s, &dest);
-        p.xq_insert_values = saved_values;
-        reg_from_select = dest.i_sdst;
-        rc catch return;
-        if (p.n_err != 0) return;
-        if (typing.active(db)) {
-            var it: ?*Select = s;
-            while (it) |term| : (it = term.prior) typeParams(p, t, column, term.e_list.?) catch return build.oomFault(p);
+        if (s.src.?.len() == 1 and s.src.?.at(0).fg.via_coroutine and s.prior == null) {
+            // A multi-row VALUES clause already coded as a co-routine
+            // (multiValues()).
+            const item = s.src.?.at(0);
+            const subq = item.u4.subq.?;
+            dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
+            reg_from_select = subq.reg_result;
+            n_column = @intCast(subq.select.e_list.?.len());
+            _ = aux.explain(p, false, "SCAN {f}", .{util.srcItemName(item)});
+            if (b_id_list_in_order and n_column == t.cols.len) {
+                reg_data = reg_from_select;
+                reg_rowid = reg_data - 1;
+                reg_ins = reg_rowid - @intFromBool(t.isVirtual());
+            }
+        } else {
+            p.n_mem += 1;
+            const reg_yield = p.n_mem;
+            const addr_top = aux.currentAddr(v) + 1;
+            _ = aux.addOp3(v, OP.InitCoroutine, reg_yield, 0, addr_top);
+            dest = select_mod.selectDestInit(SRT.Coroutine, reg_yield);
+            dest.i_sdst = if (b_id_list_in_order) reg_data else 0;
+            dest.n_sdst = @intCast(t.cols.len);
+            const saved_values = p.xq_insert_values;
+            if (s.sel_flags.Values) p.xq_insert_values = s;
+            const rc = select_mod.select(p, s, &dest);
+            p.xq_insert_values = saved_values;
+            reg_from_select = dest.i_sdst;
+            rc catch return;
+            if (p.n_err != 0) return;
+            if (typing.active(db)) {
+                var it: ?*Select = s;
+                while (it) |term| : (it = term.prior) typeParams(p, t, column, term.e_list.?) catch return build.oomFault(p);
+            }
+            aux.endCoroutine(v, reg_yield);
+            aux.jumpHere(v, addr_top - 1);
+            n_column = @intCast(s.e_list.?.len());
         }
-        aux.endCoroutine(v, reg_yield);
-        aux.jumpHere(v, addr_top - 1);
-        n_column = @intCast(s.e_list.?.len());
 
         // Rows go through a temporary table if the SELECT reads the
         // table written (or triggers run).

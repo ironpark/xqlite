@@ -277,6 +277,14 @@ const Db = struct {
     /// exact numerics (calls a FUNC.XQ_EXACT function) or reads a string
     /// literal as the boolean it met: exactNumeric().
     exact: bool = false,
+    /// Whether that statement ran a multi-row VALUES as a co-routine
+    /// (Parse.xq_values_coroutine), SQLite's choice where the same rows
+    /// as UNION ALL (under a WITH, in a view, with a parameter) take
+    /// another affinity and collation, in sqlite3 too: `VALUES (1,
+    /// 'abc') UNION SELECT 1, c` of a NOCASE c keeps both rows, a view of
+    /// it one. A difference between the two methods is not compared
+    /// (Fuzz.valuesMethods()).
+    values: bool = false,
 
     fn open(gpa: Allocator, io: std.Io) !*Db {
         const d = try gpa.create(Db);
@@ -326,10 +334,12 @@ const Db = struct {
         var stmt: ?*vi.Vdbe = null;
         var rc = prepare.prepareV2(d.db, sql, &stmt, null);
         d.exact = false;
+        d.values = false;
         if (rc != RC.OK) return d.failure(a, rc, false);
         const v = stmt orelse return .{ .rows = &.{} };
         defer _ = api.finalize(v);
         d.exact = exactNumeric(v);
+        d.values = v.xq_values_coroutine;
         for (binds, 1..) |b, i| {
             if (i > api.bindParameterCount(v)) break;
             _ = switch (b) {
@@ -522,6 +532,9 @@ const Stats = struct {
     /// numerics and the other SQLite's doubles, or read a string literal
     /// as a boolean (Db.exactNumeric()).
     exact_skipped: u32 = 0,
+    /// Differences left out as the two sides ran a multi-row VALUES by
+    /// different methods (Fuzz.valuesMethods()).
+    values_skipped: u32 = 0,
     /// Rows whose expected values failed while the table took them.
     row_step_errors: u32 = 0,
 };
@@ -574,13 +587,18 @@ const Fuzz = struct {
         // Whether each was computed with exact numerics (Db.exactNumeric()).
         var want_exact: [dialects.len]bool = undefined;
         var want_view_exact: [dialects.len]bool = undefined;
-        for (dialects, &want, &want_view, &want_exact, &want_view_exact) |d, *w, *wv, *we, *wve| {
+        // And whether with a VALUES co-routine (Db.values).
+        var want_values: [dialects.len]bool = undefined;
+        var want_view_values: [dialects.len]bool = undefined;
+        for (dialects, &want, &want_view, &want_exact, &want_view_exact, &want_values, &want_view_values) |d, *w, *wv, *we, *wve, *wva, *wvva| {
             db.useTree(d);
             // The tree that is rendered: parameters as literals.
             w.* = try db.run(a, f.job(.literal, 0, &buf), &.{});
             we.* = db.exact;
+            wva.* = db.values;
             wv.* = try db.run(a, f.job(.wrapped, 0, &buf), &.{});
             wve.* = db.exact;
+            wvva.* = db.values;
             // The same with the parameters bound, where a constant means
             // what a parameter of its value means.
             if (binds.len == 0 or g.sort_keys) continue;
@@ -598,6 +616,7 @@ const Fuzz = struct {
             // A literal is typed where a parameter is not.
             if (typeRefused(bound) or typeRefused(w.*)) continue;
             if (!try bound.same(w.*, a, ordered)) {
+                if (f.valuesMethods(db.values, wva.*)) continue;
                 db.useText(d);
                 return f.mismatch("bound parameters, lowered in {s}", .{@tagName(d)}, try f.renderQuery(a, db), bound, w.*);
             }
@@ -613,7 +632,7 @@ const Fuzz = struct {
         for (dialects, 0..) |d, di| {
             // B: the text rendered in d, compiled in every dialect.
             const text = texts[di] orelse continue;
-            for (dialects, want, texts, want_exact) |e, w, text_e, w_exact| {
+            for (dialects, want, texts, want_exact, want_values) |e, w, text_e, w_exact, w_values| {
                 if (!f.readable(text, d, e, text_e)) continue;
                 db.useText(e);
                 const got = try db.run(a, text, &.{});
@@ -622,7 +641,9 @@ const Fuzz = struct {
                     f.stats.exact_skipped += 1;
                     continue;
                 }
-                if (!try got.same(w, a, ordered)) return f.mismatch("rendered in {s}, compiled in {s}", .{ @tagName(d), @tagName(e) }, text, got, w);
+                if (try got.same(w, a, ordered)) continue;
+                if (f.valuesMethods(db.values, w_values)) continue;
+                return f.mismatch("rendered in {s}, compiled in {s}", .{ @tagName(d), @tagName(e) }, text, got, w);
             }
             // C: a view created from the tree in d, read in every dialect.
             db.useTree(d);
@@ -632,7 +653,7 @@ const Fuzz = struct {
                 continue;
             }
             const sel = try std.fmt.allocPrint(a, "SELECT * FROM v{d}", .{di});
-            for (dialects, want_view, texts, want_view_exact) |e, w, text_e, w_exact| {
+            for (dialects, want_view, texts, want_view_exact, want_view_values) |e, w, text_e, w_exact, w_values| {
                 if (!f.readable(text, d, e, text_e)) continue;
                 main_mod.setDialect(db.db, e);
                 const got = try db.run(a, sel, &.{});
@@ -644,6 +665,8 @@ const Fuzz = struct {
                     f.stats.exact_skipped += 1;
                     continue;
                 }
+                // A view's multi-row VALUES are UNION ALL (Db.values).
+                if (f.valuesMethods(db.values, w_values)) continue;
                 // A view is not always run as the same query in a
                 // subquery is (sqlite3 too): an expression that fails
                 // (OFFSET X'', integer overflow) may not be computed, or
@@ -664,6 +687,15 @@ const Fuzz = struct {
                 return f.mismatch("view created in {s}, read in {s}", .{ @tagName(d), @tagName(e) }, text, got, w);
             }
         }
+    }
+
+    /// Whether a difference is left out as the two sides ran a
+    /// multi-row VALUES by SQLite's two methods, a co-routine and UNION
+    /// ALL (Db.values), whose rows may compare otherwise.
+    fn valuesMethods(f: *Fuzz, got: bool, want: bool) bool {
+        if (got == want) return false;
+        f.stats.values_skipped += 1;
+        return true;
     }
 
     /// Whether `o` is the error of a dialect that types operators and
@@ -1044,8 +1076,8 @@ pub fn roundtrip(gpa: Allocator, io: std.Io, seed: u64, events_max: u32) !void {
     }
     const s = f.stats;
     if (!@import("builtin").is_test) std.debug.print(
-        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors, {d} row errors, {d} exact numerics or typed literals\n",
-        .{ s.queries, s.query_errors, s.params_checked, s.tables, s.table_errors, s.rows_checked, s.check_failures, s.cross_skipped, s.view_step_errors, s.row_step_errors, s.exact_skipped },
+        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors, {d} row errors, {d} exact numerics or typed literals, {d} VALUES co-routines\n",
+        .{ s.queries, s.query_errors, s.params_checked, s.tables, s.table_errors, s.rows_checked, s.check_failures, s.cross_skipped, s.view_step_errors, s.row_step_errors, s.exact_skipped, s.values_skipped },
     );
 }
 

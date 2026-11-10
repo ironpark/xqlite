@@ -1967,6 +1967,12 @@ pub const Parse = struct {
     /// statement computes numbers as the dialect types them, not as
     /// SQLite does. Vdbe.xq_exact_numeric at makeReady(); for tests.
     xq_exact_numeric: bool = false,
+    /// xqlite: a multi-row VALUES of the statement is a co-routine
+    /// (insert.multiValues()). Its columns take the first row's affinity
+    /// and their collation is not the rows': the same rows as UNION ALL
+    /// (the method under WITH and in a view) may compare otherwise, in
+    /// sqlite3 too. Vdbe.xq_values_coroutine at makeReady(); for tests.
+    xq_values_coroutine: bool = false,
     /// xqlite: the statement is a query of no result columns (PostgreSQL's
     /// `SELECT;`), lowered with one: finishCoding() hides it (its rows
     /// have none).

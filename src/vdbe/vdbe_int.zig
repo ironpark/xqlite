@@ -622,6 +622,8 @@ pub const Vdbe = struct {
     xq_command_sql: []const u8 = "",
     /// Parse.xq_exact_numeric of the statement.
     xq_exact_numeric: bool = false,
+    /// Parse.xq_values_coroutine of the statement.
+    xq_values_coroutine: bool = false,
     /// A query of no result columns (Parse.xq_no_columns): its rows are
     /// its result, though it has no column.
     xq_no_columns: bool = false,

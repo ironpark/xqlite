@@ -697,18 +697,18 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     if (!is_view) {
         const n_idx = openTableAndIndices(p, t, OP.OpenWrite, 0, -1, null, &i_data_cur, &i_idx_cur);
         reg_idx = try p.arena.alloc(i32, n_idx + 1);
+        // n_idx, not the index list: a virtual table may have indexes
+        // (made by the module's declaration) but opens none.
         var idx = t.index;
-        var i: usize = 0;
-        while (idx) |ix| : ({
+        for (reg_idx[0..n_idx]) |*r| {
+            const ix = idx.?;
             idx = ix.next;
-            i += 1;
-        }) {
             p.n_mem += 1;
-            reg_idx[i] = p.n_mem;
+            r.* = p.n_mem;
             p.n_mem += ix.n_column;
         }
         p.n_mem += 1;
-        reg_idx[i] = p.n_mem;
+        reg_idx[n_idx] = p.n_mem;
     }
     if (upsert) |up| {
         if (t.e_tab_type == .vtab) {

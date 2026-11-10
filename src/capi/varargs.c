@@ -42,6 +42,7 @@ void xq_str_vappendf(sqlite3_str*, const char*, const XqArg*, int);
 void xq_log(int, const char*, const XqArg*, int);
 int xq_log_enabled(void);
 int xq_config(int, sqlite3_int64, sqlite3_int64, void*, void*);
+void xq_mutex_config(int op, sqlite3_mutex_methods*); /* with the mutexes */
 int xq_db_config(sqlite3*, int, sqlite3_int64, sqlite3_int64, void*, int*);
 int xq_vtab_config(sqlite3*, int, int);
 
@@ -286,6 +287,7 @@ int sqlite3_config(int op, ...){
   }
   va_end(ap);
   rc = xq_config(op, a, b, p, q);
+  if( rc==SQLITE_OK && p ) xq_mutex_config(op, p);
   return rc;
 }
 
@@ -406,15 +408,16 @@ int sqlite3_test_control(int op, ...){
 /* -------------------------------------------------------------- mutex */
 
 /*
-** sqlite3_mutex_*(): recursive and fast mutexes on POSIX threads, and
-** the static ones (SQLITE_MUTEX_STATIC_*), for applications and
-** extensions. The library itself does not lock connections
-** (multi-thread mode, sqlite3_threadsafe() == 2).
+** The default mutex methods: recursive and fast mutexes on POSIX
+** threads, and the static ones (SQLITE_MUTEX_STATIC_*). As in mutex.c,
+** sqlite3_mutex_*() call the methods in use, which an application may
+** replace (SQLITE_CONFIG_MUTEX) before sqlite3_initialize(), wrapping
+** the defaults it gets from SQLITE_CONFIG_GETMUTEX.
 */
 #ifdef XQ_NO_THREADS
 struct sqlite3_mutex { int id; int nRef; };
 static sqlite3_mutex aStatic[12];
-sqlite3_mutex *sqlite3_mutex_alloc(int id){
+static sqlite3_mutex *xqMutexAlloc(int id){
   sqlite3_mutex *p;
   if( id==SQLITE_MUTEX_FAST || id==SQLITE_MUTEX_RECURSIVE ){
     p = malloc(sizeof(*p));
@@ -424,12 +427,12 @@ sqlite3_mutex *sqlite3_mutex_alloc(int id){
   if( id<2 || id-2>=12 ) return 0;
   return &aStatic[id-2];
 }
-void sqlite3_mutex_free(sqlite3_mutex *p){ if( p && p->id<=1 ) free(p); }
-void sqlite3_mutex_enter(sqlite3_mutex *p){ if( p ) p->nRef++; }
-int sqlite3_mutex_try(sqlite3_mutex *p){ if( p ) p->nRef++; return SQLITE_OK; }
-void sqlite3_mutex_leave(sqlite3_mutex *p){ if( p ) p->nRef--; }
-int sqlite3_mutex_held(sqlite3_mutex *p){ return p==0 || p->nRef>0; }
-int sqlite3_mutex_notheld(sqlite3_mutex *p){ return p==0 || p->nRef==0; }
+static void xqMutexFree(sqlite3_mutex *p){ if( p->id<=1 ) free(p); }
+static void xqMutexEnter(sqlite3_mutex *p){ p->nRef++; }
+static int xqMutexTry(sqlite3_mutex *p){ p->nRef++; return SQLITE_OK; }
+static void xqMutexLeave(sqlite3_mutex *p){ p->nRef--; }
+static int xqMutexHeld(sqlite3_mutex *p){ return p->nRef>0; }
+static int xqMutexNotheld(sqlite3_mutex *p){ return p->nRef==0; }
 #else
 struct sqlite3_mutex {
   pthread_mutex_t m;
@@ -457,7 +460,7 @@ static void initStatic(void){
   for(i=0; i<N_STATIC_MUTEX; i++) initMutex(&aStatic[i], i+2);
 }
 
-sqlite3_mutex *sqlite3_mutex_alloc(int id){
+static sqlite3_mutex *xqMutexAlloc(int id){
   sqlite3_mutex *p;
   if( id==SQLITE_MUTEX_FAST || id==SQLITE_MUTEX_RECURSIVE ){
     p = malloc(sizeof(*p));
@@ -469,38 +472,94 @@ sqlite3_mutex *sqlite3_mutex_alloc(int id){
   return &aStatic[id-2];
 }
 
-void sqlite3_mutex_free(sqlite3_mutex *p){
-  if( p==0 || p->id>1 ) return;
+static void xqMutexFree(sqlite3_mutex *p){
+  if( p->id>1 ) return;
   pthread_mutex_destroy(&p->m);
   free(p);
 }
 
-void sqlite3_mutex_enter(sqlite3_mutex *p){
-  if( p==0 ) return;
+static void xqMutexEnter(sqlite3_mutex *p){
   pthread_mutex_lock(&p->m);
   p->owner = pthread_self();
   p->nRef++;
 }
 
-int sqlite3_mutex_try(sqlite3_mutex *p){
-  if( p==0 ) return SQLITE_OK;
+static int xqMutexTry(sqlite3_mutex *p){
   if( pthread_mutex_trylock(&p->m)!=0 ) return SQLITE_BUSY;
   p->owner = pthread_self();
   p->nRef++;
   return SQLITE_OK;
 }
 
-void sqlite3_mutex_leave(sqlite3_mutex *p){
-  if( p==0 ) return;
+static void xqMutexLeave(sqlite3_mutex *p){
   p->nRef--;
   pthread_mutex_unlock(&p->m);
 }
 
-int sqlite3_mutex_held(sqlite3_mutex *p){
-  return p==0 || (p->nRef>0 && pthread_equal(p->owner, pthread_self()));
+static int xqMutexHeld(sqlite3_mutex *p){
+  return p->nRef>0 && pthread_equal(p->owner, pthread_self());
 }
 
-int sqlite3_mutex_notheld(sqlite3_mutex *p){
-  return p==0 || p->nRef==0 || !pthread_equal(p->owner, pthread_self());
+static int xqMutexNotheld(sqlite3_mutex *p){
+  return p->nRef==0 || !pthread_equal(p->owner, pthread_self());
 }
 #endif /* XQ_NO_THREADS */
+
+static int xqMutexInit(void){ return SQLITE_OK; }
+static int xqMutexEnd(void){ return SQLITE_OK; }
+
+#define XQ_DEFAULT_MUTEX_METHODS { \
+  xqMutexInit, xqMutexEnd, xqMutexAlloc, xqMutexFree, xqMutexEnter, \
+  xqMutexTry, xqMutexLeave, xqMutexHeld, xqMutexNotheld \
+}
+static const sqlite3_mutex_methods defaultMethods = XQ_DEFAULT_MUTEX_METHODS;
+static sqlite3_mutex_methods mutexMethods = XQ_DEFAULT_MUTEX_METHODS;
+static int mutexIsInit = 0;
+
+/* SQLITE_CONFIG_MUTEX and SQLITE_CONFIG_GETMUTEX, once xq_config() has
+** allowed them (before sqlite3_initialize()). */
+void xq_mutex_config(int op, sqlite3_mutex_methods *p){
+  if( op==SQLITE_CONFIG_MUTEX ) mutexMethods = *p;
+  if( op==SQLITE_CONFIG_GETMUTEX ) *p = mutexMethods;
+}
+
+/* sqlite3MutexInit() and sqlite3MutexEnd(), for sqlite3_initialize()
+** and sqlite3_shutdown(). As in mutex.c, methods without xMutexAlloc
+** mean the defaults. */
+int xq_mutex_init(void){
+  int rc = SQLITE_OK;
+  if( !mutexIsInit ){
+    if( mutexMethods.xMutexAlloc==0 ) mutexMethods = defaultMethods;
+    rc = mutexMethods.xMutexInit();
+    mutexIsInit = rc==SQLITE_OK;
+  }
+  return rc;
+}
+void xq_mutex_end(void){
+  if( mutexIsInit ) mutexMethods.xMutexEnd();
+  mutexIsInit = 0;
+}
+
+sqlite3_mutex *sqlite3_mutex_alloc(int id){
+  if( id<=SQLITE_MUTEX_RECURSIVE && sqlite3_initialize() ) return 0;
+  if( id>SQLITE_MUTEX_RECURSIVE && xq_mutex_init() ) return 0;
+  return mutexMethods.xMutexAlloc(id);
+}
+void sqlite3_mutex_free(sqlite3_mutex *p){
+  if( p ) mutexMethods.xMutexFree(p);
+}
+void sqlite3_mutex_enter(sqlite3_mutex *p){
+  if( p ) mutexMethods.xMutexEnter(p);
+}
+int sqlite3_mutex_try(sqlite3_mutex *p){
+  return p ? mutexMethods.xMutexTry(p) : SQLITE_OK;
+}
+void sqlite3_mutex_leave(sqlite3_mutex *p){
+  if( p ) mutexMethods.xMutexLeave(p);
+}
+int sqlite3_mutex_held(sqlite3_mutex *p){
+  return p==0 || mutexMethods.xMutexHeld(p);
+}
+int sqlite3_mutex_notheld(sqlite3_mutex *p){
+  return p==0 || mutexMethods.xMutexNotheld(p);
+}

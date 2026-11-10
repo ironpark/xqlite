@@ -780,10 +780,9 @@ const char *xqtclTestInit(Tcl_Interp *interp){
     }
   }
   /* The OOM-injecting malloc wrapper of test_malloc.c, which tester.tcl
-  ** installs for every file, only with XQTCL_FAULTSIM=1. It wraps the
-  ** methods of SQLITE_CONFIG_GETMALLOC; libxqlite3's call sqlite3_malloc()
-  ** and so the wrapper again, without end (a stack overflow on the first
-  ** allocation). Off, the fault-injection tests fail on both builds. */
+  ** installs for every file, only with XQTCL_FAULTSIM=1: the baseline
+  ** leaves the fault-injection tests out (they fail on both builds), as
+  ** they make many files much slower. */
   {
     const char *z = getenv("XQTCL_FAULTSIM");
     if( z==0 || strcmp(z, "1")!=0 ){

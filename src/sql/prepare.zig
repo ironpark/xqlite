@@ -477,6 +477,19 @@ fn lockAndPrepare(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, 
 /// reprepares it. `stmt` is null for blank input; `tail` (if given)
 /// receives the rest of `sql`.
 pub fn prepareV3(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
+    return prepareFlags(db, sql, v3Flags(prep_flags), stmt, tail);
+}
+
+/// The flags stored for sqlite3_prepare_v2() and _v3(): PREPARE_SAVESQL
+/// and those of `prep_flags` the caller may give.
+fn v3Flags(prep_flags: u8) u8 {
+    return aux.PREPARE_SAVESQL | (prep_flags & aux.PREPARE_MASK);
+}
+
+/// prepareV3() with the flags as stored in the statement: without
+/// PREPARE_SAVESQL, the legacy sqlite3_prepare(), whose statement is not
+/// compiled again on a schema change but fails.
+pub fn prepareFlags(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
     stmt.* = null;
     // The parser needs a NUL-terminated copy.
     if (sql.len > @as(usize, @intCast(db.limit(.sql_length)))) {
@@ -489,7 +502,7 @@ pub fn prepareV3(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe, t
     };
     defer db.gpa.free(copy);
     var t: [:0]const u8 = "";
-    const rc = prepareV3Z(db, copy, prep_flags, stmt, &t);
+    const rc = prepareFlagsZ(db, copy, prep_flags, stmt, &t);
     if (tail) |out| out.* = sql[sql.len - t.len ..];
     return rc;
 }
@@ -497,8 +510,13 @@ pub fn prepareV3(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe, t
 /// prepareV3() for NUL-terminated text, which is parsed in place (as
 /// sqlite3_prepare_v3() with nByte < 0).
 pub fn prepareV3Z(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[:0]const u8) i32 {
+    return prepareFlagsZ(db, sql, v3Flags(prep_flags), stmt, tail);
+}
+
+/// prepareFlags() for NUL-terminated text.
+pub fn prepareFlagsZ(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[:0]const u8) i32 {
     var t: [:0]const u8 = "";
-    const rc = lockAndPrepare(db, sql, aux.PREPARE_SAVESQL | (prep_flags & aux.PREPARE_MASK), null, stmt, &t);
+    const rc = lockAndPrepare(db, sql, prep_flags, null, stmt, &t);
     if (tail) |out| out.* = t;
     return rc;
 }

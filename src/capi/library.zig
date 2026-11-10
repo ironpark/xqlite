@@ -79,24 +79,11 @@ pub export fn sqlite3_compileoption_used(z_opt: ?[*:0]const u8) callconv(.c) c_i
 // ======================================================= init and config
 
 pub export fn sqlite3_initialize() callconv(.c) c_int {
-    c.ensureInit();
-    if (c.state.mem_methods) |m| if (m.xInit) |f| {
-        if (!c.state.mem_init) {
-            c.state.mem_init = true;
-            return f(m.pAppData);
-        }
-    };
-    return RC.OK;
+    return c.ensureInit() orelse RC.OK;
 }
 
 pub export fn sqlite3_shutdown() callconv(.c) c_int {
-    // The default VFS and the registries stay; connections must all be
-    // closed, as in SQLite.
-    @atomicStore(bool, &c.state.initialized, false, .release);
-    if (c.state.mem_methods) |m| if (m.xShutdown) |f| {
-        if (c.state.mem_init) f(m.pAppData);
-        c.state.mem_init = false;
-    };
+    c.shutdown();
     return RC.OK;
 }
 
@@ -148,18 +135,34 @@ fn cmFree(_: *anyopaque, memory: []u8, _: std.mem.Alignment, _: usize) void {
     c.state.mem_methods.?.xFree.?(memory.ptr);
 }
 
-// The sqlite3_mem_methods of SQLITE_CONFIG_GETMALLOC: the library's.
+// The sqlite3_mem_methods of SQLITE_CONFIG_GETMALLOC before any
+// SQLITE_CONFIG_MALLOC: the C library's malloc, the allocator under the
+// library's size header by default (malloc.zig), so the library's blocks
+// stay valid when an application installs methods wrapping these. Not
+// sqlite3_malloc(): such methods would call themselves. (Unlike SQLite,
+// they do not take the pointers sqlite3_malloc() returns.)
 
 fn gmMalloc(n: c_int) callconv(.c) ?*anyopaque {
-    return sqlite3_malloc(n);
+    return if (n > 0) std.c.malloc(@intCast(n)) else null;
+}
+
+fn gmFree(p: ?*anyopaque) callconv(.c) void {
+    std.c.free(p);
 }
 
 fn gmRealloc(p: ?*anyopaque, n: c_int) callconv(.c) ?*anyopaque {
-    return sqlite3_realloc(p, n);
+    return if (n > 0) std.c.realloc(p, @intCast(n)) else null;
 }
 
 fn gmSize(p: ?*anyopaque) callconv(.c) c_int {
-    return @intCast(sqlite3_msize(p));
+    const q = p orelse return 0;
+    const size = if (@TypeOf(std.c.malloc_size) != void)
+        std.c.malloc_size(q)
+    else if (@TypeOf(std.c.malloc_usable_size) != void)
+        std.c.malloc_usable_size(q)
+    else
+        return 0;
+    return @intCast(@min(size, std.math.maxInt(c_int)));
 }
 
 fn gmRoundup(n: c_int) callconv(.c) c_int {
@@ -209,7 +212,7 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
             const m: *MemMethods = @ptrCast(@alignCast(p orelse return RC.MISUSE));
             m.* = c.state.mem_methods orelse .{
                 .xMalloc = gmMalloc,
-                .xFree = sqlite3_free,
+                .xFree = gmFree,
                 .xRealloc = gmRealloc,
                 .xSize = gmSize,
                 .xRoundup = gmRoundup,
@@ -240,9 +243,9 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
             if (p) |x| @as(*c_int, @ptrCast(@alignCast(x))).* = 0;
             return RC.OK;
         },
-        // GETMUTEX, GETPCACHE, GETPCACHE2: the engine has neither
-        // pluggable mutexes nor a pluggable page cache to describe.
-        11, 15, 19 => return RC.ERROR,
+        // GETPCACHE, GETPCACHE2: the engine has no pluggable page cache
+        // to describe.
+        15, 19 => return RC.ERROR,
         // MEMSTATUS: whether sqlite3_initialize() turns on the status
         // counters (on by default, as in SQLite).
         9 => {
@@ -268,10 +271,13 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
             cfg.default_size = sz;
             return RC.OK;
         },
-        // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, MUTEX, PCACHE,
+        // MUTEX and GETMUTEX: the methods are kept by the C shim
+        // (capi/varargs.c); none without threads, as in SQLite.
+        10, 11 => return if (c.have_threads) RC.OK else RC.ERROR,
+        // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, PCACHE,
         // PCACHE2, COVERING_INDEX_SCAN, SQLLOG, WIN32_HEAPSIZE, PMASZ,
         // STMTJRNL_SPILL, SMALL_MALLOC, SORTERREF_SIZE.
-        6, 7, 8, 10, 14, 18, 20, 21, 23, 25, 26, 27, 28 => return RC.OK,
+        6, 7, 8, 14, 18, 20, 21, 23, 25, 26, 27, 28 => return RC.OK,
         else => return RC.ERROR,
     }
 }
@@ -279,23 +285,23 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
 // ================================================================ memory
 
 pub export fn sqlite3_malloc(n: c_int) callconv(.c) ?*anyopaque {
-    c.ensureInit();
+    if (c.ensureInit() != null) return null;
     if (n <= 0) return null;
     return c.malloc.malloc(@intCast(n));
 }
 
 pub export fn sqlite3_malloc64(n: u64) callconv(.c) ?*anyopaque {
-    c.ensureInit();
+    if (c.ensureInit() != null) return null;
     return c.malloc.malloc(n);
 }
 
 pub export fn sqlite3_realloc(p: ?*anyopaque, n: c_int) callconv(.c) ?*anyopaque {
-    c.ensureInit();
+    if (c.ensureInit() != null) return null;
     return c.malloc.realloc(p, @intCast(@max(n, 0)));
 }
 
 pub export fn sqlite3_realloc64(p: ?*anyopaque, n: u64) callconv(.c) ?*anyopaque {
-    c.ensureInit();
+    if (c.ensureInit() != null) return null;
     return c.malloc.realloc(p, n);
 }
 
@@ -390,7 +396,7 @@ pub export fn sqlite3_randomness(n: c_int, p: ?*anyopaque) callconv(.c) void {
 }
 
 pub export fn sqlite3_sleep(ms: c_int) callconv(.c) c_int {
-    c.ensureInit();
+    if (c.ensureInit() != null) return 0;
     const us: u32 = @intCast(@as(i64, @max(ms, 0)) * 1000);
     return @intCast(@import("vfs.zig").defaultEngine().sleep(us) / 1000);
 }

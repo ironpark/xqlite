@@ -149,7 +149,7 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 | 확장 | `load_extension`, `enable_load_extension`, `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION`, SQL 함수 `load_extension()`, `carray_bind(_v2)`와 테이블 값 함수 `carray()` ([확장](#확장)) |
 | 기타 | `mutex_alloc/free/enter/try/leave/held/notheld`(POSIX 스레드), `db_mutex`([스레드](#스레드)), `test_control`([아래](#문장-정보)), `auto_extension`(`pApi`로 `sqlite3_api_routines` 표를 줌), `cancel_auto_extension`, `reset_auto_extension`, `enable_shared_cache`(무시), `db_status(64)`([메모리 통계](#메모리-통계)) |
 
-`sqlite3_config()`는 `SINGLETHREAD`, `MULTITHREAD`, `SERIALIZED`([스레드](#스레드)), `MALLOC`(C 메모리 함수를 엔진 할당자로), `GETMALLOC`, `LOOKASIDE`, `LOG`, `URI`, `PCACHE_HDRSZ`, `MEMSTATUS`, `MEMDB_MAXSIZE`, `MMAP_SIZE`(`PRAGMA mmap_size`의 기본값과 최대)를 처리하고, 다른 성능 조정용 옵션(`PAGECACHE` 등)은 받고 무시합니다. `GETMUTEX`, `GETPCACHE(2)`는 `SQLITE_ERROR`입니다. SQLite처럼 `sqlite3_initialize()`(첫 `open`이 자동으로 부름) 뒤에는 `LOG`, `PCACHE_HDRSZ` 말고는 `SQLITE_MISUSE`입니다. `sqlite3_db_config()`는 `MAINDBNAME`, `LOOKASIDE`, 1002~1022의 플래그 전부, `FP_DIGITS`를 처리합니다.
+`sqlite3_config()`는 `SINGLETHREAD`, `MULTITHREAD`, `SERIALIZED`([스레드](#스레드)), `MALLOC`(C 메모리 함수를 엔진 할당자로), `GETMALLOC`(설정 전에는 C 라이브러리의 `malloc`/`realloc`/`free`, 라이브러리의 기본 할당자와 같음), `MUTEX`, `GETMUTEX`, `LOOKASIDE`, `LOG`, `URI`, `PCACHE_HDRSZ`, `MEMSTATUS`, `MEMDB_MAXSIZE`, `MMAP_SIZE`(`PRAGMA mmap_size`의 기본값과 최대)를 처리하고, 다른 성능 조정용 옵션(`PAGECACHE` 등)은 받고 무시합니다. `GETPCACHE(2)`는 `SQLITE_ERROR`입니다. SQLite처럼 `sqlite3_initialize()`(첫 `open`이 자동으로 부름) 뒤에는 `LOG`, `PCACHE_HDRSZ` 말고는 `SQLITE_MISUSE`입니다. `sqlite3_db_config()`는 `MAINDBNAME`, `LOOKASIDE`, 1002~1022의 플래그 전부, `FP_DIGITS`를 처리합니다.
 
 ### 지원하지 않는 것
 
@@ -206,7 +206,6 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - **스레드**: 기본이 멀티스레드 모드(`sqlite3_threadsafe()` = 2)입니다. 직렬화 모드는 요청할 때만 씁니다. [스레드](#스레드)를 보세요.
 - **스캔 상태**: `SQLITE_DBCONFIG_STMT_SCANSTATUS`가 기본으로 꺼져 있습니다(SQLite는 `SQLITE_ENABLE_STMT_SCANSTATUS`로 빌드하면 켜짐). [문장 정보](#문장-정보)를 보세요.
 - **`sqlite3_compileoption_used()`**는 `ENABLE_COLUMN_METADATA`, `ENABLE_NORMALIZE`, `ENABLE_STMT_SCANSTATUS`, `ENABLE_MATH_FUNCTIONS`를 보고하지 않습니다(목록은 기본 빌드의 것). 함수 자체는 그 옵션으로 빌드한 SQLite처럼 동작합니다(수학 함수는 SQLite 방언의 내장 함수).
-- **`sqlite3_prepare()`(v1)**: v2와 같습니다. 문장의 SQL을 늘 보관하므로 스키마가 바뀌면 다시 컴파일하고, 오류 코드는 `step()`에서 바로 돌려줍니다.
 - **바인딩 값은 늘 복사합니다**: `SQLITE_STATIC`도 복사하고, 사용자 소멸자는 복사한 직후 부릅니다(SQLite도 허용하는 시점). 결과값(`result_text` 등)은 `SQLITE_STATIC`과 `sqlite3_free`는 복사 없이, 다른 소멸자는 복사 후 바로 부릅니다.
 - **BLOB 증분 I/O**는 공유 캐시가 없으므로 `OP_TableLock` 자리가 `OP_Noop`입니다(`SQLITE_OMIT_SHARED_CACHE` 빌드와 같음). 그 밖에는 SQLite와 같습니다.
 - **트레이스의 프로파일 시간**은 SQLite처럼 VFS 시계(밀리초)로 재므로 나노초 값의 아래 여섯 자리는 0입니다.
@@ -237,7 +236,7 @@ C ABI는 `SQLITE_THREADSAFE=2`로 빌드한 SQLite와 같습니다: 뮤텍스가
 - **직렬화 모드**: `sqlite3_open_v2()`에 `SQLITE_OPEN_FULLMUTEX`를 주거나 `sqlite3_initialize()` 전에 `sqlite3_config(SQLITE_CONFIG_SERIALIZED)`를 부르면 연결이 재귀 뮤텍스를 갖고(`sqlite3_db_mutex()`), SQLite가 `db->mutex`를 잡는 API(prepare, step, reset, finalize, bind, column, errmsg, exec, 훅 등록, 함수 등록, blob, backup …)가 호출 내내 그 뮤텍스를 잡습니다. 그래서 한 연결을 여러 스레드가 함께 써도 됩니다. `SQLITE_OPEN_NOMUTEX`나 `SQLITE_CONFIG_MULTITHREAD`/`SINGLETHREAD`는 뮤텍스 없이 엽니다.
 - 기본을 직렬화로 하지 않은 이유: 뮤텍스는 호출마다 잠금·해제를 더하므로 `step`/`column_*` 반복이 약 2배 느려집니다(macOS aarch64에서 100만 행 × 열 호출 4개가 61ms → 124ms, SQLite 자체도 55ms → 107ms로 같은 비율). 멀티스레드 모드의 연결은 뮤텍스 확인 한 번(null 검사)만 합니다.
 - `sqlite3_interrupt()`는 어느 모드에서나 다른 스레드에서 불러도 됩니다(원자 변수).
-- `sqlite3_mutex_*()`는 응용과 확장을 위해 POSIX 스레드로 구현합니다. wasm32에서는 스레드가 없으므로 `sqlite3_threadsafe()`는 0이고 직렬화 모드는 `SQLITE_ERROR`입니다.
+- `sqlite3_mutex_*()`는 응용과 확장을 위해 POSIX 스레드로 구현합니다. SQLite처럼 설정된 메서드를 거치므로 `sqlite3_initialize()` 전에 `SQLITE_CONFIG_MUTEX`로 바꾸거나 `GETMUTEX`로 받은 기본 메서드를 감쌀 수 있고, 메서드의 `xMutexInit`이 실패하면 `sqlite3_initialize()`(그리고 그것을 부르는 `open`, `sqlite3_malloc()` 등)이 그 오류로 실패합니다. 연결의 뮤텍스도 같은 메서드로 만듭니다. wasm32에서는 스레드가 없으므로 `sqlite3_threadsafe()`는 0이고 직렬화 모드는 `SQLITE_ERROR`입니다.
 
 ## 테스트
 

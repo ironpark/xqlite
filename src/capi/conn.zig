@@ -29,7 +29,7 @@ const OPEN_EXRESCODE = 0x02000000;
 fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_vfs: ?[*:0]const u8) c_int {
     const out = pp_db orelse return RC.MISUSE;
     out.* = null;
-    c.ensureInit();
+    if (c.ensureInit()) |rc| return rc;
     // Only READONLY, READWRITE and READWRITE|CREATE are allowed.
     if ((@as(u32, 1) << @intCast(flags & 7)) & 0x46 == 0) return RC.MISUSE;
     const name = c.span(z_filename) orelse "";
@@ -931,7 +931,7 @@ pub export fn sqlite3_unlock_notify(db: ?*Handle, x_notify: ?*const fn (?[*]?*an
 
 pub export fn sqlite3_auto_extension(x_entry: ?*const anyopaque) callconv(.c) c_int {
     const f = x_entry orelse return RC.MISUSE;
-    c.ensureInit();
+    if (c.ensureInit()) |rc| return rc;
     c.state.lock.lock();
     defer c.state.lock.unlock();
     for (c.state.auto_ext.items) |x| if (x == f) return RC.OK;

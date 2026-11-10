@@ -83,6 +83,6 @@ SQLite 쪽 아말감은 기본 빌드에 `libxqlite3`가 가진 선택 기능(`S
 
 - **SQLITE_TEST 카운터**: `sqlite_search_count`, `sqlite_sort_count`, `sqlite_like_count`, `sqlite3_xferopt_count`, `sqlite_open_file_count` 등은 SQLite가 SQLITE_TEST로 빌드될 때 코어가 셉니다. 두 라이브러리 모두 세지 않으므로 늘 0입니다(`where*.test`, `count.test`, `insert4.test`의 많은 테스트).
 - **기본 페이지 크기**: SQLite의 testfixture는 `SQLITE_DEFAULT_PAGE_SIZE=1024`로 빌드되고, 파일 크기나 페이지 수를 보는 테스트가 그것을 전제합니다. 하네스는 두 쪽 모두 4096입니다.
-- **OOM·I/O 오류 주입**: tester.tcl은 파일마다 `test_malloc.c`의 malloc 래퍼(`SQLITE_CONFIG_GETMALLOC`으로 받은 메서드를 감쌈)를 설치합니다. `libxqlite3`의 `GETMALLOC` 메서드는 `sqlite3_malloc()`을 다시 불러 래퍼로 돌아오므로 첫 할당에서 스택이 넘칩니다(비호환: SQLite는 하부의 메서드를 줌). 그래서 하네스는 `--faultsim` 없이는 래퍼를 설치하지 않고(`install_malloc_faultsim`이 아무것도 하지 않음), `do_malloc_test`·`do_faultsim_test`의 OOM 테스트는 두 쪽 모두 실패합니다. I/O 오류 주입(`sqlite_io_error_pending`)은 SQLite의 os_unix.c 안에 있으므로 두 쪽 모두 동작하지 않습니다.
+- **OOM·I/O 오류 주입**: tester.tcl은 파일마다 `test_malloc.c`의 malloc 래퍼(`SQLITE_CONFIG_GETMALLOC`으로 받은 메서드를 감쌈)를 설치합니다. 하네스는 `--faultsim` 없이는 래퍼를 설치하지 않으므로(`install_malloc_faultsim`이 아무것도 하지 않음), `do_malloc_test`·`do_faultsim_test`의 OOM 테스트는 두 쪽 모두 실패합니다. 많은 파일이 훨씬 느려지기 때문에 기준선에서는 뺍니다. `--faultsim`을 주면 두 쪽 모두 래퍼 아래에서 돕니다. I/O 오류 주입(`sqlite_io_error_pending`)은 SQLite의 os_unix.c 안에 있으므로 두 쪽 모두 동작하지 않습니다.
 - **내부 명령**: `btree_*`, `pager_*`, `page_*`, `sqlite3_shared_cache_report`, `uses_stmt_journal`, `sqlite3_pager_refcounts` 등이 없거나 오류를 냅니다. 이를 쓰는 파일은 두 쪽에서 같이 멈춥니다.
 - **크래시 시뮬레이션**: `test6.c`의 crash VFS는 들어 있지만, `crashsql`은 자식 testfixture를 띄우므로 같은 픽스처로 돕니다.

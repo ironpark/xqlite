@@ -102,8 +102,8 @@ pub fn dupZ(s: []const u8) ?[*:0]u8 {
 /// UTF-16 text in native byte order (C's `const void*` of the *16
 /// interfaces), or `n` bytes of it if `n` is not negative (an odd last
 /// byte is dropped), stopping at a NUL character.
-pub fn utf16Slice(z: *const anyopaque, n: i64) []const u16 {
-    const p: [*]const u16 = @ptrCast(@alignCast(z));
+pub fn utf16Slice(z: *const anyopaque, n: i64) []align(1) const u16 {
+    const p: [*]align(1) const u16 = @ptrCast(z);
     var len: usize = 0;
     if (n < 0) {
         while (p[len] != 0) len += 1;
@@ -116,7 +116,7 @@ pub fn utf16Slice(z: *const anyopaque, n: i64) []const u16 {
 
 /// UTF-16 (little or big endian) to UTF-8, from sqlite3_malloc() and
 /// NUL-terminated. Unpaired surrogates become U+FFFD, as in SQLite.
-pub fn utf16ToUtf8(s: []const u16, big_endian: bool) ?[:0]u8 {
+pub fn utf16ToUtf8(s: []align(1) const u16, big_endian: bool) ?[:0]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     out.ensureTotalCapacity(gpa, s.len * 3 + 1) catch return null;
@@ -287,6 +287,9 @@ pub extern fn sqlite3_mutex_alloc(id: c_int) ?*Mutex;
 pub extern fn sqlite3_mutex_free(m: ?*Mutex) void;
 pub extern fn sqlite3_mutex_enter(m: ?*Mutex) void;
 pub extern fn sqlite3_mutex_leave(m: ?*Mutex) void;
+/// sqlite3MutexInit() and sqlite3MutexEnd() of the mutex methods in use.
+extern fn xq_mutex_init() c_int;
+extern fn xq_mutex_end() void;
 pub const MUTEX_RECURSIVE = 1;
 
 /// Whether the library has mutexes (SQLITE_THREADSAFE != 0): not on
@@ -349,7 +352,6 @@ pub const State = struct {
     memstat: bool = true,
     /// SQLITE_CONFIG_MALLOC, and whether its xInit has run.
     mem_methods: ?@import("library.zig").MemMethods = null,
-    mem_init: bool = false,
     /// SQLITE_CONFIG_LOG.
     log: Hook(*const fn (?*anyopaque, c_int, ?[*:0]const u8) callconv(.c) void) = .{},
     /// sqlite3_auto_extension().
@@ -378,18 +380,39 @@ pub fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-/// sqlite3_initialize(), which the interfaces that need it call.
-pub fn ensureInit() void {
-    if (@atomicLoad(bool, &state.initialized, .acquire)) return;
+/// Port of sqlite3_initialize(), which the interfaces that need it call:
+/// null, or the error of the mutex methods' xMutexInit or the memory
+/// methods' xInit, and the library stays uninitialized.
+pub fn ensureInit() ?c_int {
+    if (@atomicLoad(bool, &state.initialized, .acquire)) return null;
     state.lock.lock();
     defer state.lock.unlock();
-    if (!state.initialized) {
-        @import("xqlite_base").status.enable(state.memstat);
-        @import("vfs.zig").initDefault();
-        @import("loadext.zig").initHook();
-        @import("xqlite_storage").corrupt.hook = logCorrupt;
-        @atomicStore(bool, &state.initialized, true, .release);
+    if (state.initialized) return null;
+    // sqlite3MutexInit(), then sqlite3MallocInit().
+    var rc = xq_mutex_init();
+    if (rc == RC.OK) if (state.mem_methods) |m| if (m.xInit) |f| {
+        rc = f(m.pAppData);
+    };
+    if (rc != RC.OK) return rc;
+    @import("xqlite_base").status.enable(state.memstat);
+    @import("vfs.zig").initDefault();
+    @import("loadext.zig").initHook();
+    @import("xqlite_storage").corrupt.hook = logCorrupt;
+    @atomicStore(bool, &state.initialized, true, .release);
+    return null;
+}
+
+/// Port of sqlite3_shutdown(): the memory methods' xShutdown, then the
+/// mutex methods' xMutexEnd. The default VFS and the registries stay;
+/// connections must all be closed, as in SQLite.
+pub fn shutdown() void {
+    state.lock.lock();
+    defer state.lock.unlock();
+    if (state.initialized) {
+        @atomicStore(bool, &state.initialized, false, .release);
+        if (state.mem_methods) |m| if (m.xShutdown) |f| f(m.pAppData);
     }
+    xq_mutex_end();
 }
 
 /// Logs where the storage layer found the file corrupt through the

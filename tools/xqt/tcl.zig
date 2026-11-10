@@ -26,7 +26,7 @@ pub const usage =
     \\  --ref P        testfixture on SQLite (default zig-out/bin/testfixture-sqlite)
     \\  --no-ref       run xqlite only (no classification)
     \\  --faultsim     let tester.tcl install its OOM-injecting malloc wrapper
-    \\                 (XQTCL_FAULTSIM=1; on libxqlite3 it recurses without end)
+    \\                 (XQTCL_FAULTSIM=1; off, the OOM tests fail on both)
     \\  --tcl-library D  Tcl's script library (default ref/tcl/lib/tcl8.6)
     \\  --log FILE     write every file's outcome and every failing test to FILE
     \\  --top N        causes to list (default 40)

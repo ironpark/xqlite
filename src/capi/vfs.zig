@@ -285,7 +285,7 @@ fn relink() void {
 
 /// The VFS named `name` (the default if null), or null.
 pub fn find(name: ?[]const u8) ?*Entry {
-    c.ensureInit();
+    if (c.ensureInit() != null) return null;
     c.state.lock.lock();
     defer c.state.lock.unlock();
     var e = head;
@@ -303,7 +303,7 @@ pub export fn sqlite3_vfs_find(z_name: ?[*:0]const u8) callconv(.c) ?*sqlite3_vf
 
 pub export fn sqlite3_vfs_register(p: ?*sqlite3_vfs, make_dflt: c_int) callconv(.c) c_int {
     const v = p orelse return RC.MISUSE;
-    c.ensureInit();
+    if (c.ensureInit()) |rc| return rc;
     c.state.lock.lock();
     defer c.state.lock.unlock();
     // An entry already made for this sqlite3_vfs is reused.
@@ -336,7 +336,7 @@ pub export fn sqlite3_vfs_register(p: ?*sqlite3_vfs, make_dflt: c_int) callconv(
 
 pub export fn sqlite3_vfs_unregister(p: ?*sqlite3_vfs) callconv(.c) c_int {
     const v = p orelse return RC.MISUSE;
-    c.ensureInit();
+    if (c.ensureInit()) |rc| return rc;
     c.state.lock.lock();
     defer c.state.lock.unlock();
     var e = head;

@@ -246,7 +246,9 @@ pub fn step(b: *Backup, n_page: i32) i32 {
     }
     if (rc == RC.OK) {
         b.n_pagecount = @intCast(n_src_page);
-        b.n_remaining = @intCast(n_src_page + 1 - b.i_next);
+        // Pgno arithmetic, wrapping as in C when the source shrank below
+        // the pages already copied.
+        b.n_remaining = b.n_pagecount +% 1 -% b.i_next;
         if (b.i_next > n_src_page) {
             rc = RC.DONE;
         } else if (!b.is_attached) {

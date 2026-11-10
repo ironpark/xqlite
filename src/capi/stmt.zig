@@ -16,7 +16,21 @@ const TK = @import("../sql/tk.zig").TK;
 
 // =============================================================== prepare
 
-fn prepare(db_arg: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: c_uint, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) c_int {
+/// The interfaces' SQLITE_PREPARE_* flags: those of sqlite3_prepare_v3(),
+/// or `legacy` for sqlite3_prepare(), which keeps no SQL (no
+/// PREPARE_SAVESQL): its statement fails on a schema change instead of
+/// being compiled again.
+const Flags = struct {
+    v3: c_uint = 0,
+    legacy: bool = false,
+
+    fn stored(f: Flags) u8 {
+        const save: u8 = if (f.legacy) 0 else aux.PREPARE_SAVESQL;
+        return save | @as(u8, @truncate(f.v3 & aux.PREPARE_MASK));
+    }
+};
+
+fn prepare(db_arg: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: Flags, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) c_int {
     const lk = c.lock(db_arg);
     defer lk.unlock();
     const out = pp_stmt orelse return RC.MISUSE;
@@ -24,17 +38,17 @@ fn prepare(db_arg: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: c_u
     if (pz_tail) |t| t.* = z_sql;
     const db = db_arg orelse return RC.MISUSE;
     const sql = z_sql orelse return RC.MISUSE;
-    const flags: u8 = @truncate(prep_flags & aux.PREPARE_MASK);
+    const flags = prep_flags.stored();
     const text = c.cSliceZ(sql, n_byte);
     var rc: c_int = undefined;
     if (n_byte < 0 or text.len < @as(usize, @intCast(n_byte))) {
         // The text ends at its NUL: parsed in place.
         var tail: [:0]const u8 = "";
-        rc = prepare_mod.prepareV3Z(db, text.ptr[0..text.len :0], flags, out, &tail);
+        rc = prepare_mod.prepareFlagsZ(db, text.ptr[0..text.len :0], flags, out, &tail);
         if (pz_tail) |t| t.* = tail.ptr;
     } else {
         var tail: []const u8 = "";
-        rc = prepare_mod.prepareV3(db, text, flags, out, &tail);
+        rc = prepare_mod.prepareFlags(db, text, flags, out, &tail);
         if (pz_tail) |t| t.* = sql + (text.len - tail.len);
     }
     return rc;
@@ -51,20 +65,20 @@ pub fn prepareZ(db: *Handle, text: [:0]const u8, out: *?*Vdbe, tail: *[:0]const 
 }
 
 pub export fn sqlite3_prepare(db: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) callconv(.c) c_int {
-    return prepare(db, z_sql, n_byte, 0, pp_stmt, pz_tail);
+    return prepare(db, z_sql, n_byte, .{ .legacy = true }, pp_stmt, pz_tail);
 }
 
 pub export fn sqlite3_prepare_v2(db: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) callconv(.c) c_int {
-    return prepare(db, z_sql, n_byte, 0, pp_stmt, pz_tail);
+    return prepare(db, z_sql, n_byte, .{}, pp_stmt, pz_tail);
 }
 
 pub export fn sqlite3_prepare_v3(db: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: c_uint, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) callconv(.c) c_int {
-    return prepare(db, z_sql, n_byte, prep_flags, pp_stmt, pz_tail);
+    return prepare(db, z_sql, n_byte, .{ .v3 = prep_flags }, pp_stmt, pz_tail);
 }
 
 /// The *16 variants: the text is converted to UTF-8, prepared, and the
 /// tail mapped back to the UTF-16 input.
-fn prepare16(db_arg: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, prep_flags: c_uint, pp_stmt: ?*?*Vdbe, pz_tail: ?*?*const anyopaque) c_int {
+fn prepare16(db_arg: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, prep_flags: Flags, pp_stmt: ?*?*Vdbe, pz_tail: ?*?*const anyopaque) c_int {
     const out = pp_stmt orelse return RC.MISUSE;
     out.* = null;
     if (pz_tail) |t| t.* = z_sql;
@@ -89,15 +103,15 @@ fn prepare16(db_arg: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, prep_fla
 }
 
 pub export fn sqlite3_prepare16(db: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, pp_stmt: ?*?*Vdbe, pz_tail: ?*?*const anyopaque) callconv(.c) c_int {
-    return prepare16(db, z_sql, n_byte, 0, pp_stmt, pz_tail);
+    return prepare16(db, z_sql, n_byte, .{ .legacy = true }, pp_stmt, pz_tail);
 }
 
 pub export fn sqlite3_prepare16_v2(db: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, pp_stmt: ?*?*Vdbe, pz_tail: ?*?*const anyopaque) callconv(.c) c_int {
-    return prepare16(db, z_sql, n_byte, 0, pp_stmt, pz_tail);
+    return prepare16(db, z_sql, n_byte, .{}, pp_stmt, pz_tail);
 }
 
 pub export fn sqlite3_prepare16_v3(db: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, prep_flags: c_uint, pp_stmt: ?*?*Vdbe, pz_tail: ?*?*const anyopaque) callconv(.c) c_int {
-    return prepare16(db, z_sql, n_byte, prep_flags, pp_stmt, pz_tail);
+    return prepare16(db, z_sql, n_byte, .{ .v3 = prep_flags }, pp_stmt, pz_tail);
 }
 
 // ================================================ step, reset, finalize

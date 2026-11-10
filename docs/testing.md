@@ -353,14 +353,14 @@ zig-out/bin/xqt tcl ref/sqlite/test/where.test
 
 | | xqlite | SQLite |
 | --- | --- | --- |
-| 끝까지 돈 파일(`ok` + `fail`) | 1141 (927 + 214) | 1162 (1020 + 142) |
-| 도중에 멈춘 파일(`error`, `crash`, `timeout`) | 30, 9, 6 | 18, 0, 6 |
-| 통과한 테스트 케이스(출력 줄) | 2,003,071 | 2,034,621 |
-| 실패한 테스트 케이스 | 5,916 | 4,708 |
+| 끝까지 돈 파일(`ok` + `fail`) | 1150 (935 + 215) | 1161 (1019 + 142) |
+| 도중에 멈춘 파일(`error`, `crash`, `timeout`) | 29, 1, 6 | 18, 1, 6 |
+| 통과한 테스트 케이스(출력 줄) | 2,229,618 | 2,266,269 |
+| 실패한 테스트 케이스 | 5,859 | 4,708 |
 
-시간 제한을 넘는 것은 두 쪽 모두 `crash.test`, `crash4.test`, `crash9.test`, `corruptC.test`, `misc7.test`, `savepoint4.test`처럼 반복이 많은 파일입니다. 테스트 이름으로 맞추면 두 쪽 통과 2,000,327, 두 쪽 실패 4,572, xqlite만 실패 1,215, SQLite만 실패 4이고, xqlite에서 파일이 먼저 멈춰 돌지 못한 것이 24,692입니다(xqlite에서 오류·패닉으로 멈춘 파일, 그리고 시간 제한까지 돌아 두 쪽이 돈 반복 수가 다른 파일).
+시간 제한을 넘는 것은 두 쪽 모두 `crash.test`, `crash4.test`, `crash9.test`, `corruptC.test`, `misc7.test`, `savepoint4.test`처럼 반복이 많은 파일입니다. 테스트 이름으로 맞추면 두 쪽 통과 2,226,854, 두 쪽 실패 4,586, xqlite만 실패 1,147, SQLite만 실패 4이고, xqlite에서 파일이 먼저 멈춰 돌지 못한 것이 29,867입니다(xqlite에서 오류·패닉으로 멈춘 파일, 그리고 시간 제한까지 돌아 두 쪽이 돈 반복 수가 다른 파일).
 
-처음 기준선(UTF-16, `journal_mode=MEMORY`, `locking_mode=EXCLUSIVE`가 없던 때)은 xqlite만 실패 2,209, xqlite에서만 멈춘 파일 43개였습니다. 그때 가장 많던 `not supported yet`(3,170줄)과, 임시 DB에서 `SQLITE_FULL` 뒤 인덱스가 깨지던 `tempfault-2-full.*`가 없어졌고, `sqlite3_exec()`가 문장마다 남은 SQL의 길이를 다시 재던 것(문장 수의 제곱 시간, `speed1.test`·`speed2.test`가 시간 초과)도 고쳤습니다. 지금 xqlite만 실패하는 주된 원인은 다음과 같습니다.
+처음 기준선(UTF-16, `journal_mode=MEMORY`, `locking_mode=EXCLUSIVE`가 없던 때)은 xqlite만 실패 2,209, xqlite에서만 멈춘 파일 43개였습니다. 그때 가장 많던 `not supported yet`(3,170줄)과, 임시 DB에서 `SQLITE_FULL` 뒤 인덱스가 깨지던 `tempfault-2-full.*`가 없어졌고, `sqlite3_exec()`가 문장마다 남은 SQL의 길이를 다시 재던 것(문장 수의 제곱 시간, `speed1.test`·`speed2.test`가 시간 초과)도 고쳤습니다. 그 뒤 하네스가 찾은 엔진 패닉과 크래시(echo 가상 테이블의 `INSERT`, `sqlite3_result_error16`의 정렬, backup의 페이지 수, 옛 `sqlite3_prepare()`가 스키마 변경 뒤 다시 컴파일하던 것, `GETMALLOC`의 재귀, `GETMUTEX`·`SQLITE_CONFIG_MUTEX`가 없던 것)를 고쳤습니다. 두 쪽의 크래시 하나씩은 `tableapi-3.7`(xqlite, 실행마다 다름)과 `thread004-1.2`(SQLite)입니다. 지금 xqlite만 실패하는 주된 원인은 다음과 같습니다.
 
 | 원인 | 예 |
 | --- | --- |
@@ -370,9 +370,7 @@ zig-out/bin/xqt tcl ref/sqlite/test/where.test
 | `sqlite3_log()`의 경고가 없음 | `autoindex1-113`: `SQLITE_WARNING_AUTOINDEX {automatic index on t2(c)}` 대신 빈 값 |
 | 손상된 DB에서 SQLite보다 엄격함 | `expridx1-1.1.2`: 임포스터로 어긋나게 한 식 인덱스의 행 `DELETE`가 `index corruption`, `incrvacuum-17.1`: `database disk image is malformed` |
 | `INDEXED BY`의 `no query solution` | `indexedby-7.6`, `e_delete-0.1.8` |
-| 엔진 패닉(ReleaseSafe) | `vtab4-1.2`: echo 가상 테이블에 `INSERT`하면 `insertImpl`(insert.zig)의 index out of bounds(`vtab1`, `vtabJ`, `vtab_err`도), `aggerror-1.4`: `sqlite3_result_error16`의 incorrect alignment, `backup-5.1.5.3`: `backup.zig`의 integer does not fit |
-| 크래시(SEGV) | `misc4-1.3`, `tableapi-3.7`, `init-2.transient.0` |
-| C API | `SQLITE_CONFIG_GETMALLOC`의 메서드가 `sqlite3_malloc()`을 다시 부름(`--faultsim`, `init.test`에서 재귀), `GETMUTEX` 없음(`mutex1.test` 크래시), 모든 연결을 닫은 뒤 144바이트(할당 3개)가 남음(xqlite 1141개 파일) |
+| C API | 모든 연결을 닫은 뒤 메모리가 남음(xqlite 1150개 파일) |
 
 ## 퍼징
 

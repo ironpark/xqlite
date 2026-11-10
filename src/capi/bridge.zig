@@ -30,7 +30,7 @@ const RC = c.RC;
 /// (sqlite3_errmsg()), unlike sqlite3_load_extension(), which hands it to
 /// the caller.
 pub fn load(db: *c.Handle, file: [:0]const u8, proc: ?[:0]const u8) i32 {
-    c.ensureInit();
+    if (c.ensureInit()) |rc| return rc;
     if (db.capi == null) {
         const e = c.gpa.create(c.Ext) catch return nomem(db);
         e.* = .{ .vfs = @import("vfs.zig").find(null).? };

@@ -535,21 +535,29 @@ pub fn bindDouble(v: *Vdbe, i: usize, value: f64) i32 {
 
 /// Port of sqlite3_bind_text(). The text is copied.
 pub fn bindText(v: *Vdbe, i: usize, text: []const u8) i32 {
-    return bindStr(v, i, text, ENC.UTF8);
+    return bindStr(v, i, text, ENC.UTF8, .transient);
 }
 
 /// Port of sqlite3_bind_blob(). The blob is copied.
 pub fn bindBlob(v: *Vdbe, i: usize, blob: []const u8) i32 {
-    return bindStr(v, i, blob, 0);
+    return bindStr(v, i, blob, 0, .transient);
 }
 
-/// Text (`enc` nonzero) is stored in the database encoding, as C's
-/// bindText() does.
-fn bindStr(v: *Vdbe, i: usize, z: []const u8, enc: u8) i32 {
+/// Port of bindText(): bind the blob (`enc` 0) or the text in encoding
+/// `enc`, which is stored in the database encoding. `del` says who owns
+/// the bytes; a destructor is called also when the binding fails.
+pub fn bindStr(v: *Vdbe, i: usize, z: []const u8, enc: u8, del: Destructor) i32 {
     const rc = unbind(v, i);
-    if (rc != RC.OK) return rc;
+    if (rc != RC.OK) {
+        switch (del) {
+            .dynamic => v.db.gpa.free(@constCast(z)),
+            .func => |f| f(@ptrCast(@constCast(z.ptr))),
+            else => {},
+        }
+        return rc;
+    }
     const m = &v.vars[i - 1];
-    mem.setStr(m, z, enc, .transient) catch |err| {
+    mem.setStr(m, z, enc, del) catch |err| {
         const code = int.errorCode(err);
         main_mod.setError(v.db, code);
         return code;
@@ -588,7 +596,7 @@ pub fn bindValue(v: *Vdbe, i: usize, value: *Mem) i32 {
 /// bindText() of text in encoding `enc`, converted to the database
 /// encoding (C's bindText() with an encoding).
 pub fn bindTextEnc(v: *Vdbe, i: usize, text: []const u8, enc: u8) i32 {
-    return bindStr(v, i, text, if (enc == 0) ENC.UTF8 else enc);
+    return bindStr(v, i, text, if (enc == 0) ENC.UTF8 else enc, .transient);
 }
 
 /// Port of sqlite3_bind_parameter_count().

@@ -12,6 +12,7 @@ xqlite는 SQLite 3.54.1의 `sqlite3.h`를 그대로 구현하는 C ABI를 제공
 - [확장](#확장)
 - [메모리 데이터베이스와 스냅숏](#메모리-데이터베이스와-스냅숏)
 - [기본 VFS](#기본-vfs)
+- [오류 로그](#오류-로그)
 - [SQLite와 다른 점](#sqlite와-다른-점)
 - [문장 정보](#문장-정보)
 - [preupdate 훅](#preupdate-훅)
@@ -150,7 +151,7 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 | 확장 | `load_extension`, `enable_load_extension`, `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION`, SQL 함수 `load_extension()`, `carray_bind(_v2)`와 테이블 값 함수 `carray()` ([확장](#확장)) |
 | 기타 | `mutex_alloc/free/enter/try/leave/held/notheld`(POSIX 스레드), `db_mutex`([스레드](#스레드)), `test_control`([아래](#문장-정보)), `auto_extension`(`pApi`로 `sqlite3_api_routines` 표를 줌), `cancel_auto_extension`, `reset_auto_extension`, `enable_shared_cache`([공유 캐시](#공유-캐시)), `db_status(64)`([메모리 통계](#메모리-통계)) |
 
-`sqlite3_config()`는 `SINGLETHREAD`, `MULTITHREAD`, `SERIALIZED`([스레드](#스레드)), `MALLOC`(C 메모리 함수를 엔진 할당자로), `GETMALLOC`(설정 전에는 C 라이브러리의 `malloc`/`realloc`/`free`, 라이브러리의 기본 할당자와 같음), `MUTEX`, `GETMUTEX`, `LOOKASIDE`, `LOG`, `URI`, `PCACHE_HDRSZ`, `MEMSTATUS`, `MEMDB_MAXSIZE`, `MMAP_SIZE`(`PRAGMA mmap_size`의 기본값과 최대)를 처리하고, 다른 성능 조정용 옵션(`PAGECACHE` 등)은 받고 무시합니다. `GETPCACHE(2)`는 `SQLITE_ERROR`입니다. SQLite처럼 `sqlite3_initialize()`(첫 `open`이 자동으로 부름) 뒤에는 `LOG`, `PCACHE_HDRSZ` 말고는 `SQLITE_MISUSE`입니다. `sqlite3_db_config()`는 `MAINDBNAME`, `LOOKASIDE`, 1002~1022의 플래그 전부, `FP_DIGITS`를 처리합니다.
+`sqlite3_config()`는 `SINGLETHREAD`, `MULTITHREAD`, `SERIALIZED`([스레드](#스레드)), `MALLOC`(C 메모리 함수를 엔진 할당자로), `GETMALLOC`(설정 전에는 C 라이브러리의 `malloc`/`realloc`/`free`, 라이브러리의 기본 할당자와 같음), `MUTEX`, `GETMUTEX`, `LOOKASIDE`, `LOG`, `URI`, `PCACHE_HDRSZ`, `MEMSTATUS`, `MEMDB_MAXSIZE`, `MMAP_SIZE`(`PRAGMA mmap_size`의 기본값과 최대), `COVERING_INDEX_SCAN`(전체 스캔에 커버링 인덱스를 쓸지)을 처리하고, 다른 성능 조정용 옵션(`PAGECACHE` 등)은 받고 무시합니다. `GETPCACHE(2)`는 `SQLITE_ERROR`입니다. SQLite처럼 `sqlite3_initialize()`(첫 `open`이 자동으로 부름) 뒤에는 `LOG`, `PCACHE_HDRSZ` 말고는 `SQLITE_MISUSE`입니다. `sqlite3_db_config()`는 `MAINDBNAME`, `LOOKASIDE`, 1002~1022의 플래그 전부, `FP_DIGITS`를 처리합니다.
 
 ### 지원하지 않는 것
 
@@ -228,17 +229,39 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - **시스템 호출**: `open`, `close`, `access`, `getcwd`, `stat`, `fstat`, `ftruncate`, `fcntl`, `read`, `pread`, `write`, `pwrite`, `fchmod`, `unlink`, `openDirectory`, `mkdir`, `rmdir`, `fchown`, `geteuid`, `mmap`, `munmap`, `getpagesize`, `readlink`, `lstat`(Linux는 `mremap`도)이 SQLite의 `aSyscall[]`과 같은 이름·C 시그니처의 표를 거칩니다. `xSetSystemCall(vfs, 이름, 함수)`이 바꾸고(NULL은 원래 것, 이름이 NULL이면 전부 되돌림, 없는 이름은 `SQLITE_NOTFOUND`), `xGetSystemCall`이 지금의 것을, `xNextSystemCall`이 이 플랫폼에 있는 이름을 차례로 줍니다. 표는 프로세스에 하나입니다(SQLite처럼).
 - **파일 제어**: `SQLITE_FCNTL_PERSIST_WAL`(마지막 연결이 닫혀도 WAL 파일을 지우지 않음. `journal_size_limit`이 있으면 0바이트로 자름), `POWERSAFE_OVERWRITE`(`SQLITE_IOCAP_POWERSAFE_OVERWRITE`. 둘 다 -1은 묻기, 0·1은 정하기), `CHUNK_SIZE`·`SIZE_HINT`(파일을 그 단위로 키우고 자름), `HAS_MOVED`(연 뒤 이름이 바뀌거나 지워짐), `LOCKSTATE`, `LAST_ERRNO`, `EXTERNAL_READER`, `VFSNAME`(`unix`·`unix-excl`), `TEMPFILENAME`, `MMAP_SIZE`. `FILE_POINTER`가 주는 `sqlite3_file`의 메서드는 엔진이 쓰는 그 파일을 부르므로, `xShmLock`·`xFetch`처럼 파일을 바로 다루는 확장과 테스트 도구(`superlock`, `mmapwarm`)가 동작합니다.
 - **URI 파라미터**: `psow=0`(파워세이프 덮어쓰기 끄기, 기본 켜짐), `readonly_shm=1`(`-shm` 파일을 읽기 전용으로 열기: 다른 연결이 이미 쓰는 wal-index만 읽고, 아무도 없으면 WAL을 직접 읽는 SQLite의 경로로), `modeof=파일`(새 데이터베이스의 권한을 그 파일에서), 그리고 페이저의 `nolock=1`(파일 잠금을 하지 않음. WAL 모드로 바꿀 수 없고, WAL인 데이터베이스는 `unable to open database file`)과 `immutable=1`(읽기 전용, 잠금·저널 없이 임시 파일처럼. VFS가 `SQLITE_IOCAP_IMMUTABLE`을 보고해도 같음).
-- **오류 기록**: 시스템 호출이 실패하면 SQLite처럼 `sqlite3_log()`로 `os_unix.c:줄: (errno) 함수(경로) - 메시지`를 남깁니다(`SQLITE_CONFIG_LOG`). 줄 번호는 `unix.zig`의 것입니다.
-- **옮기지 않은 것**: afp·nfs·proxy 잠금 방식, `F_SETLKW` 시간 제한(`SQLITE_ENABLE_SETLK_TIMEOUT`), 닫기를 미룬 디스크립터의 재사용(`findReusableFd()`), F2FS 원자적 일괄 쓰기, `SQLITE_FCNTL_NULL_IO`.
+- **오류 기록**: 시스템 호출이 실패하면 SQLite처럼 `sqlite3_log()`로 `os_unix.c:줄: (errno) 함수(경로) - 메시지`를 남깁니다(`SQLITE_CONFIG_LOG`). 줄 번호는 `unix.zig`의 것입니다. 엔진이 남기는 기록은 [오류 로그](#오류-로그)에 있습니다.
+- **옮기지 않은 것**: afp·nfs·proxy 잠금 방식(`SQLITE_FCNTL_SET_LOCKPROXYFILE`·`GET_LOCKPROXYFILE`은 `SQLITE_NOTFOUND`. 네트워크 파일 시스템용이고 분량이 커서 옮길 계획이 없습니다), `F_SETLKW` 시간 제한(`SQLITE_ENABLE_SETLK_TIMEOUT`), 닫기를 미룬 디스크립터의 재사용(`findReusableFd()`), F2FS 원자적 일괄 쓰기, `SQLITE_FCNTL_NULL_IO`.
+
+## 오류 로그
+
+`SQLITE_CONFIG_LOG`로 로거를 두면 SQLite가 `sqlite3_log()`로 남기는 기록을 같은 코드와 문구로 받습니다. 메시지는 SQLite처럼 209바이트에서 잘립니다.
+
+| 코드 | 메시지 | 때 |
+| --- | --- | --- |
+| 문장의 오류 코드 | `statement aborts at 주소: 메시지; [SQL]` | 실행 중인 문장이 오류로 끝남(트리거 안이면 SQL 앞에 `/* TRIGGER 이름 */`) |
+| 파서의 오류 코드 | `메시지 in "SQL"` | 문장을 준비하다 실패 |
+| `SQLITE_WARNING_AUTOINDEX` | `automatic index on 테이블(열)` | 자동 인덱스를 만드는 계획 |
+| `SQLITE_WARNING` | `double-quoted string literal: "..."` | 큰따옴표 문자열을 문자열 리터럴로 읽음 |
+| `SQLITE_WARNING` | `abbreviated query algorithm search` | 플래너의 탐색 한도에 닿음 |
+| `SQLITE_NOTICE_RECOVER_WAL` | `recovered N frames from WAL file 경로` | WAL을 복구함 |
+| `SQLITE_NOTICE_RECOVER_ROLLBACK` | `recovered N pages from 저널` | hot journal을 되돌림 |
+| `SQLITE_CORRUPT` | `database corruption [page N] at line L of [파일.zig]` | 스토리지 층이 손상을 찾음 |
+| `SQLITE_CORRUPT_INDEX` | `index corruption at line L of [파일.zig]` | 지울 인덱스 항목이 없음 |
+| `SQLITE_FULL` | `MJ delete: 경로`, `MJ collide: 경로` | super-journal 이름이 겹침 |
+| I/O 오류 코드 | `cannot limit WAL size: 경로` | `journal_size_limit`로 WAL을 줄이지 못함 |
+| `SQLITE_MISUSE` | `API call with invalid database connection pointer` | 닫힌 연결을 씀 |
+
+SQL 함수 `sqlite_log(코드, 메시지)`도 여기에 씁니다. 줄 번호와 파일 이름은 xqlite 소스의 것입니다(SQLite는 소스 ID). `SQLITE_MISUSE_BKPT`류의 `misuse at line ...`과 바인딩 오용의 기록은 남기지 않습니다.
 
 ## SQLite와 다른 점
 
 - **스레드**: 기본이 멀티스레드 모드(`sqlite3_threadsafe()` = 2)입니다. 직렬화 모드는 요청할 때만 씁니다. [스레드](#스레드)를 보세요.
 - **스캔 상태**: `SQLITE_DBCONFIG_STMT_SCANSTATUS`가 기본으로 꺼져 있습니다(SQLite는 `SQLITE_ENABLE_STMT_SCANSTATUS`로 빌드하면 켜짐). [문장 정보](#문장-정보)를 보세요.
 - **`sqlite3_compileoption_used()`**는 `ENABLE_COLUMN_METADATA`, `ENABLE_NORMALIZE`, `ENABLE_STMT_SCANSTATUS`, `ENABLE_MATH_FUNCTIONS`를 보고하지 않습니다(목록은 기본 빌드의 것). 함수 자체는 그 옵션으로 빌드한 SQLite처럼 동작합니다(수학 함수는 SQLite 방언의 내장 함수).
-- **바인딩 값은 늘 복사합니다**: `SQLITE_STATIC`도 복사하고, 사용자 소멸자는 복사한 직후 부릅니다(SQLite도 허용하는 시점). 결과값은 `SQLITE_STATIC`과 `sqlite3_free`면 복사하지 않습니다. `result_text`의 UTF-8 텍스트는 다른 소멸자여도 SQLite처럼 복사하지 않고 결과가 그 값을 다 쓴 뒤 소멸자를 부릅니다. 그 밖의 결과(`result_blob`, UTF-16 텍스트)는 복사한 뒤 바로 부릅니다.
+- **바인딩과 결과의 소멸자**: SQLite와 같습니다. `SQLITE_TRANSIENT`만 복사하고, `SQLITE_STATIC`은 포인터를 그대로 쓰며, 소멸자(`sqlite3_free` 포함)를 주면 복사하지 않고 그 값을 다 쓴 뒤(다시 바인딩하거나 문장을 닫을 때, 결과를 다 쓴 뒤) 부릅니다. 값을 받지 못한 경우(잘못된 인덱스, 너무 큰 값)에도 소멸자를 부릅니다. 예외는 UTF-16 결과(`result_text16*`)로, UTF-8로 바꿔 복사한 뒤 바로 부릅니다.
 - **트레이스의 프로파일 시간**은 SQLite처럼 VFS 시계(밀리초)로 재므로 나노초 값의 아래 여섯 자리는 0입니다.
 - **VFS**: C VFS의 `xRead`가 `SQLITE_IOERR_SHORT_READ`를 돌려주면 읽은 길이를 모르므로 끝의 0 바이트를 읽지 않은 것으로 칩니다. `sqlite3_database_file_object()`는 데이터베이스 이름 앞(SQLite가 `Pager*`를 두는 자리)에 VFS 다리가 넣어 둔 `sqlite3_file`을 돌려주므로, C VFS로 연 데이터베이스에서만 NULL이 아닙니다. 기본 VFS의 `xOpen`은 `SQLITE_OPEN_EXCLUSIVE`로 연 파일이 이미 있으면 읽기 전용으로 열지 않고 `SQLITE_CANTOPEN`입니다(SQLite는 읽기 전용으로 다시 엶). `SQLITE_FCNTL_FILE_POINTER`가 주는 기본 VFS 파일의 `xClose`를 부르면 엔진의 파일이 닫히므로 부르면 안 됩니다(SQLite에서도 마찬가지).
+- **닫힌 연결**: `sqlite3_close_v2()`가 문장을 남긴 채 닫은 연결(좀비)에 `prepare*`, `exec`, `errcode`, `extended_errcode`, `errmsg*`를 부르면 SQLite처럼 `SQLITE_MISUSE`(메시지는 그 문구)이고, 로그에 `API call with invalid database connection pointer`가 남습니다. `SQLITE_ENABLE_API_ARMOR`가 켜야 하는 나머지 검사는 없습니다.
 - **`sqlite3_compileoption_get()`**은 엔진의 `PRAGMA compile_options` 목록에서 `THREADSAFE`만 C ABI의 값(2)으로 바꿔 보여 줍니다.
 - `sqlite3_temp_directory`는 unix VFS가 임시 파일 디렉터리로 씁니다(SQLite의 `unixTempFileDir()`처럼 그다음은 `$SQLITE_TMPDIR`, `$TMPDIR`, `/var/tmp`, `/usr/tmp`, `/tmp`, `.`). `PRAGMA temp_store_directory`로도 정합니다. 변수 자체는 VFS 패키지의 `temp_directory`(`pkg/vfs/src/root.zig`)이고, C ABI가 이 이름으로 내보냅니다. `sqlite3_data_directory`는 SQLite에서도 Windows 전용이라 읽는 곳이 없고, `PRAGMA data_store_directory`는 아무 일도 하지 않습니다(Windows가 아닌 SQLite처럼).
 

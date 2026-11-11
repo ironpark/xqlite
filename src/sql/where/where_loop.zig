@@ -1407,8 +1407,7 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) AddError!Flo
                 m = TOPBIT;
             }
 
-            // Full scan via index. (sqlite3GlobalConfig.bUseCis is
-            // SQLITE_ALLOW_COVERING_INDEX_SCAN, on by default.)
+            // Full scan via index.
             if (b or
                 !tab.hasRowid() or
                 probe.part_idx_where != null or
@@ -1417,6 +1416,7 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) AddError!Flo
                     !probe.unordered and
                     probe.sz_idx_row < tab.sz_tab_row and
                     !w.wctrl_flags.ONEPASS_DESIRED and
+                    @import("../global.zig").use_cis and
                     !p.db.optDisabled(OPT.CoverIdxScan)))
             {
                 new.i_sort_idx = if (b) i_sort_idx else 0;
@@ -2099,9 +2099,8 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) AddError!void {
         if (!isOk(rc) or db.malloc_failed) {
             const done = if (rc) |flow| flow == .done else |_| false;
             if (done) {
-                // The query planner search limit was hit. (C logs
-                // "abbreviated query algorithm search"; no sqlite3_log
-                // here.)
+                // The query planner search limit was hit.
+                util.log(RC.WARNING, "abbreviated query algorithm search", .{});
                 rc = .ok;
             } else {
                 break;

@@ -353,12 +353,14 @@ zig-out/bin/xqt tcl ref/sqlite/test/where.test
 
 | | xqlite | SQLite |
 | --- | --- | --- |
-| 끝까지 돈 파일(`ok` + `fail`) | 1162 (988 + 174) | 1162 (1020 + 142) |
-| 도중에 멈춘 파일(`error`, `crash`, `timeout`) | 18, 0, 6 | 19, 0, 5 |
-| 통과한 테스트 케이스(출력 줄) | 2,218,808 | 2,244,305 |
-| 실패한 테스트 케이스 | 4,872 | 4,708 |
+| 끝까지 돈 파일(`ok` + `fail`) | 1163 (1012 + 151) | 1162 (1019 + 143) |
+| 도중에 멈춘 파일(`error`, `crash`, `timeout`) | 17, 0, 6 | 18, 0, 6 |
+| 통과한 테스트 케이스(출력 줄) | 785,275 | 792,934 |
+| 실패한 테스트 케이스 | 4,792 | 4,709 |
 
-시간 제한을 넘는 것은 두 쪽 모두 `crash.test`, `crash4.test`, `crash9.test`, `corruptC.test`, `misc7.test`, `savepoint4.test`처럼 반복이 많은 파일입니다. 테스트 이름으로 맞추면 두 쪽 통과 2,036,819, 두 쪽 실패 4,590, xqlite만 실패 89, SQLite만 실패 2이고, xqlite에서 파일이 먼저 멈춰 돌지 못한 것이 37,875입니다(시간 제한까지 돌아 두 쪽이 돈 반복 수가 다른 파일이 대부분). `crash9.test`는 이 실행에서 xqlite만 300초를 넘겼고, 900초로 돌리면 두 쪽 다 시간 제한까지 실패 없이 돕니다.
+시간 제한을 넘는 것은 두 쪽 모두 `crash.test`, `crash4.test`, `crash9.test`, `corruptC.test`, `savepoint4.test`, `walcrash3.test`처럼 반복이 많은 파일입니다. 통과한 케이스 수는 이 파일들이 300초 안에 몇 번 도는지에 따라 실행마다 크게 달라집니다(기기가 한가하면 200만을 넘음). 테스트 이름으로 맞추면 두 쪽 통과 776,437, 두 쪽 실패 4,592, xqlite만 실패 85, SQLite만 실패 2이고, xqlite에서 파일이 먼저 멈춰 돌지 못한 것이 8,007입니다(시간 제한까지 돌아 두 쪽이 돈 반복 수가 다른 파일).
+
+러너는 fixture가 열 수 있는 파일 수를 4096으로 낮춥니다. `misc7.test`는 더 열 수 없을 때까지 파일을 여는데, 셸의 한도(macOS는 시스템 전체의 절반)를 물려주면 두 fixture가 시스템의 디스크립터를 다 써서 옆에서 도는 테스트가 `unable to open database file`로 실패하고, `misc7.test` 자신은 시간 제한을 넘깁니다. 낮춘 뒤에는 3초 안에 끝납니다.
 
 처음 기준선(UTF-16, `journal_mode=MEMORY`, `locking_mode=EXCLUSIVE`가 없던 때)은 xqlite만 실패 2,209, xqlite에서만 멈춘 파일 43개였습니다. 그때 가장 많던 `not supported yet`(3,170줄)과, 임시 DB에서 `SQLITE_FULL` 뒤 인덱스가 깨지던 `tempfault-2-full.*`가 없어졌고, `sqlite3_exec()`가 문장마다 남은 SQL의 길이를 다시 재던 것(문장 수의 제곱 시간, `speed1.test`·`speed2.test`가 시간 초과)도 고쳤습니다. 그 뒤 하네스가 찾은 엔진 패닉과 크래시(echo 가상 테이블의 `INSERT`, `sqlite3_result_error16`의 정렬, backup의 페이지 수, 옛 `sqlite3_prepare()`가 스키마 변경 뒤 다시 컴파일하던 것, `GETMALLOC`의 재귀, `GETMUTEX`·`SQLITE_CONFIG_MUTEX`가 없던 것)를 고쳤습니다. 가끔 나던 `tableapi-3.7`(xqlite)의 크래시는 아래 공유 캐시 작업에서 고쳤고, 남은 것은 `thread004-1.2`(SQLite)입니다. 이어서 xqlite만 실패하던 다음 원인을 고쳤습니다.
 
@@ -377,16 +379,22 @@ zig-out/bin/xqt tcl ref/sqlite/test/where.test
   - 콜백: collation을 더할 때는 문장을 만료하지 않음(`schema-7`), `result_text`의 소멸자를 결과가 끝날 때 부름(`func-12.1`), `sqlite3_aggregate_count()`(`func-23.1`), MISUSE에서도 함수의 소멸자를 부름(`func3-4.2`), `%n`(`printf-14.2`), `expanded_sql`의 NUL(`trace3-8.7`), 뷰의 열 이름을 구할 때 잡은 테이블 참조를 바로 놓음(`view3`)
   - 값과 기타: REAL 기본값의 48비트 정수는 정수로 인덱스에 들어감(`intreal-7.2x`), `table_column_metadata`의 `rowid`(`colmeta-101`), `close_v2` 뒤의 prepare가 MISUSE(`close-1.4.3`), 긴 리터럴이 `string or blob too big`(`sqlite3ErrorToParser()`, `sqllimits1`), `OP_ReopenIdx`가 커서 위치를 지움(`in4-12.1`), iVersion 1 VFS의 `PRAGMA mmap_size`(`sort5-1.0`)
 
-전체 xqlite만 실패는 950개에서 89개가 되었습니다. 지금 xqlite만 실패하는 주된 원인은 다음과 같습니다(`trans`·`avtrans`의 55개씩은 테스트 이름에 반복 번호가 들어가 두 쪽이 다른 이름을 돈 것입니다).
+- 그다음 묶음(xqlite만 실패 89개 → 85개. 새로 실패한 것 없음):
+  - 오류 로그: 엔진이 `sqlite3_log()`로 남기는 기록을 옮김([C API의 오류 로그](c-api.md#오류-로그): `autoindex1-113`, `wal-23.4`)
+  - `SQLITE_CONFIG_COVERING_INDEX_SCAN`(`coveridxscan-3.*`), overflow 페이지를 파일에서 바로 읽기와 `compile_options`의 `DIRECT_OVERFLOW_READ`(`ctime-3.0.1`)
+  - 바인딩의 소멸자를 SQLite처럼 값을 다 쓴 뒤 부름, 닫힌 연결 검사를 `exec`·`errcode`·`prepare16`에도 둠
+  - 시간 제한에 가려져 있던 `misc7`의 두 가지: 저널을 만들 수 없는 디렉터리는 `SQLITE_READONLY_DIRECTORY`(`misc7-23.4`), 연결 없는 `sqlite3_errmsg16()`은 `out of memory`(`misc7-8`)
+  - ATTACH가 스키마를 읽는 동안 모든 b-tree 뮤텍스를 잡음(`attach.c`처럼). 공유 캐시를 쓰는 스레드들이 같은 스키마를 동시에 읽어 `thread002`가 부하에서 가끔 `malformed database schema ... already exists`나 패닉으로 끝나던 것
+
+전체 xqlite만 실패는 950개에서 85개가 되었습니다. 지금 xqlite만 실패하는 주된 원인은 다음과 같습니다(`trans`·`avtrans`의 109개는 테스트 이름에 `random()`으로 정해지는 행 수가 들어가 두 쪽이 다른 이름을 돈 것이고, 실패 수는 두 쪽이 같습니다).
 
 | 원인 | 예 |
 | --- | --- |
-| `sqlite3_log()`의 알림이 없음 | `autoindex1-113`: `SQLITE_WARNING_AUTOINDEX {automatic index on t2(c)}` 대신 빈 값, `wal-23.4`(`SQLITE_NOTICE_RECOVER_WAL`) |
-| 순서가 정해지지 않은 결과, 컴파일 옵션 목록 | `coveridxscan-3.*`, `ctime-3.0.1`(`DIRECT_OVERFLOW_READ`) |
+| 스레드 테스트가 가끔 실패 | `thread004-1.2`: 공유 캐시 설정을 스레드들이 함께 바꾸는 테스트로, SQLite fixture도 가끔 SEGV로 끝남 |
 | macOS의 프록시 잠금(`SQLITE_ENABLE_LOCKING_STYLE`의 `SQLITE_FCNTL_SET_LOCKPROXYFILE`)을 옮기지 않음 | `filectrl-1.5`(`SQLITE_NOTFOUND`) |
 | 메모리 통계(lookaside, `sqlite3_db_status`의 바이트 수) | `lookaside`(12개), `dbstatus`(38개), `dbstatus2`, `memsubsys1`, `memsubsys2`, `shrink` |
 | 사용자 페이지 캐시·뮤텍스 구현(`SQLITE_CONFIG_PCACHE2`, `MUTEX`)을 SQLite처럼 쓰지 않음 | `pcache2`, `init`, `mutex1`, `mutex2` |
-| C API | 모든 연결을 닫은 뒤 메모리가 남음(xqlite 1162개 파일) |
+| C API | 모든 연결을 닫은 뒤 메모리가 남음(xqlite 1163개 파일) |
 
 ## 퍼징
 

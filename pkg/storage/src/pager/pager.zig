@@ -619,6 +619,19 @@ pub const Pager = struct {
         return per_page * p.cache.pageCount() + @sizeOf(Pager) + p.page_size;
     }
 
+    /// Port of sqlite3PagerDirectReadOk() (SQLITE_DIRECT_OVERFLOW_READ):
+    /// whether the b-tree may read page `pgno` straight from the file.
+    /// The file is open, nothing in the cache is dirty, the page is not
+    /// in the WAL, and the VFS reads parts of pages.
+    pub fn directReadOk(p: *Pager, pgno: Pgno) bool {
+        if (!p.fd.isOpen()) return false;
+        if (p.cache.dirty_head != null) return false;
+        if (p.wal) |w| {
+            if ((w.findFrame(pgno) catch 0) != 0) return false;
+        }
+        return p.fd.deviceCharacteristics().subpage_read;
+    }
+
     /// Port of sqlite3PagerIsMemdb(): a temporary or VFS-implemented
     /// in-memory database.
     pub fn isMemdb(p: *const Pager) bool {
@@ -2001,6 +2014,11 @@ pub const Pager = struct {
 
         p.journal_off = 0;
         var need_reset = is_hot;
+        var n_playback: u32 = 0;
+        // SQLITE_NOTICE_RECOVER_ROLLBACK.
+        defer if (is_hot and n_playback != 0) {
+            vfs.log(27 | (2 << 8), "recovered {d} pages from {s}", .{ n_playback, p.journal_path });
+        };
         records: while (super_exists) {
             const hdr = try p.readJournalHdr(is_hot, sz_j) orelse break;
             const rec_size = journal.recordSize(p.page_size);
@@ -2034,6 +2052,7 @@ pub const Pager = struct {
                     p.journal_off = sz_j;
                     break;
                 }
+                n_playback += 1;
             }
         }
 

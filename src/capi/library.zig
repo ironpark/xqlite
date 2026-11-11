@@ -275,9 +275,14 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
         // (capi/varargs.c); none without threads, as in SQLite.
         10, 11 => return if (c.have_threads) RC.OK else RC.ERROR,
         // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, PCACHE,
-        // PCACHE2, COVERING_INDEX_SCAN, SQLLOG, WIN32_HEAPSIZE, PMASZ,
-        // STMTJRNL_SPILL, SMALL_MALLOC, SORTERREF_SIZE.
-        6, 7, 8, 14, 18, 20, 21, 23, 25, 26, 27, 28 => return RC.OK,
+        20 => {
+            @import("../sql/global.zig").use_cis = a != 0;
+            return RC.OK;
+        },
+        // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, PCACHE,
+        // PCACHE2, SQLLOG, WIN32_HEAPSIZE, PMASZ, STMTJRNL_SPILL,
+        // SMALL_MALLOC, SORTERREF_SIZE.
+        6, 7, 8, 14, 18, 21, 23, 25, 26, 27, 28 => return RC.OK,
         else => return RC.ERROR,
     }
 }

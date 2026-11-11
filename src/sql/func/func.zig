@@ -844,18 +844,20 @@ fn sourceidFunc(ctx: *Context, argv: []*Mem) void {
     api.resultText(ctx, sqlite_source_id, .static);
 }
 
-/// errlogFunc(): sqlite_log(CODE, MSG). There is no error log
-/// (sqlite3_log()) yet, so it only evaluates its arguments.
+/// errlogFunc(): sqlite_log(CODE, MSG) writes to the error log
+/// (sqlite3_log()).
 fn errlogFunc(ctx: *Context, argv: []*Mem) void {
     _ = ctx;
-    _ = api.valueInt(argv[0]);
-    _ = api.valueText(argv[1]);
+    const code = api.valueInt(argv[0]);
+    const msg = api.valueText(argv[1]);
+    util.log(code, "{s}", .{if (msg) |m| @as([]const u8, m) else "(null)"});
 }
 
 /// sqlite3CompileOptions() (ctime.c): the options of a default build.
 const compile_options = [_][]const u8{
     "ATOMIC_INTRINSICS=1",
     "COMPILER=zig-" ++ builtin.zig_version_string,
+    "DIRECT_OVERFLOW_READ",
     "SYSTEM_MALLOC",
     "THREADSAFE=1",
 };

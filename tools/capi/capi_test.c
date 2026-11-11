@@ -2620,7 +2620,8 @@ static int nCorruptLog;
 static char zCorruptLog[200];
 static void corruptLogger(void *pArg, int rc, const char *zMsg){
   (void)pArg;
-  if( rc==SQLITE_CORRUPT ){
+  /* The statement that fails logs too ("statement aborts at ..."). */
+  if( rc==SQLITE_CORRUPT && strncmp(zMsg, "database corruption", 19)==0 ){
     nCorruptLog++;
     snprintf(zCorruptLog, sizeof(zCorruptLog), "%s", zMsg);
   }

@@ -119,6 +119,7 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
         } else {
             aux.vdbeError(v, "{s}", .{if (op.p4type == .z) std.mem.span(op.p4.z) else ""});
         }
+        e.logAbort(op.p1);
     }
     if (aux.halt(v)) |_| {
         e.rc = if (v.rc != 0) RC.ERROR else RC.DONE;

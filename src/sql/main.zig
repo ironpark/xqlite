@@ -257,10 +257,7 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
         .read_only = of.read_only,
         .nofollow = of.nofollow,
         .create = of.create and !of.read_only,
-        .n_vdbe_read = &db.n_vdbe_read,
-        .db_flags = btreeDbFlags(db),
-        .autovac_pages = btreeAutovacPages(db),
-        .busy_handler = btreeBusyHandler(db),
+        .conn = btreeConn(db),
         .uri_params = parsed.params(),
         .shared_key = sharedKey(of, is_memdb, name),
         .uri = parsed.flags.uri,
@@ -583,9 +580,15 @@ pub fn sharedKey(flags: OpenFlags, is_memdb: bool, name: []const u8) ?[]const u8
     return name;
 }
 
-/// What the b-trees of the connection read of its flags.
-pub fn btreeDbFlags(db: *Sqlite3) btree.DbFlagsFn {
-    return .init(db, dbFlagsOfBtree);
+/// The connection as its b-trees see it (the `db` C passes to
+/// sqlite3BtreeOpen()).
+pub fn btreeConn(db: *Sqlite3) btree.Conn {
+    return .{
+        .n_vdbe_read = &db.n_vdbe_read,
+        .db_flags = .init(db, dbFlagsOfBtree),
+        .autovac_pages = btreeAutovacPages(db),
+        .busy_handler = btreeBusyHandler(db),
+    };
 }
 
 fn dbFlagsOfBtree(db: *const Sqlite3) btree.DbFlags {

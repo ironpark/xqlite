@@ -1806,6 +1806,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.ShmLock, RC.IOERR_SHMLOCK },
     .{ error.ShmMap, RC.IOERR_SHMMAP },
     .{ error.DeleteNoEnt, RC.IOERR_DELETE_NOENT },
+    .{ error.ReadOnlyDirectory, RC.READONLY_DIRECTORY },
     .{ error.Corrupt, RC.CORRUPT },
     .{ error.NotFound, RC.NOTFOUND },
     .{ error.DiskFull, RC.FULL },

@@ -27,6 +27,7 @@ const allowed = [_]struct { []const u8, []const u8 }{
     // sqlite3SharedCacheList, and the mutexes shared cache takes, which
     // the C ABI sets (sqlite3MutexAlloc()).
     .{ "src/sql/global.zig", "shared_cache_enabled" },
+    .{ "src/sql/global.zig", "use_cis" },
     .{ "pkg/storage/src/btree/btree.zig", "shared_list" },
     .{ "pkg/storage/src/btree/btree.zig", "mutex_hooks" },
     // The sqlite3_log() of the embedder, set once by the C ABI.

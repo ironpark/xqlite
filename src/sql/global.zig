@@ -61,6 +61,10 @@ pub const TestCtrl = struct {
     /// outside tests.
     extra_schema_checks: bool = true,
 };
+/// SQLITE_CONFIG_COVERING_INDEX_SCAN (sqlite3GlobalConfig.bUseCis): a
+/// full scan may read a covering index instead of the table.
+pub var use_cis: bool = true;
+
 /// sqlite3_enable_shared_cache() (sqlite3GlobalConfig.sharedCacheEnabled):
 /// connections opened from now on share their cache unless asked not to
 /// (OpenFlags.private_cache).

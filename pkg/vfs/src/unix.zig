@@ -648,8 +648,8 @@ pub const UnixVfs = struct {
         if (fd < 0) {
             const e = errno();
             if (is_new_jrnl and e == eno(.ACCES) and os(.access)(name.ptr, 0) != 0) {
-                // The directory is not writable (SQLITE_READONLY_DIRECTORY).
-                return error.ReadOnly;
+                // The directory is not writable.
+                return error.ReadOnlyDirectory;
             } else if (e != eno(.ISDIR) and flags.read_write and !flags.exclusive) {
                 // Like unixOpen(): what cannot be opened read-write (a
                 // file without write permission, say) is opened

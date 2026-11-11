@@ -37,9 +37,9 @@ fn prepare(db_arg: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: Fla
     out.* = null;
     if (pz_tail) |t| t.* = z_sql;
     const db = db_arg orelse return RC.MISUSE;
-    // sqlite3SafetyCheckOk(): a connection sqlite3_close_v2() left open
-    // for its statements takes no new ones.
-    if (c.isZombie(db)) return RC.MISUSE;
+    // A connection sqlite3_close_v2() left open for its statements
+    // takes no new ones.
+    if (!c.safetyCheckOk(db)) return RC.MISUSE;
     const sql = z_sql orelse return RC.MISUSE;
     const flags = prep_flags.stored();
     const text = c.cSliceZ(sql, n_byte);
@@ -86,6 +86,7 @@ fn prepare16(db_arg: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, prep_fla
     out.* = null;
     if (pz_tail) |t| t.* = z_sql;
     const db = db_arg orelse return RC.MISUSE;
+    if (!c.safetyCheckOk(db)) return RC.MISUSE;
     // The SQL ends at a NUL character within `n_byte` (sqlite3Prepare16()).
     const whole = c.utf16Slice(z_sql orelse return RC.MISUSE, n_byte);
     var len: usize = 0;
@@ -164,7 +165,7 @@ fn idx(i: c_int) usize {
 }
 
 /// Call the destructor the application passed for a value the engine
-/// has copied (anything but SQLITE_STATIC and SQLITE_TRANSIENT).
+/// did not take (anything but SQLITE_STATIC and SQLITE_TRANSIENT).
 fn done(del: ?*const anyopaque, p: ?*const anyopaque) void {
     if (c.cDestructor(del)) |f| if (p != null) f(@constCast(p));
 }
@@ -196,14 +197,19 @@ pub export fn sqlite3_bind_double(v: ?*Vdbe, i: c_int, x: f64) callconv(.c) c_in
 fn bindBlob(v_arg: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: u64, del: ?*const anyopaque) c_int {
     const lk = c.lockStmt(v_arg);
     defer lk.unlock();
-    defer done(del, z);
-    const v = v_arg orelse return RC.MISUSE;
+    const v = v_arg orelse {
+        done(del, z);
+        return RC.MISUSE;
+    };
     const p: [*]const u8 = @ptrCast(z orelse return c.api.bindNull(v, idx(i)));
     if (n > std.math.maxInt(c_int)) {
+        done(del, z);
         _ = c.api.bindNull(v, idx(i));
         return RC.TOOBIG;
     }
-    return c.api.bindBlob(v, idx(i), p[0..@intCast(n)]);
+    // The statement keeps the bytes and calls the destructor when it
+    // is done with them, as in SQLite.
+    return c.api.bindStr(v, idx(i), p[0..@intCast(n)], 0, c.engineDestructor(del));
 }
 
 pub export fn sqlite3_bind_blob(v: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: c_int, del: ?*const anyopaque) callconv(.c) c_int {
@@ -219,23 +225,27 @@ pub export fn sqlite3_bind_blob64(v: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: 
 fn bindText(v_arg: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: i64, del: ?*const anyopaque, enc: u8) c_int {
     const lk = c.lockStmt(v_arg);
     defer lk.unlock();
-    defer done(del, z);
-    const v = v_arg orelse return RC.MISUSE;
+    const v = v_arg orelse {
+        done(del, z);
+        return RC.MISUSE;
+    };
     const p = z orelse return c.api.bindNull(v, idx(i));
+    const engine_del = c.engineDestructor(del);
     switch (enc) {
         2, 3, 4 => {
             const s16 = c.utf16Slice(p, n);
             // Stored as given (SQLITE_LIMIT_LENGTH counts its bytes), then
             // in the database encoding, as C's bindText() does.
-            return c.api.bindTextEnc(v, idx(i), std.mem.sliceAsBytes(s16), if (enc == 4) c.utf.UTF16NATIVE else enc);
+            return c.api.bindStr(v, idx(i), std.mem.sliceAsBytes(s16), if (enc == 4) c.utf.UTF16NATIVE else enc, engine_del);
         },
         else => {
             const s = c.cSlice(@ptrCast(p), n);
             if (s.len > std.math.maxInt(c_int)) {
+                done(del, z);
                 _ = c.api.bindNull(v, idx(i));
                 return RC.TOOBIG;
             }
-            return c.api.bindText(v, idx(i), s);
+            return c.api.bindStr(v, idx(i), s, c.vi.ENC.UTF8, engine_del);
         },
     }
 }

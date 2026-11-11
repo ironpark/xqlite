@@ -591,3 +591,19 @@ pub fn logEstAdd(a: i16, b: i16) i16 {
     if (@as(i32, hi) > @as(i32, lo) + 31) return hi + 1;
     return hi + x[@intCast(hi - lo)];
 }
+
+/// sqlite3_log(): `code` and the message go to the logger of
+/// SQLITE_CONFIG_LOG, if one is set.
+pub const log = @import("xqlite_vfs").vfs.log;
+
+/// Whether log() has anywhere to write (sqlite3GlobalConfig.xLog).
+pub fn logging() bool {
+    return @import("xqlite_vfs").vfs.log_fn != null;
+}
+
+/// Port of sqlite3ReportError(): log where the error `code` was first
+/// found ("index corruption", "misuse": `what`), with the source file
+/// in place of the source id.
+pub fn reportError(code: i32, src: std.builtin.SourceLocation, what: []const u8) void {
+    log(code, "{s} at line {d} of [{s}]", .{ what, src.line, std.fs.path.basename(src.file) });
+}

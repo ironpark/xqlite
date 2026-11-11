@@ -47,26 +47,15 @@ pub fn cDestructor(p: ?*const anyopaque) ?CDestructor {
     return @ptrCast(@alignCast(x));
 }
 
-/// What the engine makes of a destructor argument for a string or blob
-/// of `len` bytes at `z`: SQLITE_STATIC and SQLITE_TRANSIENT as they
-/// are, sqlite3_free() as the library's free(). Any other function is
-/// not one the engine can call, so the value is copied and the function
-/// called right away (after()), which SQLite also allows.
-pub const Del = struct {
-    engine: vi.Destructor,
-    call_after: ?CDestructor = null,
-
-    pub fn of(p: ?*const anyopaque) Del {
-        const x = p orelse return .{ .engine = .static };
-        if (@intFromPtr(x) == SQLITE_TRANSIENT) return .{ .engine = .transient };
-        if (@intFromPtr(x) == @intFromPtr(&@import("library.zig").sqlite3_free)) return .{ .engine = .{ .func = malloc.free } };
-        return .{ .engine = .transient, .call_after = @ptrCast(@alignCast(x)) };
-    }
-
-    pub fn after(d: Del, data: ?*const anyopaque) void {
-        if (d.call_after) |f| f(@constCast(data));
-    }
-};
+/// What the engine makes of a destructor argument for a string or
+/// blob: SQLITE_STATIC and SQLITE_TRANSIENT as they are, sqlite3_free()
+/// as the library's free(), and any other function to call when it is
+/// done with the value.
+pub fn engineDestructor(p: ?*const anyopaque) vi.Destructor {
+    const f = cDestructor(p) orelse return if (p == null) .static else .transient;
+    if (@intFromPtr(f) == @intFromPtr(&@import("library.zig").sqlite3_free)) return .{ .func = malloc.free };
+    return .{ .func = f };
+}
 
 /// The C length convention: a negative `n` means up to the first NUL.
 pub fn cSlice(z: [*]const u8, n: i64) []const u8 {
@@ -216,10 +205,14 @@ pub fn ext(db: *Handle) *Ext {
     return @ptrCast(@alignCast(db.capi.?));
 }
 
-/// Whether sqlite3_close_v2() closed `db` while statements were left
-/// (eOpenState SQLITE_STATE_ZOMBIE).
-pub fn isZombie(db: *Handle) bool {
-    return if (extOf(db)) |e| e.zombie else false;
+/// Port of sqlite3SafetyCheckOk() and sqlite3SafetyCheckSickOrOk():
+/// whether `db` may be used. Not once sqlite3_close_v2() closed it
+/// while statements were left (eOpenState SQLITE_STATE_ZOMBIE), which
+/// is logged.
+pub fn safetyCheckOk(db: *Handle) bool {
+    const zombie = if (extOf(db)) |e| e.zombie else false;
+    if (zombie) util.log(RC.MISUSE, "API call with {s} database connection pointer", .{"invalid"});
+    return !zombie;
 }
 
 /// Note that a value of `db` (if any) is being converted to UTF-16.

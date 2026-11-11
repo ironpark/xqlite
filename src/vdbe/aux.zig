@@ -1203,9 +1203,11 @@ fn commitWithSuperJournal(db: *Sqlite3, main_file: []const u8) i32 {
     var retry_count: u32 = 0;
     while (true) {
         if (retry_count > 100) {
-            // C logs "MJ delete" here.
+            util.log(RC.FULL, "MJ delete: {s}", .{super});
             v.delete(super, false) catch {};
             break;
+        } else if (retry_count == 1) {
+            util.log(RC.FULL, "MJ collide: {s}", .{super});
         }
         retry_count += 1;
         var random: [4]u8 = undefined;

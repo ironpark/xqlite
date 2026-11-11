@@ -220,8 +220,8 @@ pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
     // (sqlite3VdbeFindIndexKey()).
     if (order != .eq and try serial.findIndexKey(cur, op.p4.index, &r, false) != 0) {
         if (!e.db.flags.WriteSchema or e.db.flags.Defensive) {
-            // sqlite3ReportError(): logged, no message of its own.
-            @import("xqlite_storage").corrupt.corrupt(@src()) catch {};
+            // SQLITE_CORRUPT_INDEX_BKPT: logged, no message of its own.
+            @import("../../sql/util.zig").reportError(RC.CORRUPT_INDEX, @src(), "index corruption");
             return e.abort(RC.CORRUPT_INDEX);
         }
         c.cache_status = vi.cache_stale;

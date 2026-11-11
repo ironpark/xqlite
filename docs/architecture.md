@@ -568,6 +568,10 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 
 한 파일은 한 모듈에만 속할 수 있으므로, 엔진과 스토리지가 함께 쓰는 파일 형식 코드(`record`, `varint`)는 이 패키지에 두고 엔진은 `@import("xqlite_storage").varint` 식으로 가져옵니다. 공개 Zig API(`xqlite.pager`, `xqlite.pcache`, `xqlite.btree`, `xqlite.record`, `xqlite.varint`)는 `src/root.zig`가 다시 내보내므로 그대로입니다. 패키지 디렉터리에서 `zig build test`를 하면 스토리지 테스트(B-tree, 페이저, WAL, 저널)만 돌고, `zig build bench`(루트에서는 `zig build bench-btree`)는 B-tree 커서 벤치마크(`pkg/storage/bench/btree.zig`)를 돌립니다. B-tree 테스트의 픽스처는 `pkg/storage/src/testdata`에 있습니다(`xqt gen fixtures`).
 
+**overflow 페이지를 파일에서 바로 읽기.** SQLite의 기본 빌드처럼(`SQLITE_DIRECT_OVERFLOW_READ`) 큰 행을 읽을 때 overflow 페이지의 내용을 페이지 캐시를 거치지 않고 파일에서 결과 버퍼로 바로 읽습니다(`Cursor.accessPayload()`, `Pager.directReadOk()`). 캐시에 더러운 페이지가 없고, 그 페이지가 WAL에 없고, VFS가 페이지의 일부를 읽을 수 있을 때만입니다. `PRAGMA compile_options`에도 `DIRECT_OVERFLOW_READ`가 나옵니다.
+
+**연결이 여는 b-tree.** 연결에서 읽는 것(읽는 문장 수, `RESET_DATABASE`·`writable_schema` 플래그, busy 처리기, autovacuum 콜백)은 `btree.Conn` 하나로 넘깁니다(`main.btreeConn(db)`, C가 `sqlite3BtreeOpen()`에 넘기는 `db`). 주 데이터베이스, ATTACH, temp, 임시 테이블의 b-tree가 모두 같은 것을 받습니다.
+
 **손상 보고와 검사.** 스토리지 층에서 파일이 손상된 것을 찾는 곳은 모두 `error.Corrupt`를 그냥 돌려주지 않고 `corrupt(@src())`(페이지를 알면 `corruptPage(pgno, @src())`)를 돌려줍니다(`pkg/storage/src/corrupt.zig`, SQLite의 `SQLITE_CORRUPT_BKPT`·`SQLITE_CORRUPT_PAGE`). 오류는 같고, 훅 `corrupt.hook`이 있으면 소스 위치와 페이지를 받습니다. C ABI는 이 훅을 `SQLITE_CONFIG_LOG` 로거로 보내므로(`database corruption page 2 at line 268 of [page.zig]`), SQLite처럼 로그에서 어느 검사가 걸렸는지 보입니다. 모델 퍼저는 위치를 출력합니다.
 
 `corrupt.never_corrupt`(`SQLITE_TESTCTRL_NEVER_CORRUPT`, 테스트 빌드의 기본값은 켜짐)가 켜져 있고 런타임 안전 검사가 있는 빌드이면, SQLite가 `CORRUPT_DB`로 감싼 디버그 검사가 돕니다. 손상된 파일이면 실패할 수 있는 검사들입니다. 커서가 캐시한 셀 정보(`assertCellInfo`), 부모 페이지의 자식 포인터(`assertParentIndex`), `at_last` 표시(`cursorIsAtLastEntry`), `editPage`가 만든 셀, `fillInCell`이 쓴 셀, 빠른 `cellSize`와 전체 파싱의 일치, 밸런싱 뒤의 포인터 맵(`ptrmapCheckPages`, SQLite에서는 `#if 0`)을 확인합니다. ReleaseFast에서는 comptime에 빠집니다. 손상된 파일을 다루는 테스트와 `btree_corrupt` 퍼저는 이 검사를 끕니다.

@@ -162,6 +162,7 @@ fn codeErr(rc: c_int) Error {
         RC.IOERR_SHMLOCK => error.ShmLock,
         RC.IOERR_NOMEM => error.OutOfMemory,
         RC.IOERR_DELETE_NOENT => error.DeleteNoEnt,
+        RC.READONLY_DIRECTORY => error.ReadOnlyDirectory,
         else => switch (rc & 0xff) {
             RC.BUSY, RC.LOCKED => error.Busy,
             RC.CANTOPEN => error.CantOpen,

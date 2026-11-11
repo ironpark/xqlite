@@ -114,6 +114,10 @@ pub fn runParser(p: *Parse, sql: [:0]const u8) (Oom || int.ParseError)!void {
     }
     // The rest of the text, which ends at a NUL in it (as C's).
     p.tail = if (pos < sql.len and sql[pos] == 0) sql[pos..pos :0] else sql[pos..];
+    if (failed and p.prep_flags & @import("../../vdbe/aux.zig").PREPARE_DONT_LOG == 0 and util.logging()) {
+        // C's zTail still is the start of the text here.
+        util.log(p.rc, "{s} in \"{s}\"", .{ p.err_msg.?, std.mem.sliceTo(sql, 0) });
+    }
     if (p.new_table) |t| if (!p.inSpecialParse()) {
         @import("../../sql/build.zig").deleteTable(db, t);
         p.new_table = null;

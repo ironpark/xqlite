@@ -434,6 +434,9 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     if (cnt == 0 and tab == null) {
         std.debug.assert(e.op == TK.ID);
         if (e.flags.DblQuoted and areDoubleQuotedStringsEnabled(db, top_nc)) {
+            // This misfeature turns a misspelled identifier into a
+            // string, so its use is logged.
+            if (util.logging()) logDblquoteStr(e.token());
             if (p.vdbe) |v| @import("../dialect/sqlite/normalize.zig").addDblquoteStr(v, e.token());
             e.op = TK.STRING;
             e.y = .{ .tab = null };
@@ -1545,4 +1548,21 @@ pub fn resolveSelfReference(p: *Parse, t: ?*Table, type_arg: NC, e: ?*Expr, list
     var nc: NameContext = .{ .parse = p, .src_list = &src, .nc_flags = typ.with(.{ .IsDDL = true }) };
     try resolveExprNames(&nc, e);
     if (list != null) try resolveExprListNames(&nc, list);
+}
+
+/// The warning for a double-quoted string literal, with its quotes
+/// doubled (%w).
+fn logDblquoteStr(name: []const u8) void {
+    var buf: [256]u8 = undefined;
+    var n: usize = 0;
+    for (name) |ch| {
+        if (n + 2 > buf.len) break;
+        buf[n] = ch;
+        n += 1;
+        if (ch == '"') {
+            buf[n] = ch;
+            n += 1;
+        }
+    }
+    util.log(int.RC.WARNING, "double-quoted string literal: \"{s}\"", .{buf[0..n]});
 }

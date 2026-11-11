@@ -168,6 +168,7 @@ pub fn opOpenEphemeral(e: *Exec, op: *Op) Error!Flow {
         .memory = @import("../sorter.zig").tempInMemory(db),
         .temp_kind = .transient_db,
         .mmap_size = db.sz_mmap,
+        .conn = @import("../../sql/main.zig").btreeConn(db),
         .single = true,
         .journal_mode = .off,
         .synchronous = .off,

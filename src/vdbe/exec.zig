@@ -460,8 +460,9 @@ pub const Exec = struct {
         var rc = int.resultCode(err, v.rc);
         if (db.malloc_failed) rc = RC.NOMEM;
         std.debug.assert(rc != 0);
-        if (v.err_msg == null) aux.vdbeError(v, "{s}", .{util.errStr(rc)});
+        if (v.err_msg == null and rc != RC.IOERR_NOMEM) aux.vdbeError(v, "{s}", .{util.errStr(rc)});
         v.rc = rc;
+        e.logAbort(rc);
         if (v.e_vdbe_state == .run) aux.halt(v) catch {};
         if (rc == RC.CORRUPT and !db.auto_commit) db.flags.CorruptRdOnly = true;
         e.rc = RC.ERROR;
@@ -469,6 +470,30 @@ pub const Exec = struct {
             @import("../sql/build.zig").resetOneSchema(db, e.reset_schema_on_fault - 1);
         }
         return e.vdbeReturn(n_vm_step);
+    }
+
+    /// Port of sqlite3VdbeLogAbort(): the "statement aborts" message of
+    /// the error log, for the instruction at `e.pc`.
+    pub fn logAbort(e: *Exec, rc: i32) void {
+        @branchHint(.cold);
+        if (!util.logging()) return;
+        const v = e.v;
+        var extra: [100]u8 = undefined;
+        var prefix: []const u8 = "";
+        if (v.frame != null) {
+            // The name of the trigger, from the "-- NAME" of its OP_Init.
+            const init = e.ops[0];
+            prefix = if (init.p4type == .z)
+                std.fmt.bufPrint(&extra, "/* {s} */ ", .{std.mem.span(init.p4.z)[3..]}) catch extra[0..]
+            else
+                "/* unknown trigger */ ";
+        }
+        util.log(rc, "statement aborts at {d}: {s}; [{s}{s}]", .{
+            e.pc,
+            if (v.err_msg) |m| @as([]const u8, m) else "(null)",
+            prefix,
+            if (v.sql) |s| @as([]const u8, s) else "(null)",
+        });
     }
 
     /// Call the progress handler, whose limit `limit` (the run loop's

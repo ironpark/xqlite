@@ -42,6 +42,8 @@ const corrupt = @import("../corrupt.zig").corrupt;
 const random = @import("../random.zig");
 const builtin = @import("builtin");
 const vfs = @import("xqlite_vfs").vfs;
+/// SQLITE_NOTICE_RECOVER_WAL.
+const notice_recover_wal = 27 | (1 << 8);
 const pcache = @import("pcache.zig");
 const thunk = @import("xqlite_base").thunk;
 const simd = @import("xqlite_base").simd;
@@ -728,7 +730,11 @@ pub const Wal = struct {
                 if (err != error.Busy) return err;
             }
         }
-        // C logs SQLITE_NOTICE_RECOVER_WAL here; there is no log.
+        // More than one frame recovered: applications that routinely
+        // shut down without checkpointing show up in the log.
+        if (w.hdr.n_page != 0) {
+            vfs.log(notice_recover_wal, "recovered {d} frames from WAL file {s}", .{ w.hdr.mx_frame, w.wal_name });
+        }
     }
 
     /// Port of walIndexClose().
@@ -982,8 +988,13 @@ pub const Wal = struct {
     /// Port of walLimitSize(): truncate the WAL to `n_max` bytes if it is
     /// larger. Errors are ignored.
     fn limitSize(w: *Wal, n_max: i64) void {
-        const sz = w.wal_fd.fileSize() catch return;
-        if (sz > n_max) w.wal_fd.truncate(@intCast(n_max)) catch {};
+        // The result codes of the failed call (SQLITE_IOERR_FSTAT,
+        // SQLITE_IOERR_TRUNCATE).
+        const rx: i32 = if (w.wal_fd.fileSize()) |sz| rx: {
+            if (sz > n_max) w.wal_fd.truncate(@intCast(n_max)) catch break :rx 10 | (6 << 8);
+            return;
+        } else |_| 10 | (7 << 8);
+        vfs.log(rx, "cannot limit WAL size: {s}", .{w.wal_name});
     }
 
     /// Port of sqlite3WalCheckpoint() (sqlite3_wal_checkpoint_v2()): take

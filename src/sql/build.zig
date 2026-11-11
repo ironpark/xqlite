@@ -2779,9 +2779,7 @@ pub fn openTempDatabase(p: *Parse) int.ParseError!void {
             .memory = @import("../vdbe/sorter.zig").tempInMemory(db),
             .mmap_size = db.sz_mmap,
             .cell_size_check = db.flags.CellSizeCk,
-            .n_vdbe_read = &db.n_vdbe_read,
-            .db_flags = main_mod.btreeDbFlags(db),
-            .autovac_pages = main_mod.btreeAutovacPages(db),
+            .conn = main_mod.btreeConn(db),
         }) catch |err| {
             util.errorMsg(p, "unable to open a temporary database file for storing temporary tables", .{});
             p.rc = int.errorCode(err);

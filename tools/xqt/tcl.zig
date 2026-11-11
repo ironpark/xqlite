@@ -169,6 +169,16 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         return 2;
     }
 
+    // The fixtures inherit this limit on open files. misc7.test opens
+    // files until it can open no more: with the limit of the shell
+    // (macOS: half of what the system has) the two fixtures together
+    // leave no descriptor for the tests running beside them.
+    if (std.posix.getrlimit(.NOFILE)) |lim| {
+        var l = lim;
+        l.cur = @min(l.cur, 4096);
+        std.posix.setrlimit(.NOFILE, l) catch {};
+    } else |_| {}
+
     const env = try arena.create(std.process.Environ.Map);
     env.* = try cfg.environ.clone(arena);
     try env.put("TCL_LIBRARY", tcl_library);

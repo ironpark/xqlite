@@ -239,7 +239,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
             const i_col = term.left_column;
             const c_mask: Bitmask = if (i_col >= BMS) maskBit(BMS - 1) else maskBit(i_col);
             if (!sent_warning) {
-                // sqlite3_log(SQLITE_WARNING_AUTOINDEX, ...) is not ported.
+                util.log(int.RC.WARNING | (1 << 8), "automatic index on {s}({s})", .{ table.name, table.cols[@intCast(i_col)].name() });
                 sent_warning = true;
             }
             if (idx_cols & c_mask == 0) {

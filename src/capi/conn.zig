@@ -221,31 +221,36 @@ pub export fn sqlite3_close_v2(db: ?*Handle) callconv(.c) c_int {
 pub export fn sqlite3_errcode(db: ?*Handle) callconv(.c) c_int {
     const lk = c.lock(db);
     defer lk.unlock();
-    return c.main.errcode(db orelse return RC.NOMEM);
+    const d = db orelse return RC.NOMEM;
+    if (!c.safetyCheckOk(d)) return RC.MISUSE;
+    return c.main.errcode(d);
 }
 
 pub export fn sqlite3_extended_errcode(db: ?*Handle) callconv(.c) c_int {
     const lk = c.lock(db);
     defer lk.unlock();
-    return c.main.extendedErrcode(db orelse return RC.NOMEM);
+    const d = db orelse return RC.NOMEM;
+    if (!c.safetyCheckOk(d)) return RC.MISUSE;
+    return c.main.extendedErrcode(d);
 }
 
 pub export fn sqlite3_errmsg(db: ?*Handle) callconv(.c) [*:0]const u8 {
     const lk = c.lock(db);
     defer lk.unlock();
     const d = db orelse return c.util.errStr(RC.NOMEM).ptr;
-    // sqlite3SafetyCheckSickOrOk(): a zombie has no message of its own.
-    if (c.isZombie(d)) return c.util.errStr(RC.MISUSE).ptr;
+    // A zombie has no message of its own.
+    if (!c.safetyCheckOk(d)) return c.util.errStr(RC.MISUSE).ptr;
     return c.main.errmsg(d).ptr;
 }
 
 pub export fn sqlite3_errmsg16(db_arg: ?*Handle) callconv(.c) ?*const anyopaque {
     const lk = c.lock(db_arg);
     defer lk.unlock();
-    const db = db_arg orelse return null;
+    // No connection: sqlite3_open16() could not allocate one.
+    const db = db_arg orelse return std.unicode.utf8ToUtf16LeStringLiteral("out of memory");
     const e = c.ext(db);
     if (e.errmsg16) |m| c.gpa.free(m);
-    e.errmsg16 = c.utf8ToUtf16(c.main.errmsg(db));
+    e.errmsg16 = c.utf8ToUtf16(if (c.safetyCheckOk(db)) c.main.errmsg(db) else c.util.errStr(RC.MISUSE));
     return if (e.errmsg16) |m| m.ptr else null;
 }
 
@@ -298,6 +303,7 @@ pub export fn sqlite3_exec(
     const lk = c.lock(db_arg);
     defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
+    if (!c.safetyCheckOk(db)) return RC.MISUSE;
     // Measured once: each statement is prepared from the rest.
     var sql: [:0]const u8 = std.mem.span(z_sql orelse "");
     var rc: c_int = RC.OK;

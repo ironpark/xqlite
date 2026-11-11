@@ -142,6 +142,19 @@ pub const AutoVacuum = enum(u2) {
     }
 };
 
+/// The connection of a b-tree, as far as the b-tree needs it (C: the
+/// `db` of sqlite3BtreeOpen()). All null for a b-tree used on its own.
+pub const Conn = struct {
+    /// The connection's count of reading statements (&db.n_vdbe_read);
+    /// see Btree.n_vdbe_read.
+    n_vdbe_read: ?*const i32 = null,
+    /// The connection's flags the b-tree reads (C: pBt->db->flags).
+    db_flags: ?DbFlagsFn = null,
+    /// The connection's autovacuum-pages callback (see AutovacPages).
+    autovac_pages: ?AutovacPages = null,
+    busy_handler: ?pager_mod.BusyHandler = null,
+};
+
 pub const Options = struct {
     /// An in-memory database (BTREE_MEMORY): `path` is ignored.
     memory: bool = false,
@@ -160,7 +173,8 @@ pub const Options = struct {
     synchronous: pager_mod.Synchronous = .full,
     full_fsync: bool = false,
     cache_size: i32 = -2000,
-    busy_handler: ?pager_mod.BusyHandler = null,
+    /// What the b-tree reads of the connection it belongs to.
+    conn: Conn = .{},
     /// PRAGMA cell_size_check.
     cell_size_check: bool = false,
     secure_delete: SecureDelete = .off,
@@ -169,14 +183,6 @@ pub const Options = struct {
     /// Close the b-tree when its last cursor closes (BTREE_SINGLE), as
     /// ephemeral tables do.
     single: bool = false,
-    /// The connection's count of reading statements (&db.n_vdbe_read) for
-    /// a database of a connection; see Btree.n_vdbe_read. Null for a
-    /// b-tree used on its own.
-    n_vdbe_read: ?*const i32 = null,
-    /// The connection's flags the b-tree reads (C: pBt->db->flags).
-    db_flags: ?DbFlagsFn = null,
-    /// The connection's autovacuum-pages callback (see AutovacPages).
-    autovac_pages: ?AutovacPages = null,
     /// The URI parameters of the database, for the VFS (Pager.Options).
     uri_params: []const u8 = "",
     /// SQLITE_OPEN_SHAREDCACHE: share the BtShared of another handle open
@@ -325,10 +331,10 @@ pub const Btree = struct {
         p.* = .{
             .bs = undefined,
             .pager = undefined,
-            .n_vdbe_read = opts.n_vdbe_read,
-            .db_flags = opts.db_flags,
-            .busy_handler = opts.busy_handler,
-            .autovac_pages = opts.autovac_pages,
+            .n_vdbe_read = opts.conn.n_vdbe_read,
+            .db_flags = opts.conn.db_flags,
+            .busy_handler = opts.conn.busy_handler,
+            .autovac_pages = opts.conn.autovac_pages,
         };
         p.lock = .{ .owner = p, .table = schema_root };
         var key: ?[]u8 = null;
@@ -1074,7 +1080,7 @@ pub const BtShared = struct {
             .full_fsync = opts.full_fsync,
             .extra_size = @sizeOf(MemPage),
             .cache_size = opts.cache_size,
-            .busy_handler = opts.busy_handler,
+            .busy_handler = opts.conn.busy_handler,
             .reiniter = pageReinit,
             .uri_params = opts.uri_params,
             .uri = opts.uri,
@@ -1096,7 +1102,7 @@ pub const BtShared = struct {
             .usable_size = p.page_size,
             .auto_vacuum = opts.auto_vacuum,
             .single = opts.single,
-            .autovac_pages = opts.autovac_pages,
+            .autovac_pages = opts.conn.autovac_pages,
         };
         var reserve: u8 = 0;
         if (header.pageSize(&hdr)) |page_size| {
@@ -2111,6 +2117,24 @@ pub const Cursor = struct {
                 offset -= ovfl_size;
             } else {
                 const a = @min(buf.len, ovfl_size - offset);
+                // SQLITE_DIRECT_OVERFLOW_READ: a read from the start of
+                // the overflow page, when at least 4 bytes are already in
+                // the buffer, goes from the file to the buffer past the
+                // page cache. The link of the page lands on those 4
+                // bytes, which are put back.
+                if (!write and offset == 0 and @intFromPtr(buf.ptr) - @intFromPtr(buf_arg.ptr) >= 4 and
+                    bt.pager.directReadOk(next_page))
+                {
+                    const dst = (buf.ptr - 4)[0 .. a + 4];
+                    const saved = dst[0..4].*;
+                    try bt.pager.fd.read(dst, @as(u64, bt.page_size) * (next_page - 1));
+                    next_page = get4(dst.ptr);
+                    dst[0..4].* = saved;
+                    buf = buf[a..];
+                    if (buf.len == 0) return;
+                    i_idx += 1;
+                    continue;
+                }
                 const db_page = try bt.pager.get(next_page, .{});
                 defer bt.pager.unref(db_page);
                 if (write and (db_page.n_ref != 1 or MemPage.of(db_page).is_init)) return corrupt(@src());

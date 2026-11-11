@@ -131,10 +131,7 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         .nofollow = flags.nofollow,
         .create = flags.create and !flags.read_only,
         .cell_size_check = db.flags.CellSizeCk,
-        .n_vdbe_read = &db.n_vdbe_read,
-        .db_flags = main_mod.btreeDbFlags(db),
-        .autovac_pages = main_mod.btreeAutovacPages(db),
-        .busy_handler = main_mod.btreeBusyHandler(db),
+        .conn = main_mod.btreeConn(db),
         .uri_params = parsed.params(),
         .shared_key = main_mod.sharedKey(flags, is_memdb, path_name),
         .sibling = for (db.dbs.items) |d| {
@@ -186,6 +183,10 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     // Read the schema of the new database. If that fails, or opening it
     // did, put everything back the way it was.
     if (rc == RC.OK) {
+        // Under the mutexes of all the b-trees: another connection
+        // sharing the schema must not read it at the same time.
+        main_mod.btreeEnterAll(db);
+        defer main_mod.btreeLeaveAll(db);
         db.init.i_db = 0;
         db.m_db_flags.SchemaKnownOk = false;
         rc = prepare.init(db, &err_dyn);
@@ -221,9 +222,7 @@ fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
     if (old.txnState() != .none or old.isInBackup()) return api.resultErrorCode(ctx, RC.BUSY);
     const bt = btree.Btree.open(malloc.allocator, memdb.interface(), "x", .{
         .cell_size_check = db.flags.CellSizeCk,
-        .n_vdbe_read = &db.n_vdbe_read,
-        .db_flags = main_mod.btreeDbFlags(db),
-        .busy_handler = main_mod.btreeBusyHandler(db),
+        .conn = main_mod.btreeConn(db),
     }) catch |err| return api.resultErrorCode(ctx, int.errorCode(err));
     const schema = build.schema_gpa.create(Schema) catch {
         bt.close(main_mod.pagerConn(db));

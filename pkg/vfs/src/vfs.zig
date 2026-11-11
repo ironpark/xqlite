@@ -268,15 +268,16 @@ pub const FileControl = union(enum) {
 /// that SQLITE_FCNTL_FILE_POINTER returns for a file of the default VFS.
 pub const ForeignSlot = [4]usize;
 
-/// The function a VFS reports an OS error through (unixLogErrorAtLine(),
-/// sqlite3_log()), if the embedder sets one: the result code and the
-/// message.
+/// The error log (sqlite3_log()), if the embedder sets one: the result
+/// code and the message. The VFSes report OS errors through it
+/// (unixLogErrorAtLine()), and the layers above what SQLite logs.
 pub var log_fn: ?*const fn (code: i32, msg: [:0]const u8) void = null;
 
 /// Report through `log_fn` (sqlite3_log()), formatting the message.
 pub fn log(code: i32, comptime fmt: []const u8, args: anytype) void {
     const f = log_fn orelse return;
-    var buf: [512]u8 = undefined;
+    // SQLITE_PRINT_BUF_SIZE*3: a longer message is cut there.
+    var buf: [210]u8 = undefined;
     const msg = std.fmt.bufPrintSentinel(&buf, fmt, args, 0) catch blk: {
         buf[buf.len - 1] = 0;
         break :blk buf[0 .. buf.len - 1 :0];
@@ -348,6 +349,9 @@ pub const Error = error{
     /// an error only where the caller expects the file, as the pager
     /// deleting a journal it wrote.
     DeleteNoEnt,
+    /// A journal cannot be created: its directory is not writable
+    /// (SQLITE_READONLY_DIRECTORY).
+    ReadOnlyDirectory,
     /// The file is not what the caller says it is (SQLITE_CORRUPT), as
     /// memdb asked to grow by a truncate (a corrupt WAL database).
     Corrupt,

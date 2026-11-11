@@ -227,7 +227,7 @@ pub fn fromEngine(err: engine.Error) SqlError {
         error.Busy, error.BusyRecovery, error.BusySnapshot => error.Busy,
         error.Locked, error.LockedSharedCache => error.Locked,
         error.OutOfMemory => error.OutOfMemory,
-        error.ReadOnly, error.ReadOnlyRecovery, error.ReadOnlyRollback, error.ReadOnlyDbMoved, error.ReadOnlyCantInit => error.ReadOnly,
+        error.ReadOnly, error.ReadOnlyRecovery, error.ReadOnlyRollback, error.ReadOnlyDbMoved, error.ReadOnlyCantInit, error.ReadOnlyDirectory => error.ReadOnly,
         error.Interrupt => error.Interrupt,
         error.IoErr, error.ShortRead, error.LockErr, error.ShmOpen, error.ShmSize, error.ShmLock, error.ShmMap, error.DeleteNoEnt => error.IoErr,
         error.Corrupt => error.Corrupt,

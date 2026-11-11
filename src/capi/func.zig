@@ -354,8 +354,10 @@ pub export fn sqlite3_result_double(ctx: ?*Context, x: f64) callconv(.c) void {
 }
 
 fn resultText(ctx_arg: ?*Context, z: ?*const anyopaque, n: i64, del_arg: ?*const anyopaque, enc: u8) void {
-    const del = c.Del.of(del_arg);
-    const ctx = ctx_arg orelse return del.after(z);
+    const ctx = ctx_arg orelse {
+        if (c.cDestructor(del_arg)) |f| f(@constCast(z));
+        return;
+    };
     const p = z orelse {
         c.api.resultNull(ctx);
         return;
@@ -368,11 +370,9 @@ fn resultText(ctx_arg: ?*Context, z: ?*const anyopaque, n: i64, del_arg: ?*const
             c.api.resultText(ctx, s8, .transient);
         },
         else => {
-            const s = c.cSlice(@ptrCast(p), n);
             // The result keeps the text and calls the application's
             // destructor when it is done with it, as in SQLite.
-            if (del.call_after) |f| return c.api.resultText64(ctx, s, .{ .func = f });
-            c.api.resultText64(ctx, s, del.engine);
+            c.api.resultText64(ctx, c.cSlice(@ptrCast(p), n), c.engineDestructor(del_arg));
         },
     }
 }
@@ -399,8 +399,10 @@ pub export fn sqlite3_result_text16be(ctx: ?*Context, z: ?*const anyopaque, n: c
 }
 
 fn resultBlob(ctx_arg: ?*Context, z: ?*const anyopaque, n: u64, del_arg: ?*const anyopaque) void {
-    const del = c.Del.of(del_arg);
-    const ctx = ctx_arg orelse return del.after(z);
+    const ctx = ctx_arg orelse {
+        if (c.cDestructor(del_arg)) |f| f(@constCast(z));
+        return;
+    };
     const p: [*]const u8 = @ptrCast(z orelse {
         c.api.resultNull(ctx);
         return;
@@ -410,8 +412,7 @@ fn resultBlob(ctx_arg: ?*Context, z: ?*const anyopaque, n: u64, del_arg: ?*const
         if (c.cDestructor(del_arg)) |f| f(@constCast(z));
         return;
     }
-    c.api.resultBlob(ctx, p[0..@intCast(n)], del.engine);
-    del.after(z);
+    c.api.resultBlob(ctx, p[0..@intCast(n)], c.engineDestructor(del_arg));
 }
 
 pub export fn sqlite3_result_blob(ctx: ?*Context, z: ?*const anyopaque, n: c_int, del: ?*const anyopaque) callconv(.c) void {

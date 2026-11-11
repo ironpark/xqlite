@@ -164,6 +164,12 @@ pub const OpenFlags = struct {
     /// xqlite: the caller has resolved a URI's "vfs" parameter itself
     /// (the C ABI's VFS registry), so uri.parse() skips it.
     vfs_resolved: bool = false,
+    /// SQLITE_OPEN_SHAREDCACHE and SQLITE_OPEN_PRIVATECACHE (a URI's
+    /// cache=shared or cache=private): share the page cache and schema
+    /// with other connections to the same database, or not even when
+    /// global.shared_cache_enabled.
+    shared_cache: bool = false,
+    private_cache: bool = false,
 };
 
 /// Port of openDatabase() (sqlite3_open_v2()): open a connection to the
@@ -193,9 +199,14 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
         return oomOnOpen(db);
     };
     db.enc = 1;
-    db.open_flags = flags;
+    // SQLITE_OPEN_PRIVATECACHE, or sqlite3_enable_shared_cache().
+    var fl = flags;
+    if (fl.private_cache) {
+        fl.shared_cache = false;
+    } else if (@import("global.zig").shared_cache_enabled) fl.shared_cache = true;
+    db.open_flags = fl;
 
-    var parsed = @import("uri.zig").parse(gpa, filename, flags);
+    var parsed = @import("uri.zig").parse(gpa, filename, fl);
     defer parsed.deinit(gpa);
     if (parsed.rc != RC.OK) {
         if (parsed.rc == RC.NOMEM) return oomOnOpen(db);
@@ -218,13 +229,24 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
         .autovac_pages = btreeAutovacPages(db),
         .busy_handler = btreeBusyHandler(db),
         .uri_params = parsed.params(),
+        .shared_key = sharedKey(of, is_memdb, name),
+        .uri = parsed.flags.uri,
     }) catch |err| {
         const rc = int.errorCode(err);
         errorWithMsg(db, rc, "{s}", .{util.errStr(rc)});
         return rc;
     };
     db.dbs.items[0].bt = bt;
-    db.dbs.items[0].schema.enc = db.enc;
+    if (bt.sharable) {
+        // The schema of the shared cache, and its text encoding if it was
+        // read (sqlite3SetTextEncoding(db, SCHEMA_ENC(db))).
+        const s = @import("build.zig").sharedSchema(bt) orelse return oomOnOpen(db);
+        gpa.destroy(db.dbs.items[0].schema);
+        db.dbs.items[0].schema = s;
+        db.dbs.items[0].shared = true;
+        db.n_shared = 1;
+        if (s.file_format != 0) @import("coll.zig").setTextEncoding(db, s.enc);
+    } else db.dbs.items[0].schema.enc = db.enc;
     @import("func/func.zig").registerPerConnectionBuiltinFunctions(db);
     // The built-in extensions (sqlite3BuiltinExtensions): the reference
     // build has SQLITE_ENABLE_BYTECODE_VTAB.
@@ -289,12 +311,15 @@ pub fn close(db: *Sqlite3) i32 {
     closeSavepoints(db);
     const gpa = db.gpa;
     for (db.dbs.items, 0..) |*d, i| {
-        @import("build.zig").schemaFree(db, d.schema);
-        gpa.destroy(d.schema);
+        @import("build.zig").dbSchemaFree(db, d);
         if (d.bt) |bt| bt.close(pagerConn(db));
         if (i >= 2) gpa.free(d.name);
     }
     db.dbs.deinit(gpa);
+    // Destructors called below may call back into the connection (a
+    // module's xDestroy registering functions, as test8.c does).
+    db.dbs = .empty;
+    db.n_shared = 0;
     @import("coll.zig").freeAll(db);
     @import("callback.zig").freeFunctions(db);
     db.xq.deinit(gpa);
@@ -446,7 +471,7 @@ pub fn dbFilename(db: *Sqlite3, name: ?[]const u8) ?[]const u8 {
 /// is read-only, or null if there is no such database.
 pub fn dbReadonly(db: *Sqlite3, name: ?[]const u8) ?bool {
     const bt = dbNameToBtree(db, name) orelse return null;
-    return bt.read_only;
+    return bt.bs.read_only;
 }
 
 /// Port of sqlite3_get_autocommit().
@@ -513,6 +538,16 @@ pub fn pagerConn(db: *Sqlite3) @import("xqlite_storage").pager.Conn {
     };
 }
 
+/// Options.shared_key of a database opened with `flags` (the flags of the
+/// connection as the URI left them): its name, if it is to be shared.
+/// As in sqlite3BtreeOpen(), a temporary database never is, nor an
+/// in-memory one not named by a URI.
+pub fn sharedKey(flags: OpenFlags, is_memdb: bool, name: []const u8) ?[]const u8 {
+    if (!flags.shared_cache or flags.private_cache) return null;
+    if (name.len == 0 or (is_memdb and !flags.uri)) return null;
+    return name;
+}
+
 /// The autovacuum-pages callback of the b-trees of the connection.
 pub fn btreeAutovacPages(db: *Sqlite3) btree.AutovacPages {
     return .init(db, autovacPages);
@@ -520,10 +555,10 @@ pub fn btreeAutovacPages(db: *Sqlite3) btree.AutovacPages {
 
 /// The xAutovacPages part of autoVacuumCommit(): ask the application how
 /// many free pages of `bt` to give back.
-fn autovacPages(db: *Sqlite3, bt: *btree.Btree, n_orig: u32, n_free: u32, page_size: u32) ?u32 {
+fn autovacPages(db: *Sqlite3, bt: *btree.BtShared, n_orig: u32, n_free: u32, page_size: u32) ?u32 {
     const f = db.autovac_pages orelse return null;
     for (db.dbs.items) |d| {
-        if (d.bt == bt) return f(db.autovac_pages_arg, d.name, n_orig, n_free, page_size);
+        if (d.bt != null and d.bt.?.bs == bt) return f(db.autovac_pages_arg, d.name, n_orig, n_free, page_size);
     }
     return null;
 }

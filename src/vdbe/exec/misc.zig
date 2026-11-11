@@ -116,8 +116,7 @@ pub fn opFilter(e: *Exec, op: *Op) Flow {
 
 // ============================================================ not ported
 
-/// TableLock (shared cache only), Offset and ColumnsUsed (not in the C
-/// build either).
+/// Offset and ColumnsUsed (not in the C build either).
 pub fn opNotSupported(e: *Exec, op: *Op) Error!Flow {
     aux.vdbeError(e.v, "not supported yet: OP_{s}", .{op.opcode.name()});
     return error.Error;

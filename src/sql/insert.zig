@@ -60,6 +60,7 @@ const SRT = select_mod.SRT;
 /// table).
 pub fn openTable(p: *Parse, i_cur: i32, i_db: usize, t: *Table, opcode: OP) void {
     const v = p.vdbe.?;
+    build.tableLock(p, i_db, t.tnum, opcode == OP.OpenWrite, t.name);
     if (t.hasRowid()) {
         _ = aux.addOp4Int(v, opcode, i_cur, @intCast(t.tnum), @intCast(i_db), t.n_nv_col);
     } else {
@@ -1149,9 +1150,10 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         _ = aux.addOp2(v, OP.Next, i_src, addr1);
         _ = aux.addOp2(v, OP.Close, i_src, 0);
         _ = aux.addOp2(v, OP.Close, i_dest, 0);
+    } else {
+        build.tableLock(p, i_db_dest, dest.tnum, true, dest.name);
+        build.tableLock(p, i_db_src, src.tnum, false, src.name);
     }
-    // (C codes sqlite3TableLock() for WITHOUT ROWID tables, which does
-    // nothing without a shared cache.)
     di = dest.index;
     while (di) |dest_idx| : (di = dest_idx.next) {
         var idx_ins_flags: u16 = 0;
@@ -1801,7 +1803,9 @@ pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, i_base_arg:
     const i_data_cur = i_base;
     i_base += 1;
     data_cur.* = i_data_cur;
-    if (t.hasRowid() and (to_open == null or to_open.?[0])) openTable(p, i_data_cur, i_db, t, op);
+    if (t.hasRowid() and (to_open == null or to_open.?[0])) {
+        openTable(p, i_data_cur, i_db, t, op);
+    } else build.tableLock(p, i_db, t.tnum, op == OP.OpenWrite, t.name);
     idx_cur.* = i_base;
     var i: usize = 0;
     var idx_opt = t.index;

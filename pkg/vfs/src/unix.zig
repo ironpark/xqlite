@@ -1,4 +1,5 @@
-//! POSIX VFS (port of the "unix" VFS in os_unix.c, POSIX advisory locking only).
+//! POSIX VFS (port of the "unix", "unix-excl" and "unix-none" VFSes of os_unix.c,
+//! POSIX advisory locking).
 //!
 //! Locks use the same byte ranges as SQLite, so xqlite and real SQLite
 //! processes can safely share a database file.
@@ -9,21 +10,32 @@
 //! `InodeInfo` that tracks lock state across handles, and closing a handle
 //! while other handles still hold locks defers the close(2).
 //!
+//! "unix-excl" (`UnixVfs.excl`) takes, with the first lock of a file
+//! opened read-write, an exclusive POSIX lock on the whole shared range
+//! and keeps it until the last handle of the process closes: connections
+//! of this process still exclude each other in memory, other processes
+//! are shut out, and the wal-index of a WAL database is heap memory with
+//! no -shm file (bProcessLock).
+//!
 //! The shared memory of a WAL database (the wal-index) is the mmapped
 //! "-shm" file next to it, locked with the same byte ranges as os_unix.c
 //! (UNIX_SHM_BASE, UNIX_SHM_DMS), so the wal-index is shared with real
 //! SQLite processes too. As in os_unix.c, each inode has at most one
-//! `ShmNode` per process, shared by every handle that maps it.
+//! `ShmNode` per process, shared by every handle that maps it. With the
+//! URI parameter readonly_shm=1 the -shm file is opened read-only.
 //!
 //! Memory-mapped I/O (PRAGMA mmap_size, xFetch/xUnfetch) maps the
 //! database file read-only and shared, as os_unix.c does without
 //! SQLITE_MMAP_READWRITE: reads within the mapping are copied out of it
 //! and the pager may use mapped pages in place; writes still go through
-//! pwrite(2). Growing the mapping maps it anew (C uses mremap() on
-//! Linux and extends the mapping in place elsewhere when it can).
+//! pwrite(2).
 //!
-//! Not ported yet: proxy/dotfile/flock locking styles, unix-excl
-//! (process-private locks), F_SETLKW timeouts.
+//! Every system call goes through a table that can be overridden, as
+//! aSyscall[] of os_unix.c (xSetSystemCall(), xGetSystemCall(),
+//! xNextSystemCall(): setSystemCall() ...), with the same names and C
+//! signatures, so a test harness can inject faults.
+//!
+//! Not ported: proxy/dotfile/flock/afp locking styles, F_SETLKW timeouts.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -34,7 +46,457 @@ const Allocator = std.mem.Allocator;
 const LockLevel = vfs.LockLevel;
 const Error = vfs.Error;
 const c = std.c;
-const fd_t = std.posix.fd_t;
+const fd_t = c_int;
+const off_t = i64;
+const mode_t = c.mode_t;
+
+// ===================================================== system calls
+
+/// `struct stat` of the C library, as the stat family of the system call
+/// table fills it. On Linux, where std.c has none, the layout of the
+/// kernel's (which glibc and musl use on 64-bit targets), filled from
+/// statx(2) by the default functions.
+pub const Stat = if (builtin.os.tag == .linux) LinuxStat else c.Stat;
+
+const LinuxStat = if (builtin.cpu.arch == .x86_64) extern struct {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    __pad0: u32 = 0,
+    rdev: u64,
+    size: i64,
+    blksize: i64,
+    blocks: i64,
+    times: [6]i64,
+    __unused: [3]i64 = @splat(0),
+} else extern struct {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    nlink: u32,
+    uid: u32,
+    gid: u32,
+    rdev: u64,
+    __pad1: u64 = 0,
+    size: i64,
+    blksize: i32,
+    __pad2: i32 = 0,
+    blocks: i64,
+    times: [6]i64,
+    __unused: [2]u32 = @splat(0),
+};
+
+fn isReg(m: anytype) bool {
+    return @as(u32, m) & 0o170000 == 0o100000;
+}
+fn isDir(m: anytype) bool {
+    return @as(u32, m) & 0o170000 == 0o040000;
+}
+fn isLnk(m: anytype) bool {
+    return @as(u32, m) & 0o170000 == 0o120000;
+}
+
+/// The overridable system calls, in the order of aSyscall[] (the
+/// numbers are its indexes).
+const Sys = enum {
+    open,
+    close,
+    access,
+    getcwd,
+    stat,
+    fstat,
+    ftruncate,
+    fcntl,
+    read,
+    pread,
+    pread64,
+    write,
+    pwrite,
+    pwrite64,
+    fchmod,
+    fallocate,
+    unlink,
+    openDirectory,
+    mkdir,
+    rmdir,
+    fchown,
+    geteuid,
+    mmap,
+    munmap,
+    mremap,
+    getpagesize,
+    readlink,
+    lstat,
+    ioctl,
+};
+
+/// The C type of each system call (the casts of the osXxx macros).
+fn SysFn(comptime s: Sys) type {
+    return *const switch (s) {
+        .open => fn ([*:0]const u8, c_int, c_int) callconv(.c) c_int,
+        .close => fn (c_int) callconv(.c) c_int,
+        .access => fn ([*:0]const u8, c_int) callconv(.c) c_int,
+        .getcwd => fn ([*]u8, usize) callconv(.c) ?[*]u8,
+        .stat, .lstat => fn ([*:0]const u8, *Stat) callconv(.c) c_int,
+        .fstat => fn (c_int, *Stat) callconv(.c) c_int,
+        .ftruncate => fn (c_int, off_t) callconv(.c) c_int,
+        .fcntl => fn (c_int, c_int, ...) callconv(.c) c_int,
+        .read => fn (c_int, [*]u8, usize) callconv(.c) isize,
+        .pread, .pread64 => fn (c_int, [*]u8, usize, off_t) callconv(.c) isize,
+        .write => fn (c_int, [*]const u8, usize) callconv(.c) isize,
+        .pwrite, .pwrite64 => fn (c_int, [*]const u8, usize, off_t) callconv(.c) isize,
+        .fchmod => fn (c_int, mode_t) callconv(.c) c_int,
+        .fallocate => fn (c_int, off_t, off_t) callconv(.c) c_int,
+        .unlink, .rmdir => fn ([*:0]const u8) callconv(.c) c_int,
+        .openDirectory => fn ([*:0]const u8, *c_int) callconv(.c) c_int,
+        .mkdir => fn ([*:0]const u8, mode_t) callconv(.c) c_int,
+        .fchown => fn (c_int, c.uid_t, c.gid_t) callconv(.c) c_int,
+        .geteuid => fn () callconv(.c) c.uid_t,
+        .mmap => fn (?*anyopaque, usize, c_int, c_int, c_int, off_t) callconv(.c) ?*anyopaque,
+        .munmap => fn (?*anyopaque, usize) callconv(.c) c_int,
+        .mremap => fn (?*anyopaque, usize, usize, c_int, ...) callconv(.c) ?*anyopaque,
+        .getpagesize => fn () callconv(.c) c_int,
+        .readlink => fn ([*:0]const u8, [*]u8, usize) callconv(.c) isize,
+        .ioctl => fn (c_int, c_ulong, ...) callconv(.c) c_int,
+    };
+}
+
+/// The default implementations, where os_unix.c has one: the C library's
+/// function, or a wrapper with the same C signature.
+const defaults = struct {
+    fn open(z: [*:0]const u8, f: c_int, m: c_int) callconv(.c) c_int {
+        return c.open(z, @bitCast(f), @as(c_uint, @intCast(m)));
+    }
+    fn close(fd: c_int) callconv(.c) c_int {
+        return c.close(fd);
+    }
+    fn access(z: [*:0]const u8, m: c_int) callconv(.c) c_int {
+        return c.access(z, @intCast(m));
+    }
+    fn getcwd(b: [*]u8, n: usize) callconv(.c) ?[*]u8 {
+        return c.getcwd(b, n);
+    }
+    fn stat(z: [*:0]const u8, st: *Stat) callconv(.c) c_int {
+        if (builtin.os.tag == .linux) return linuxStat(c.AT.FDCWD, z, 0, st);
+        return c.stat(z, st);
+    }
+    fn fstat(fd: c_int, st: *Stat) callconv(.c) c_int {
+        if (builtin.os.tag == .linux) return linuxStat(fd, "", std.os.linux.AT.EMPTY_PATH, st);
+        return c.fstat(fd, st);
+    }
+    fn lstat(z: [*:0]const u8, st: *Stat) callconv(.c) c_int {
+        if (builtin.os.tag == .linux) return linuxStat(c.AT.FDCWD, z, c.AT.SYMLINK_NOFOLLOW, st);
+        return c.fstatat(c.AT.FDCWD, z, st, c.AT.SYMLINK_NOFOLLOW);
+    }
+    fn ftruncate(fd: c_int, n: off_t) callconv(.c) c_int {
+        return c.ftruncate(fd, @intCast(n));
+    }
+    fn read(fd: c_int, b: [*]u8, n: usize) callconv(.c) isize {
+        return c.read(fd, b, n);
+    }
+    fn pread(fd: c_int, b: [*]u8, n: usize, off: off_t) callconv(.c) isize {
+        return c.pread(fd, b, n, @intCast(off));
+    }
+    fn write(fd: c_int, b: [*]const u8, n: usize) callconv(.c) isize {
+        return c.write(fd, b, n);
+    }
+    fn pwrite(fd: c_int, b: [*]const u8, n: usize, off: off_t) callconv(.c) isize {
+        return c.pwrite(fd, b, n, @intCast(off));
+    }
+    fn fchmod(fd: c_int, m: mode_t) callconv(.c) c_int {
+        return c.fchmod(fd, m);
+    }
+    fn unlink(z: [*:0]const u8) callconv(.c) c_int {
+        return c.unlink(z);
+    }
+    fn mkdir(z: [*:0]const u8, m: mode_t) callconv(.c) c_int {
+        return c.mkdir(z, m);
+    }
+    fn rmdir(z: [*:0]const u8) callconv(.c) c_int {
+        return c.rmdir(z);
+    }
+    fn fchown(fd: c_int, u: c.uid_t, g: c.gid_t) callconv(.c) c_int {
+        return c.fchown(fd, u, g);
+    }
+    fn geteuid() callconv(.c) c.uid_t {
+        return c.geteuid();
+    }
+    fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: off_t) callconv(.c) ?*anyopaque {
+        return c.mmap(@ptrCast(@alignCast(addr)), len, @bitCast(@as(u32, @bitCast(prot))), @bitCast(@as(u32, @bitCast(flags))), fd, @intCast(off));
+    }
+    fn munmap(addr: ?*anyopaque, len: usize) callconv(.c) c_int {
+        return c.munmap(@ptrCast(@alignCast(addr orelse return -1)), len);
+    }
+    fn mremap(addr: ?*anyopaque, old: usize, new: usize, flags: c_int, ...) callconv(.c) ?*anyopaque {
+        const linux = std.os.linux;
+        const rc = linux.mremap(@ptrCast(addr), old, new, @bitCast(@as(u32, @bitCast(flags))), null);
+        if (linux.errno(rc) != .SUCCESS) {
+            c._errno().* = @intCast(@backingInt(linux.errno(rc)));
+            return c.MAP_FAILED;
+        }
+        return @ptrFromInt(rc);
+    }
+    fn getpagesize() callconv(.c) c_int {
+        return @intCast(std.heap.pageSize());
+    }
+    fn readlink(z: [*:0]const u8, b: [*]u8, n: usize) callconv(.c) isize {
+        return c.readlink(z, b, n);
+    }
+
+    /// The stat family on Linux: statx(2) into `Stat`, errno set on failure.
+    fn linuxStat(dirfd: c_int, z: [*:0]const u8, flags: u32, st: *Stat) c_int {
+        if (builtin.os.tag != .linux) unreachable;
+        const linux = std.os.linux;
+        var stx: linux.Statx = undefined;
+        const rc = linux.statx(dirfd, z, flags, .{ .TYPE = true, .MODE = true, .NLINK = true, .UID = true, .GID = true, .INO = true, .SIZE = true, .BLOCKS = true }, &stx);
+        const e = linux.errno(rc);
+        if (e != .SUCCESS) {
+            c._errno().* = @intCast(@backingInt(e));
+            return -1;
+        }
+        st.* = std.mem.zeroes(Stat);
+        st.dev = (@as(u64, stx.dev_major) << 8) | stx.dev_minor;
+        st.ino = stx.ino;
+        st.mode = stx.mode;
+        st.nlink = @intCast(stx.nlink);
+        st.uid = stx.uid;
+        st.gid = stx.gid;
+        st.size = @intCast(stx.size);
+        st.blksize = @intCast(stx.blksize);
+        st.blocks = @intCast(stx.blocks);
+        return 0;
+    }
+};
+
+const Syscall = struct {
+    name: [:0]const u8,
+    /// The function in use (pCurrent); null if the platform has none.
+    current: ?*const anyopaque,
+    /// The original, once overridden (pDefault).
+    default: ?*const anyopaque = null,
+};
+
+fn entry(comptime name: [:0]const u8, comptime f: anytype) Syscall {
+    return .{ .name = name, .current = if (@TypeOf(f) == @TypeOf(null)) null else @ptrCast(f) };
+}
+
+const is_linux = builtin.os.tag == .linux;
+
+/// aSyscall[]: process-wide, as in C.
+var syscalls = syscalls_init;
+
+const syscalls_init = [_]Syscall{
+    entry("open", &defaults.open),
+    entry("close", &defaults.close),
+    entry("access", &defaults.access),
+    entry("getcwd", &defaults.getcwd),
+    entry("stat", &defaults.stat),
+    entry("fstat", &defaults.fstat),
+    entry("ftruncate", &defaults.ftruncate),
+    entry("fcntl", &c.fcntl),
+    entry("read", &defaults.read),
+    entry("pread", &defaults.pread),
+    entry("pread64", null),
+    entry("write", &defaults.write),
+    entry("pwrite", &defaults.pwrite),
+    entry("pwrite64", null),
+    entry("fchmod", &defaults.fchmod),
+    entry("fallocate", null),
+    entry("unlink", &defaults.unlink),
+    entry("openDirectory", &openDirectory),
+    entry("mkdir", &defaults.mkdir),
+    entry("rmdir", &defaults.rmdir),
+    entry("fchown", &defaults.fchown),
+    entry("geteuid", &defaults.geteuid),
+    entry("mmap", &defaults.mmap),
+    entry("munmap", &defaults.munmap),
+    if (is_linux) entry("mremap", &defaults.mremap) else entry("mremap", null),
+    entry("getpagesize", &defaults.getpagesize),
+    entry("readlink", &defaults.readlink),
+    entry("lstat", &defaults.lstat),
+    entry("ioctl", null),
+};
+
+comptime {
+    for (@typeInfo(Sys).@"enum".field_names, 0..) |name, i| {
+        if (!std.mem.eql(u8, name, syscalls_init[i].name)) @compileError("syscalls[] out of order at " ++ name);
+    }
+}
+
+/// The current function of system call `s` (osOpen, osClose ...).
+fn os(comptime s: Sys) SysFn(s) {
+    return @ptrCast(@alignCast(syscalls[@backingInt(s)].current.?));
+}
+
+/// Port of unixSetSystemCall(): make `ptr` the function of system call
+/// `name`, or its original if `ptr` is null; with a null `name`, restore
+/// every original. False if there is no system call `name`
+/// (SQLITE_NOTFOUND).
+pub fn setSystemCall(name: ?[]const u8, ptr: ?*const anyopaque) bool {
+    const n = name orelse {
+        for (&syscalls) |*s| {
+            if (s.default) |d| s.current = d;
+        }
+        return true;
+    };
+    for (&syscalls) |*s| {
+        if (std.mem.eql(u8, n, s.name)) {
+            if (s.default == null) s.default = s.current;
+            s.current = ptr orelse s.default;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Port of unixGetSystemCall(): the function of system call `name` in
+/// use, or null.
+pub fn getSystemCall(name: []const u8) ?*const anyopaque {
+    for (syscalls) |s| {
+        if (std.mem.eql(u8, name, s.name)) return s.current;
+    }
+    return null;
+}
+
+/// Port of unixNextSystemCall(): the name of the first system call the
+/// platform has after `name` (the first of all if null), or null.
+pub fn nextSystemCall(name: ?[]const u8) ?[:0]const u8 {
+    var i: usize = 0;
+    if (name) |n| {
+        while (i < syscalls.len - 1) : (i += 1) {
+            if (std.mem.eql(u8, n, syscalls[i].name)) break;
+        }
+        i += 1;
+    }
+    while (i < syscalls.len) : (i += 1) {
+        if (syscalls[i].current != null) return syscalls[i].name;
+    }
+    return null;
+}
+
+extern "c" fn strerror(c_int) [*:0]const u8;
+
+fn errno() c_int {
+    return c._errno().*;
+}
+
+fn eno(e: c.E) c_int {
+    return @intCast(@backingInt(e));
+}
+
+fn oflags(o: c.O) c_int {
+    return @bitCast(o);
+}
+
+/// SQLITE_DEFAULT_FILE_PERMISSIONS.
+const default_file_permissions: mode_t = 0o644;
+
+/// Port of robust_open(): open(2) through the table, retried on EINTR,
+/// never returning a descriptor below 3 (which a stray write to stdout
+/// or stderr could corrupt), close-on-exec, and with the permissions `m`
+/// even under a umask if the file is new.
+fn robustOpen(z: [*:0]const u8, f: c_int, m: mode_t) c_int {
+    const m2: mode_t = if (m != 0) m else default_file_permissions;
+    const cloexec = oflags(.{ .CLOEXEC = true });
+    var fd: c_int = -1;
+    while (true) {
+        fd = os(.open)(z, f | cloexec, @intCast(m2));
+        if (fd < 0) {
+            if (errno() == eno(.INTR)) continue;
+            break;
+        }
+        if (fd >= 3) break;
+        if (f & oflags(.{ .EXCL = true, .CREAT = true }) == oflags(.{ .EXCL = true, .CREAT = true })) {
+            _ = os(.unlink)(z);
+        }
+        _ = os(.close)(fd);
+        vfs.log(sqlite_warning, "attempt to open \"{s}\" as file descriptor {d}", .{ std.mem.span(z), fd });
+        fd = -1;
+        if (os(.open)("/dev/null", oflags(.{}), @intCast(m)) < 0) break;
+    }
+    if (fd >= 0 and m != 0) {
+        var st: Stat = undefined;
+        if (os(.fstat)(fd, &st) == 0 and st.size == 0 and (@as(u32, st.mode) & 0o777) != m) {
+            _ = os(.fchmod)(fd, m);
+        }
+    }
+    return fd;
+}
+
+/// Port of robust_ftruncate().
+fn robustFtruncate(h: c_int, sz: i64) c_int {
+    while (true) {
+        const rc = os(.ftruncate)(h, sz);
+        if (rc < 0 and errno() == eno(.INTR)) continue;
+        return rc;
+    }
+}
+
+/// Port of robustFchown(): only root changes the owner.
+fn robustFchown(fd: c_int, uid: c.uid_t, gid: c.gid_t) void {
+    if (os(.geteuid)() == 0) _ = os(.fchown)(fd, uid, gid);
+}
+
+// SQLITE_* codes for sqlite3_log() (unixLogErrorAtLine()).
+const sqlite_warning = 28;
+const sqlite_cantopen = 14;
+const ioerr = 10;
+const ioerr_close = ioerr | (16 << 8);
+const ioerr_fsync = ioerr | (4 << 8);
+const ioerr_truncate = ioerr | (6 << 8);
+const ioerr_delete = ioerr | (10 << 8);
+const ioerr_dir_fsync = ioerr | (5 << 8);
+const ioerr_shmsize = ioerr | (19 << 8);
+const ioerr_shmmap = ioerr | (21 << 8);
+const ioerr_shmopen = ioerr | (18 << 8);
+
+/// Port of unixLogErrorAtLine(): report the failure of system call
+/// `func` on `path` through sqlite3_log(), with errno and its message,
+/// in os_unix.c's format.
+fn logError(code: i32, func: []const u8, path: ?[]const u8, line: u32) void {
+    const e = errno();
+    const msg = std.mem.span(strerror(e));
+    vfs.log(code, "os_unix.c:{d}: ({d}) {s}({s}) - {s}", .{ line, e, func, path orelse "", msg });
+}
+
+/// Port of openDirectory(): open the directory of `z_filename` for an
+/// fsync; SQLITE_OK or SQLITE_CANTOPEN (it is system call "openDirectory").
+fn openDirectory(z_filename: [*:0]const u8, out: *c_int) callconv(.c) c_int {
+    var dir: [vfs.max_path_bytes + 1]u8 = undefined;
+    const name = std.mem.span(z_filename);
+    const n = @min(name.len, dir.len - 2);
+    @memcpy(dir[0..n], name[0..n]);
+    var ii = n;
+    while (ii > 0 and dir[ii] != '/') ii -= 1;
+    if (ii > 0) {
+        dir[ii] = 0;
+    } else {
+        if (dir[0] != '/') dir[0] = '.';
+        dir[1] = 0;
+    }
+    const z: [*:0]const u8 = @ptrCast(&dir);
+    const fd = robustOpen(z, oflags(.{}), 0);
+    out.* = fd;
+    if (fd >= 0) return 0;
+    logError(sqlite_cantopen, "openDirectory", std.mem.span(z), @src().line);
+    return sqlite_cantopen;
+}
+
+/// Port of full_fsync(): F_FULLFSYNC where asked for and available
+/// (fsync() where that fails), else fsync() (fdatasync() on Linux).
+fn fullFsync(fd: c_int, full: bool) c_int {
+    if (builtin.os.tag.isDarwin()) {
+        var rc: c_int = 1;
+        if (full) rc = os(.fcntl)(fd, c.F.FULLFSYNC, @as(c_int, 0));
+        if (rc != 0) rc = c.fsync(fd);
+        return rc;
+    }
+    if (builtin.os.tag == .linux) return c.fdatasync(fd);
+    return c.fsync(fd);
+}
 
 pub const UnixVfs = struct {
     gpa: Allocator,
@@ -44,6 +506,12 @@ pub const UnixVfs = struct {
     /// Where anonymous temporary files are created; null for the first
     /// usable one of unixTempFileDir() (tempFileDir()).
     temp_dir: ?[]const u8 = null,
+    /// "unix-excl": files opened read-write take an exclusive lock for
+    /// the process (UNIXFILE_EXCL).
+    excl: bool = false,
+    /// "unix-none": databases take no locks and have no shared memory
+    /// (nolockIoMethods), so WAL needs exclusive locking mode.
+    none: bool = false,
 
     pub fn init(gpa: Allocator, io: Io) UnixVfs {
         return .{ .gpa = gpa, .io = io, .dir = .cwd() };
@@ -57,103 +525,187 @@ pub const UnixVfs = struct {
     /// (vfs.VfsImpl()).
     const vtable = &vfs.VfsImpl(UnixVfs).vtable;
 
+    /// `name` as the system calls take it: NUL-terminated, and absolute
+    /// if `dir` is not the working directory and it is relative.
+    fn resolve(self: *UnixVfs, name: []const u8, buf: *[vfs.max_path_bytes + 1]u8) Error![:0]const u8 {
+        var n: usize = 0;
+        if (name.len == 0 or name[0] != '/') {
+            if (self.dir.handle != Io.Dir.cwd().handle) {
+                n = self.dir.realPath(self.io, buf[0 .. buf.len - 1]) catch return error.CantOpen;
+                if (n + 1 >= buf.len) return error.CantOpen;
+                buf[n] = '/';
+                n += 1;
+            }
+        }
+        if (n + name.len >= buf.len) return error.CantOpen;
+        @memcpy(buf[n..][0..name.len], name);
+        buf[n + name.len] = 0;
+        return buf[0 .. n + name.len :0];
+    }
+
     /// Port of unixFullPathname(): `path` made absolute (against `dir`),
     /// with "." and ".." removed and symbolic links resolved.
     pub fn fullPathname(self: *UnixVfs, path: []const u8, out: []u8) Error![]u8 {
         var p: DbPath = .{ .out = out };
         if (path.len == 0 or path[0] != '/') {
-            var pwd: [std.fs.max_path_bytes]u8 = undefined;
-            const n = self.dir.realPath(self.io, &pwd) catch return error.CantOpen;
-            p.appendAll(pwd[0..n]);
+            var pwd: [vfs.max_path_bytes + 2]u8 = undefined;
+            if (self.dir.handle != Io.Dir.cwd().handle) {
+                const n = self.dir.realPath(self.io, &pwd) catch return error.CantOpen;
+                p.appendAll(pwd[0..n]);
+            } else {
+                const r = os(.getcwd)(&pwd, pwd.len - 2) orelse {
+                    logError(sqlite_cantopen, "getcwd", path, @src().line);
+                    return error.CantOpen;
+                };
+                p.appendAll(std.mem.sliceTo(@as([*:0]u8, @ptrCast(r)), 0));
+            }
         }
         p.appendAll(path);
         if (p.failed or p.used < 2) return error.CantOpen;
         return out[0..p.used];
     }
 
-    pub fn open(self: *UnixVfs, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
-        const io = self.io;
+    /// Port of unixGetTempname(): a name for a temporary file that does
+    /// not exist yet, in tempFileDir().
+    pub fn tempName(self: *UnixVfs, buf: []u8) Error![:0]u8 {
+        const dir = self.temp_dir orelse tempFileDir() orelse return error.IoErr;
+        var limit: u32 = 0;
+        while (true) {
+            var r: u64 = undefined;
+            self.io.random(std.mem.asBytes(&r));
+            const z = std.fmt.bufPrintSentinel(buf, "{s}/etilqs_{x}", .{ dir, r }, 0) catch return error.CantOpen;
+            if (os(.access)(z.ptr, 0) != 0) return z;
+            limit += 1;
+            if (limit > 10) return error.CantOpen;
+        }
+    }
 
+    /// Port of unixOpen().
+    pub fn open(self: *UnixVfs, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
+        var name_buf: [vfs.max_path_bytes + 1]u8 = undefined;
         // Vfs.open has already set create/exclusive/delete_on_close for
         // anonymous files; only the name is left to choose.
-        var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const name: []const u8 = path orelse blk: {
-            var rand: [8]u8 = undefined;
-            io.random(&rand);
-            const dir = self.temp_dir orelse tempFileDir() orelse return error.CantOpen;
-            break :blk std.fmt.bufPrint(&name_buf, "{s}/etilqs_{x}", .{
-                dir, &rand,
-            }) catch return error.CantOpen;
-        };
+        const name: [:0]const u8 = if (path) |p| try self.resolve(p, &name_buf) else try self.tempName(&name_buf);
 
-        var read_only = !flags.read_write;
-        const opened = if (flags.create)
-            self.dir.createFile(io, name, .{
-                .read = true,
-                .truncate = false,
-                .exclusive = flags.exclusive,
-                .permissions = .default_file,
-            })
-        else
-            self.dir.openFile(io, name, .{
-                .mode = if (flags.read_write) .read_write else .read_only,
-                .allow_directory = false,
-            });
-        const file: Io.File = opened catch |err| retry: {
-            // Like unixOpen(): what cannot be opened read-write (a file
-            // without write permission, say) is opened read-only, which
-            // File.isReadOnly() reports. Not a directory, nor a file that
-            // must be new.
-            if (read_only or flags.exclusive or err == error.IsDir) return mapOpenError(err);
-            read_only = true;
-            break :retry self.dir.openFile(io, name, .{
-                .mode = .read_only,
-                .allow_directory = false,
-            }) catch |e| return mapOpenError(e);
+        const is_new_jrnl = flags.create and switch (flags.kind) {
+            .super_journal, .main_journal, .wal => true,
+            else => false,
         };
-        errdefer file.close(io);
+        var read_only = !flags.read_write;
+        var open_flags: c.O = .{ .ACCMODE = if (flags.read_write) .RDWR else .RDONLY, .NOFOLLOW = true };
+        if (flags.create) open_flags.CREAT = true;
+        if (flags.exclusive) open_flags.EXCL = true;
+
+        // Port of findCreateFileMode(): a journal or WAL gets the
+        // permissions and owner of its database; a file deleted on close
+        // 0600; a database with a URI's modeof= those of that file.
+        var mode: mode_t = 0;
+        var uid: c.uid_t = 0;
+        var gid: c.gid_t = 0;
+        if (flags.kind == .wal or flags.kind == .main_journal) {
+            var i = name.len -| 1;
+            while (i > 0 and name[i] != '.') : (i -= 1) {
+                if (name[i] == '-') {
+                    var db: [vfs.max_path_bytes + 1]u8 = undefined;
+                    @memcpy(db[0..i], name[0..i]);
+                    db[i] = 0;
+                    var st: Stat = undefined;
+                    if (os(.stat)(@ptrCast(&db), &st) != 0) return error.IoErr;
+                    mode = @intCast(@as(u32, st.mode) & 0o777);
+                    uid = st.uid;
+                    gid = st.gid;
+                    break;
+                }
+            }
+        } else if (flags.delete_on_close) {
+            mode = 0o600;
+        } else if (flags.uri and path != null) {
+            if (vfs.uriParameter(path.?, "modeof")) |z| {
+                var st: Stat = undefined;
+                if (os(.stat)(z.ptr, &st) != 0) return error.IoErr;
+                mode = @intCast(@as(u32, st.mode) & 0o777);
+                uid = st.uid;
+                gid = st.gid;
+            }
+        }
+
+        // A database takes a descriptor a closed handle left, if any.
+        const main_db = flags.kind == .main_db and path != null;
+        var fd = (if (main_db) findReusableFd(self.io, name, flags.read_write) else null) orelse
+            robustOpen(name.ptr, oflags(open_flags), mode);
+        if (fd < 0) {
+            const e = errno();
+            if (is_new_jrnl and e == eno(.ACCES) and os(.access)(name.ptr, 0) != 0) {
+                // The directory is not writable (SQLITE_READONLY_DIRECTORY).
+                return error.ReadOnly;
+            } else if (e != eno(.ISDIR) and flags.read_write and !flags.exclusive) {
+                // Like unixOpen(): what cannot be opened read-write (a
+                // file without write permission, say) is opened
+                // read-only, which File.isReadOnly() reports. Not a file
+                // that must be new (C would open an existing one
+                // read-only).
+                open_flags.ACCMODE = .RDONLY;
+                open_flags.CREAT = false;
+                read_only = true;
+                fd = (if (main_db) findReusableFd(self.io, name, false) else null) orelse
+                    robustOpen(name.ptr, oflags(open_flags), mode);
+            }
+            if (fd < 0) {
+                logError(sqlite_cantopen, "open", name, @src().line);
+                return error.CantOpen;
+            }
+        }
+        if (mode != 0 and (flags.kind == .wal or flags.kind == .main_journal)) robustFchown(fd, uid, gid);
+        errdefer _ = os(.close)(fd);
 
         // Like os_unix.c: unlink right away and let the descriptor keep the
         // data alive until it is closed.
-        if (flags.delete_on_close) self.dir.deleteFile(io, name) catch {};
+        if (flags.delete_on_close) _ = os(.unlink)(name.ptr);
 
-        const inode = try InodeInfo.acquire(io, file);
-        errdefer inode.release(io);
-        // The name of a database is kept to derive the -shm file's.
-        const path_copy: ?[]u8 = if (path != null and flags.kind == .main_db) try self.gpa.dupe(u8, name) else null;
-        errdefer if (path_copy) |pc| self.gpa.free(pc);
+        const no_lock = flags.kind != .main_db or self.none;
+        const path_copy = try self.gpa.dupeSentinel(u8, name, 0);
+        errdefer self.gpa.free(path_copy);
+        // fillInUnixFile(): no lock and no inode for a file that is not a
+        // database.
+        const inode: ?*InodeInfo = if (no_lock) null else try InodeInfo.acquire(self.io, fd);
+        errdefer if (inode) |i| i.release(self.io);
         const handle = try self.gpa.create(UnixFile);
         handle.* = .{
             .owner = self,
-            .file = file,
+            .h = fd,
             .inode = inode,
-            .read_only = read_only,
+            .ctrl = .{
+                .excl = self.excl,
+                .rdonly = read_only,
+                .dirsync = is_new_jrnl,
+                .psow = if (flags.uri and path != null) vfs.uriBoolean(path.?, "psow", true) else true,
+            },
             .path = path_copy,
+            .main_path = if (flags.kind == .main_db and (flags.uri or flags.sqlite_filename)) path else null,
             .mmap_size_max = vfs.mmap_config.default_size,
         };
-        return .{ .ptr = handle, .vtable = UnixFile.vtable };
+        return .{ .ptr = handle, .vtable = if (self.none) UnixFile.vtable_nolock else UnixFile.vtable };
     }
 
-    fn mapOpenError(err: Io.File.OpenError) Error {
-        return switch (err) {
-            error.SystemResources => error.OutOfMemory,
-            else => error.CantOpen,
-        };
-    }
-
+    /// Port of unixDelete().
     pub fn delete(self: *UnixVfs, path: []const u8, sync_dir: bool) Error!void {
-        const io = self.io;
-        self.dir.deleteFile(io, path) catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => return error.IoErr,
-        };
+        var buf: [vfs.max_path_bytes + 1]u8 = undefined;
+        const z = try self.resolve(path, &buf);
+        if (os(.unlink)(z.ptr) == -1) {
+            // SQLITE_IOERR_DELETE_NOENT is no error to the engine.
+            if (errno() == eno(.NOENT)) return;
+            logError(ioerr_delete, "unlink", z, @src().line);
+            return error.IoErr;
+        }
         if (sync_dir) {
-            const parent = std.fs.path.dirname(path) orelse ".";
-            var d = self.dir.openDir(io, parent, .{}) catch return error.IoErr;
-            defer d.close(io);
-            // Some filesystems refuse to fsync a directory; os_unix.c ignores
-            // that too.
-            fsyncFd(d.handle, false) catch {};
+            var dfd: c_int = -1;
+            if (os(.openDirectory)(z.ptr, &dfd) == 0) {
+                defer closeFd(dfd, null);
+                if (fullFsync(dfd, false) != 0) {
+                    logError(ioerr_dir_fsync, "fsync", z, @src().line);
+                    return error.IoErr;
+                }
+            }
         }
     }
 
@@ -166,19 +718,26 @@ pub const UnixVfs = struct {
         return vfs.ioSleep(self.io, microseconds);
     }
 
+    /// Port of unixAccess(): a file "exists" if stat() finds it and it is
+    /// not an empty regular file; otherwise (SQLITE_ACCESS_READWRITE, and
+    /// SQLITE_ACCESS_READ, which C treats the same) whether it can be
+    /// read and written.
     pub fn access(self: *UnixVfs, path: []const u8, mode: vfs.AccessMode) Error!bool {
-        self.dir.access(self.io, path, .{
-            .read = mode == .read,
-            .write = mode == .read_write,
-        }) catch |err| switch (err) {
-            error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return false,
-            else => return error.IoErr,
-        };
-        return true;
+        var buf: [vfs.max_path_bytes + 1]u8 = undefined;
+        const z = try self.resolve(path, &buf);
+        if (mode == .exists) {
+            var st: Stat = undefined;
+            return os(.stat)(z.ptr, &st) == 0 and (!isReg(st.mode) or st.size > 0);
+        }
+        return os(.access)(z.ptr, 6) == 0;
     }
 };
 
-/// A pathname under construction (DbPath).
+/// Port of robust_close(): close(2) through the table, a failure logged.
+fn closeFd(h: c_int, path: ?[]const u8) void {
+    if (os(.close)(h) != 0) logError(ioerr_close, "close", path, @src().line);
+}
+
 /// Port of unixTempFileDir(): the directory of temporary files, the
 /// first of sqlite3_temp_directory (root.zig's temp_directory, which
 /// PRAGMA temp_store_directory sets), $SQLITE_TMPDIR, $TMPDIR, /var/tmp,
@@ -196,16 +755,14 @@ fn tempFileDir() ?[]const u8 {
             5 => "/tmp",
             else => ".",
         };
-        const dir = std.mem.span(z orelse continue);
-        // A directory: "dir/." can be searched and written (osStat()'s
-        // S_ISDIR and osAccess(zDir, 03)).
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const probe = std.fmt.bufPrintSentinel(&buf, "{s}/.", .{dir}, 0) catch continue;
-        if (c.access(probe.ptr, 3) == 0) return dir;
+        const dir = z orelse continue;
+        var st: Stat = undefined;
+        if (os(.stat)(dir, &st) == 0 and isDir(st.mode) and os(.access)(dir, 3) == 0) return std.mem.span(dir);
     }
     return null;
 }
 
+/// A pathname under construction (DbPath).
 const DbPath = struct {
     out: []u8,
     used: usize = 0,
@@ -239,20 +796,26 @@ const DbPath = struct {
         @memcpy(p.out[p.used..][0..name.len], name);
         p.used += name.len;
         if (p.failed) return;
-        // C calls lstat() and then readlink() on a link; readlink() alone
-        // tells both.
         p.out[p.used] = 0;
-        var lnk: [std.fs.max_path_bytes + 2]u8 = undefined;
-        const got = c.readlink(p.out[0..p.used :0], &lnk, lnk.len - 2);
-        if (got < 0) {
-            switch (c.errno(got)) {
-                .INVAL, .NOENT => {},
-                else => p.failed = true,
+        const z: [*:0]const u8 = @ptrCast(p.out.ptr);
+        var st: Stat = undefined;
+        if (os(.lstat)(z, &st) != 0) {
+            if (errno() != eno(.NOENT)) {
+                logError(sqlite_cantopen, "lstat", p.out[0..p.used], @src().line);
+                p.failed = true;
             }
             return;
         }
+        if (!isLnk(st.mode)) return;
+        if (p.n_symlink > max_symlink) {
+            p.failed = true;
+            return;
+        }
         p.n_symlink += 1;
-        if (p.n_symlink > max_symlink + 1 or got == 0 or got >= lnk.len - 2) {
+        var lnk: [vfs.max_path_bytes + 2]u8 = undefined;
+        const got = os(.readlink)(z, &lnk, lnk.len - 2);
+        if (got <= 0 or got >= lnk.len - 2) {
+            logError(sqlite_cantopen, "readlink", p.out[0..p.used], @src().line);
             p.failed = true;
             return;
         }
@@ -279,21 +842,10 @@ const FileId = struct {
     dev: u64,
     ino: u64,
 
-    fn of(fd: fd_t) Error!FileId {
-        if (builtin.os.tag == .linux) {
-            const linux = std.os.linux;
-            var stx: linux.Statx = undefined;
-            const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .INO = true }, &stx);
-            if (linux.errno(rc) != .SUCCESS) return error.IoErr;
-            return .{
-                .dev = (@as(u64, stx.dev_major) << 32) | stx.dev_minor,
-                .ino = stx.ino,
-            };
-        } else {
-            var st: c.Stat = undefined;
-            if (c.fstat(fd, &st) != 0) return error.IoErr;
-            return .{ .dev = @bitCast(@as(i64, st.dev)), .ino = @intCast(st.ino) };
-        }
+    fn of(st: *const Stat) FileId {
+        const D = @TypeOf(st.dev);
+        const dev: u64 = if (@typeInfo(D).int.signedness == .signed) @bitCast(@as(i64, st.dev)) else st.dev;
+        return .{ .dev = dev, .ino = @intCast(st.ino) };
     }
 };
 
@@ -328,16 +880,22 @@ const InodeInfo = struct {
     n_lock: u32 = 0,
     /// Strongest lock held through any handle.
     level: LockLevel = .none,
-    /// Descriptors whose close(2) is deferred until `n_lock` drops to zero.
-    unused: std.ArrayList(Io.File) = .empty,
+    /// The process holds an exclusive lock on the file ("unix-excl",
+    /// bProcessLock): no more OS locks are taken or released.
+    process_lock: bool = false,
+    /// Descriptors whose close(2) is deferred until `n_lock` drops to zero
+    /// (pUnused), and whether each was opened read-write.
+    unused: std.ArrayList(UnusedFd) = .empty,
     ref_count: u32 = 0,
     /// The shared memory of this database, while any handle maps it
     /// (pShmNode). Created and destroyed under `inodes.big_lock`.
     shm_node: ?*ShmNode = null,
 
     /// Port of findInodeInfo().
-    fn acquire(io: Io, file: Io.File) Error!*InodeInfo {
-        const id = try FileId.of(file.handle);
+    fn acquire(io: Io, fd: c_int) Error!*InodeInfo {
+        var st: Stat = undefined;
+        if (os(.fstat)(fd, &st) != 0) return error.IoErr;
+        const id: FileId = .of(&st);
         inodes.big_lock.lockUncancelable(io);
         defer inodes.big_lock.unlock(io);
         const gop = try inodes.table.getOrPut(Inodes.gpa, id);
@@ -360,7 +918,7 @@ const InodeInfo = struct {
         info.ref_count -= 1;
         if (info.ref_count != 0) return;
         info.mutex.lockUncancelable(io);
-        info.closePendingFds(io);
+        info.closePendingFds();
         info.mutex.unlock(io);
         info.unused.deinit(Inodes.gpa);
         _ = inodes.table.remove(info.id);
@@ -368,11 +926,37 @@ const InodeInfo = struct {
     }
 
     /// Caller holds `mutex`.
-    fn closePendingFds(info: *InodeInfo, io: Io) void {
-        for (info.unused.items) |file| file.close(io);
+    fn closePendingFds(info: *InodeInfo) void {
+        for (info.unused.items) |u| closeFd(u.fd, null);
         info.unused.clearRetainingCapacity();
     }
 };
+
+/// A descriptor kept open for a closed handle (UnixUnusedFd).
+const UnusedFd = struct { fd: c_int, read_write: bool };
+
+/// Port of findReusableFd(): a descriptor of database `name`, opened
+/// read-write or read-only as asked, that a closed handle left for
+/// close(2) while other handles hold locks: opening the database again
+/// takes it instead of a new one, so that a connection opened and closed
+/// many times while another holds a lock does not run out of them.
+fn findReusableFd(io: Io, name: [:0]const u8, read_write: bool) ?c_int {
+    inodes.big_lock.lockUncancelable(io);
+    defer inodes.big_lock.unlock(io);
+    if (inodes.table.count() == 0) return null;
+    var st: Stat = undefined;
+    if (os(.stat)(name.ptr, &st) != 0) return null;
+    const info = inodes.table.get(.of(&st)) orelse return null;
+    info.mutex.lockUncancelable(io);
+    defer info.mutex.unlock(io);
+    for (info.unused.items, 0..) |u, i| {
+        if (u.read_write == read_write) {
+            _ = info.unused.swapRemove(i);
+            return u.fd;
+        }
+    }
+    return null;
+}
 
 const LockType = enum { read, write, unlock };
 
@@ -389,42 +973,26 @@ fn flock(kind: LockType, start: u64, len: u64) c.Flock {
     return fl;
 }
 
-/// Applies a non-blocking POSIX advisory lock (osSetPosixAdvisoryLock).
-fn posixLock(fd: fd_t, kind: LockType, start: u64, len: u64) error{ Busy, LockErr }!void {
+/// Port of osSetPosixAdvisoryLock(): a non-blocking POSIX advisory lock
+/// through the table. Null on success, else errno.
+fn setPosixLock(fd: fd_t, kind: LockType, start: u64, len: u64) ?c_int {
     var fl = flock(kind, start, len);
-    while (true) {
-        const rc = c.fcntl(fd, c.F.SETLK, &fl);
-        switch (c.errno(rc)) {
-            .SUCCESS => return,
-            // Port of sqliteErrorFromPosixError(): contention means BUSY.
-            .AGAIN, .ACCES, .BUSY, .TIMEDOUT, .NOLCK => return error.Busy,
-            .INTR => if (kind == .unlock) continue else return error.Busy,
-            else => return error.LockErr,
-        }
-    }
+    if (os(.fcntl)(fd, c.F.SETLK, &fl) == 0) return null;
+    return errno();
 }
 
-/// Whether another process holds a lock that conflicts with a write lock on
-/// the range.
-fn posixTestWriteLock(fd: fd_t, start: u64, len: u64) Error!bool {
-    var fl = flock(.write, start, len);
-    if (c.fcntl(fd, c.F.GETLK, &fl) != 0) return error.LockErr;
-    return fl.type != c.F.UNLCK;
+/// Port of sqliteErrorFromPosixError(): contention means BUSY, anything
+/// else `other` (SQLITE_IOERR_LOCK and the like).
+/// A failed lock: Busy, or LockErr with errno `e` kept for xGetLastError.
+fn lockFailed(f: *UnixFile, e: c_int) Error {
+    const err = lockError(e, error.LockErr);
+    if (err != error.Busy) f.last_errno = e;
+    return err;
 }
 
-fn fsyncFd(fd: fd_t, full: bool) Error!void {
-    if (full and builtin.os.tag.isDarwin()) {
-        // F_FULLFSYNC flushes the drive's write cache as well. Fall back to
-        // fsync on filesystems that do not support it, as os_unix.c does.
-        if (c.fcntl(fd, c.F.FULLFSYNC, @as(c_int, 0)) == 0) return;
-    }
-    while (true) {
-        switch (c.errno(c.fsync(fd))) {
-            .SUCCESS => return,
-            .INTR => continue,
-            else => return error.IoErr,
-        }
-    }
+fn lockError(e: c_int, other: Error) Error {
+    if (e == eno(.ACCES) or e == eno(.AGAIN) or e == eno(.TIMEDOUT) or e == eno(.BUSY) or e == eno(.INTR) or e == eno(.NOLCK)) return error.Busy;
+    return other;
 }
 
 // ======================================================== shared memory
@@ -446,9 +1014,11 @@ const ShmNode = struct {
     inode: *InodeInfo,
     mutex: Io.Mutex = .init,
     /// Name of the -shm file (zFilename).
-    filename: []u8,
-    /// The open -shm file (hShm).
-    file: Io.File,
+    filename: [:0]u8,
+    /// The open -shm file (hShm), or -1 if the process holds an
+    /// exclusive lock on the database ("unix-excl"): the regions are
+    /// then heap memory.
+    h_shm: c_int,
     /// Size of each region (szRegion).
     sz_region: u32 = 0,
     /// The mapped regions (apRegion). A mapping covers `regionPerMap()`
@@ -462,10 +1032,6 @@ const ShmNode = struct {
     n_ref: u32 = 0,
     /// Locks held by this process on each slot (aLock).
     locks: vfs.ShmLockTable = .{},
-
-    fn fd(node: *const ShmNode) fd_t {
-        return node.file.handle;
-    }
 
     /// The file lock of ShmLockTable.apply(): unixShmSystemLock() on
     /// the slots.
@@ -487,36 +1053,41 @@ const Shm = struct {
 };
 
 /// Port of unixShmSystemLock(): apply a POSIX lock to bytes
-/// `ofst`..`ofst+n-1` of the -shm file. Any failure is reported as Busy.
+/// `ofst`..`ofst+n-1` of the -shm file (none for heap memory). Any
+/// failure is reported as Busy.
 fn shmSystemLock(node: *ShmNode, kind: LockType, ofst: u64, n: u64) Error!void {
     std.debug.assert((ofst == shm_dms and n == 1) or (ofst >= shm_base and ofst + n <= shm_base + vfs.shm_nlock));
     std.debug.assert(n == 1 or kind != .read);
-    posixLock(node.fd(), kind, ofst, n) catch return error.Busy;
+    if (node.h_shm < 0) return;
+    if (setPosixLock(node.h_shm, kind, ofst, n) != null) return error.Busy;
 }
 
 /// Port of unixShmRegionPerMap(): how many 32 KiB regions one mapping
 /// covers, so that each mapping is a whole number of system pages.
 fn shmRegionPerMap() u32 {
     const shmsz = 32 * 1024;
-    const pgsz = std.heap.pageSize();
+    const pgsz: u32 = @intCast(os(.getpagesize)());
     if (pgsz < shmsz) return 1;
-    return @intCast(pgsz / shmsz);
+    return pgsz / shmsz;
 }
 
 /// Port of unixShmPurge(): free the inode's ShmNode once nothing refers to
 /// it. Caller holds `inodes.big_lock`.
-fn shmPurge(io: Io, inode: *InodeInfo) void {
+fn shmPurge(inode: *InodeInfo) void {
     const node = inode.shm_node orelse return;
     if (node.n_ref != 0) return;
     const per_map = shmRegionPerMap();
     var i: usize = 0;
     while (i < node.regions.items.len) : (i += per_map) {
         const len = @as(usize, node.sz_region) * per_map;
-        const base: [*]align(std.heap.page_size_min) u8 = @alignCast(node.regions.items[i]);
-        std.posix.munmap(base[0..len]);
+        if (node.h_shm >= 0) {
+            _ = os(.munmap)(node.regions.items[i], len);
+        } else {
+            Inodes.gpa.free(node.regions.items[i][0..len]);
+        }
     }
     node.regions.deinit(Inodes.gpa);
-    node.file.close(io);
+    if (node.h_shm >= 0) closeFd(node.h_shm, node.filename);
     Inodes.gpa.free(node.filename);
     inode.shm_node = null;
     Inodes.gpa.destroy(node);
@@ -528,7 +1099,7 @@ fn shmPurge(io: Io, inode: *InodeInfo) void {
 /// no other process uses it, leaving the node unlocked.
 fn shmLockSharedMemory(node: *ShmNode) Error!bool {
     var fl = flock(.write, shm_dms, 1);
-    if (c.fcntl(node.fd(), c.F.GETLK, &fl) != 0) return error.LockErr;
+    if (os(.fcntl)(node.h_shm, c.F.GETLK, &fl) != 0) return error.LockErr;
     if (fl.type == c.F.UNLCK) {
         if (node.is_readonly) {
             node.is_unlocked = true;
@@ -537,7 +1108,10 @@ fn shmLockSharedMemory(node: *ShmNode) Error!bool {
         try shmSystemLock(node, .write, shm_dms, 1);
         // Truncated to 3 bytes rather than 0, as a debugging aid, like
         // os_unix.c: it tells a legitimate truncation from a rogue one.
-        if (c.ftruncate(node.fd(), 3) != 0) return error.ShmOpen;
+        if (robustFtruncate(node.h_shm, 3) != 0) {
+            logError(ioerr_shmopen, "ftruncate", node.filename, @src().line);
+            return error.ShmOpen;
+        }
     } else if (fl.type == c.F.WRLCK) {
         return error.Busy;
     }
@@ -547,32 +1121,61 @@ fn shmLockSharedMemory(node: *ShmNode) Error!bool {
 
 const UnixFile = struct {
     owner: *UnixVfs,
-    file: Io.File,
-    inode: *InodeInfo,
+    /// The descriptor (h).
+    h: c_int,
+    /// Null for a file that is not a database (UNIXFILE_NOLOCK).
+    inode: ?*InodeInfo,
     level: LockLevel = .none,
-    read_only: bool,
-    /// The database name, for the -shm file (zPath). Null for other files.
-    path: ?[]u8 = null,
+    ctrl: Ctrl,
+    /// errno of the last failed system call (lastErrno).
+    last_errno: c_int = 0,
+    /// The name the file was opened with (zPath).
+    path: [:0]u8,
+    /// The database's name in SQLite's filename layout, as the pager
+    /// passed it, for its URI parameters (readonly_shm). Null for other
+    /// files, and for a name not in that layout.
+    main_path: ?[]const u8 = null,
+    /// SQLITE_FCNTL_CHUNK_SIZE (szChunk).
+    sz_chunk: i32 = 0,
     /// This handle's connection to the shared memory (pShm).
     shm: ?*Shm = null,
-    /// The memory map of the file (pMapRegion), its usable size
-    /// (mmapSize, which a truncation may lower below the size mapped,
-    /// mmapSizeActual), the largest size to map (mmapSizeMax) and the
+    /// The memory map of the file (pMapRegion, mmapSizeActual bytes),
+    /// its usable size (mmapSize, which a truncation may lower below the
+    /// size mapped), the largest size to map (mmapSizeMax) and the
     /// pointers into it handed out by fetch() (nFetchOut).
-    map_region: ?[]align(std.heap.page_size_min) const u8 = null,
+    map_region: ?[*]const u8 = null,
+    mmap_size_actual: u64 = 0,
     mmap_size: u64 = 0,
     mmap_size_max: i64 = 0,
     n_fetch_out: u32 = 0,
+    /// The embedder's handle on the file (File.foreign).
+    foreign_slot: vfs.ForeignSlot = @splat(0),
+
+    /// The UNIXFILE_* bits (ctrlFlags).
+    const Ctrl = packed struct {
+        excl: bool = false,
+        rdonly: bool = false,
+        persist_wal: bool = false,
+        dirsync: bool = false,
+        psow: bool = false,
+    };
 
     /// The methods named after those of vfs.File.VTable implement it
     /// (vfs.FileImpl()).
     const vtable = &vfs.FileImpl(UnixFile).vtable;
+    /// nolockIoMethods: the methods of "unix-none", without shared memory.
+    const vtable_nolock = &nolock_methods;
+    const nolock_methods: vfs.File.VTable = blk: {
+        var t = vfs.FileImpl(UnixFile).vtable;
+        t.shmMap = null;
+        t.shmLock = null;
+        t.shmBarrier = null;
+        t.shmUnmap = null;
+        const r = t;
+        break :blk r;
+    };
 
-    fn fd(f: *UnixFile) fd_t {
-        return f.file.handle;
-    }
-
-    /// Port of unixClose().
+    /// Port of unixClose() and closeUnixFile().
     pub fn close(f: *UnixFile) void {
         const io = f.owner.io;
         // The WAL unmaps the shared memory before the database closes.
@@ -580,22 +1183,47 @@ const UnixFile = struct {
         if (f.shm != null) shmUnmap(f, false);
         unlock(f, .none) catch {};
         f.unmapFile();
-        const inode = f.inode;
-        inode.mutex.lockUncancelable(io);
-        if (inode.n_lock != 0) {
-            // Closing now would release locks held through other handles.
-            inode.unused.append(Inodes.gpa, f.file) catch {
-                // Out of memory: leak the descriptor rather than break locks.
-            };
-        } else {
-            f.file.close(io);
+        if (f.inode) |inode| {
+            inode.mutex.lockUncancelable(io);
+            if (inode.n_lock != 0) {
+                // Closing now would release locks held through other
+                // handles (setPendingFd()).
+                inode.unused.append(Inodes.gpa, .{ .fd = f.h, .read_write = !f.ctrl.rdonly }) catch {
+                    // Out of memory: leak the descriptor rather than
+                    // break locks.
+                };
+                f.h = -1;
+            }
+            inode.mutex.unlock(io);
+            inode.release(io);
         }
-        inode.mutex.unlock(io);
-        inode.release(io);
-        if (f.path) |pth| f.owner.gpa.free(pth);
+        if (f.h >= 0) closeFd(f.h, f.path);
+        f.owner.gpa.free(f.path);
         f.owner.gpa.destroy(f);
     }
 
+    /// Port of seekAndRead(): pread() until `buf` is full, the end of the
+    /// file, or an error (-1, errno in last_errno).
+    fn seekAndRead(f: *UnixFile, buf_arg: []u8, offset_arg: u64) isize {
+        var buf = buf_arg;
+        var offset = offset_arg;
+        var prior: isize = 0;
+        while (true) {
+            const got = os(.pread)(f.h, buf.ptr, buf.len, @intCast(offset));
+            if (got == buf.len) return prior + got;
+            if (got < 0) {
+                if (errno() == eno(.INTR)) continue;
+                f.last_errno = errno();
+                return -1;
+            }
+            if (got == 0) return prior;
+            buf = buf[@intCast(got)..];
+            offset += @intCast(got);
+            prior += got;
+        }
+    }
+
+    /// Port of unixRead().
     pub fn read(f: *UnixFile, buf_arg: []u8, offset_arg: u64) Error!usize {
         var buf = buf_arg;
         var offset = offset_arg;
@@ -611,39 +1239,109 @@ const UnixFile = struct {
             buf = buf[n..];
             offset += n;
         }
-        const n = f.file.readPositionalAll(f.owner.io, buf, offset) catch return error.IoErr;
-        return buf_arg.len - buf.len + n;
+        const got = f.seekAndRead(buf, offset);
+        if (got < 0) return error.IoErr;
+        if (got < buf.len) f.last_errno = 0;
+        return buf_arg.len - buf.len + @as(usize, @intCast(got));
     }
 
-    pub fn write(f: *UnixFile, buf: []const u8, offset: u64) Error!void {
-        if (f.read_only) return error.ReadOnly;
-        f.file.writePositionalAll(f.owner.io, buf, offset) catch |err| return switch (err) {
-            error.NoSpaceLeft, error.FileTooBig => error.DiskFull,
-            else => error.IoErr,
-        };
+    /// Port of seekAndWriteFd(): one pwrite(), retried on EINTR.
+    fn seekAndWriteFd(fd: c_int, offset: u64, buf: []const u8, err: *c_int) isize {
+        while (true) {
+            const rc = os(.pwrite)(fd, buf.ptr, buf.len, @intCast(offset));
+            if (rc < 0 and errno() == eno(.INTR)) continue;
+            if (rc < 0) err.* = errno();
+            return rc;
+        }
     }
 
-    pub fn truncate(f: *UnixFile, size: u64) Error!void {
-        if (f.read_only) return error.ReadOnly;
-        f.file.setLength(f.owner.io, size) catch return error.IoErr;
+    /// Port of unixWrite().
+    pub fn write(f: *UnixFile, buf_arg: []const u8, offset_arg: u64) Error!void {
+        if (f.ctrl.rdonly) return error.ReadOnly;
+        var buf = buf_arg;
+        var offset = offset_arg;
+        var wrote: isize = 0;
+        while (buf.len > 0) {
+            wrote = seekAndWriteFd(f.h, offset, buf, &f.last_errno);
+            if (wrote <= 0) break;
+            buf = buf[@intCast(wrote)..];
+            offset += @intCast(wrote);
+        }
+        if (buf.len > 0) {
+            if (wrote < 0 and f.last_errno != eno(.NOSPC)) return error.IoErr;
+            f.last_errno = 0;
+            return error.DiskFull;
+        }
+    }
+
+    /// Port of unixTruncate(): to `size` rounded up to the chunk size.
+    pub fn truncate(f: *UnixFile, size_arg: u64) Error!void {
+        if (f.ctrl.rdonly) return error.ReadOnly;
+        var size: i64 = @intCast(size_arg);
+        if (f.sz_chunk > 0) size = @divTrunc(size + f.sz_chunk - 1, f.sz_chunk) * f.sz_chunk;
+        if (robustFtruncate(f.h, size) != 0) {
+            f.last_errno = errno();
+            logError(ioerr_truncate, "ftruncate", f.path, @src().line);
+            return error.IoErr;
+        }
         // Past the new end, read() and write() are used from now on.
-        if (size < f.mmap_size) f.mmap_size = size;
+        if (size < f.mmap_size) f.mmap_size = @intCast(size);
     }
 
+    /// Port of unixSync(), with the directory of a new journal synced
+    /// the first time (UNIXFILE_DIRSYNC).
     pub fn sync(f: *UnixFile, flags: vfs.SyncFlags) Error!void {
-        return fsyncFd(f.fd(), flags.full);
+        if (fullFsync(f.h, flags.full) != 0) {
+            f.last_errno = errno();
+            logError(ioerr_fsync, "full_fsync", f.path, @src().line);
+            return error.IoErr;
+        }
+        if (f.ctrl.dirsync) {
+            var dfd: c_int = -1;
+            if (os(.openDirectory)(f.path.ptr, &dfd) == 0) {
+                _ = fullFsync(dfd, false);
+                closeFd(dfd, f.path);
+            }
+            f.ctrl.dirsync = false;
+        }
     }
 
+    /// Port of unixFileSize(): a file of one byte counts as empty (the
+    /// one byte an msdos filesystem workaround of C may leave).
     pub fn fileSize(f: *UnixFile) Error!u64 {
-        return f.file.length(f.owner.io) catch error.IoErr;
+        var st: Stat = undefined;
+        if (os(.fstat)(f.h, &st) != 0) {
+            f.last_errno = errno();
+            return error.IoErr;
+        }
+        const n: u64 = @intCast(st.size);
+        return if (n == 1) 0 else n;
+    }
+
+    /// Port of unixFileLock(): a lock on the file, unless this is a
+    /// read-write "unix-excl" file: then the first call takes an
+    /// exclusive lock on the shared range for the process, and the
+    /// others do nothing. Null on success, else errno.
+    fn fileLock(f: *UnixFile, kind: LockType, start: u64, len: u64) ?c_int {
+        const inode = f.inode.?;
+        if (f.ctrl.excl and !f.ctrl.rdonly) {
+            if (!inode.process_lock) {
+                if (setPosixLock(f.h, .write, vfs.sharedFirst(), vfs.shared_size)) |e| return e;
+                inode.process_lock = true;
+                inode.n_lock += 1;
+            }
+            return null;
+        }
+        return setPosixLock(f.h, kind, start, len);
     }
 
     /// Port of unixLock(). See vfs.LockLevel for the allowed transitions.
     pub fn lock(f: *UnixFile, level: LockLevel) Error!void {
         if (f.level.atLeast(level)) return;
+        // nolockLock().
+        const inode = f.inode orelse return;
 
         const io = f.owner.io;
-        const inode = f.inode;
         inode.mutex.lockUncancelable(io);
         defer inode.mutex.unlock(io);
 
@@ -662,37 +1360,52 @@ const UnixFile = struct {
             return;
         }
 
+        // PENDING: read-locked while taking the shared range so that a
+        // writer waiting for EXCLUSIVE is not starved, then dropped; or
+        // write-locked to block new readers while we wait for existing
+        // ones.
+        if (level == .shared or (level == .exclusive and f.level == .reserved)) {
+            if (f.fileLock(if (level == .shared) .read else .write, vfs.pending_byte, 1)) |e| return lockFailed(f, e);
+            if (level == .exclusive) {
+                f.level = .pending;
+                inode.level = .pending;
+            }
+        }
+
         if (level == .shared) {
-            // Read-lock PENDING while taking the shared range so that a
-            // writer waiting for EXCLUSIVE is not starved, then drop it.
-            try posixLock(f.fd(), .read, vfs.pending_byte, 1);
-            const got = posixLock(f.fd(), .read, vfs.sharedFirst(), vfs.shared_size);
-            const dropped = posixLock(f.fd(), .unlock, vfs.pending_byte, 1);
-            try got;
-            dropped catch return error.LockErr;
+            std.debug.assert(inode.n_shared == 0 and inode.level == .none);
+            var rc: Error!void = {};
+            var t_errno: c_int = 0;
+            if (f.fileLock(.read, vfs.sharedFirst(), vfs.shared_size)) |e| {
+                t_errno = e;
+                rc = lockError(e, error.LockErr);
+            }
+            if (f.fileLock(.unlock, vfs.pending_byte, 1)) |e| {
+                if (rc) |_| {
+                    t_errno = e;
+                    rc = error.LockErr;
+                } else |_| {}
+            }
+            rc catch |err| {
+                if (err != error.Busy) f.last_errno = t_errno;
+                return err;
+            };
             f.level = .shared;
-            inode.level = .shared;
             inode.n_lock += 1;
             inode.n_shared = 1;
-            return;
-        }
-
-        if (level == .exclusive and f.level == .reserved) {
-            // PENDING blocks new readers while we wait for existing ones.
-            try posixLock(f.fd(), .write, vfs.pending_byte, 1);
-            f.level = .pending;
-            inode.level = .pending;
-        }
-
-        if (level == .exclusive and inode.n_shared > 1) {
+        } else if (level == .exclusive and inode.n_shared > 1) {
             // Another handle in this process still reads the database.
             return error.Busy;
-        }
-
-        if (level == .reserved) {
-            try posixLock(f.fd(), .write, vfs.reservedByte(), 1);
+        } else if (f.isSharingShmNode()) {
+            // Locks of another process on the -shm file: database locks
+            // have been broken (a rogue close(open(db)), say).
+            return error.Busy;
         } else {
-            try posixLock(f.fd(), .write, vfs.sharedFirst(), vfs.shared_size);
+            const e = if (level == .reserved)
+                f.fileLock(.write, vfs.reservedByte(), 1)
+            else
+                f.fileLock(.write, vfs.sharedFirst(), vfs.shared_size);
+            if (e) |x| return lockFailed(f, x);
         }
         f.level = level;
         inode.level = level;
@@ -701,60 +1414,175 @@ const UnixFile = struct {
     /// Port of posixUnlock() without the NFS workaround.
     pub fn unlock(f: *UnixFile, level: LockLevel) Error!void {
         if (!f.level.atLeast(level) or f.level == level) return;
+        // nolockUnlock().
+        const inode = f.inode orelse return;
 
         const io = f.owner.io;
-        const inode = f.inode;
         inode.mutex.lockUncancelable(io);
         defer inode.mutex.unlock(io);
 
         if (f.level.atLeast(.reserved)) {
             if (level == .shared) {
-                // Cannot fail against a well-behaved peer: we hold a write
-                // lock on the range already.
-                posixLock(f.fd(), .read, vfs.sharedFirst(), vfs.shared_size) catch return error.LockErr;
+                if (f.fileLock(.read, vfs.sharedFirst(), vfs.shared_size)) |e| {
+                    f.last_errno = e;
+                    return error.LockErr;
+                }
             }
             // Releases PENDING and RESERVED together.
-            posixLock(f.fd(), .unlock, vfs.pending_byte, 2) catch return error.LockErr;
+            if (f.fileLock(.unlock, vfs.pending_byte, 2)) |e| {
+                f.last_errno = e;
+                return error.LockErr;
+            }
             inode.level = .shared;
         }
 
+        var rc: Error!void = {};
         if (level == .none) {
             inode.n_shared -= 1;
             if (inode.n_shared == 0) {
-                const rc = posixLock(f.fd(), .unlock, 0, 0);
-                inode.level = .none;
-                rc catch {
+                if (f.fileLock(.unlock, 0, 0)) |e| {
+                    rc = error.LockErr;
+                    f.last_errno = e;
                     f.level = .none;
-                    return error.LockErr;
-                };
+                }
+                inode.level = .none;
             }
             inode.n_lock -= 1;
-            if (inode.n_lock == 0) inode.closePendingFds(io);
+            if (inode.n_lock == 0) inode.closePendingFds();
         }
+        try rc;
         f.level = level;
     }
 
     /// Port of unixCheckReservedLock().
     pub fn checkReservedLock(f: *UnixFile) Error!bool {
+        const inode = f.inode orelse return false;
         const io = f.owner.io;
-        const inode = f.inode;
         inode.mutex.lockUncancelable(io);
         defer inode.mutex.unlock(io);
         if (inode.level.atLeast(.reserved)) return true;
-        return posixTestWriteLock(f.fd(), vfs.reservedByte(), 1);
+        if (inode.process_lock) return false;
+        var fl = flock(.write, vfs.reservedByte(), 1);
+        if (os(.fcntl)(f.h, c.F.GETLK, &fl) != 0) {
+            f.last_errno = errno();
+            return error.IoErr;
+        }
+        return fl.type != c.F.UNLCK;
+    }
+
+    /// Port of unixIsSharingShmNode(): whether another process holds the
+    /// DMS lock of the -shm file this handle maps.
+    fn isSharingShmNode(f: *UnixFile) bool {
+        const p = f.shm orelse return false;
+        if (f.ctrl.excl) return false;
+        var fl = flock(.write, shm_dms, 1);
+        _ = os(.fcntl)(p.node.h_shm, c.F.GETLK, &fl);
+        return fl.type != c.F.UNLCK;
     }
 
     pub fn sectorSize(_: *UnixFile) u32 {
         return vfs.default_sector_size;
     }
 
-    pub fn deviceCharacteristics(_: *UnixFile) vfs.DeviceCharacteristics {
-        // SQLITE_POWERSAFE_OVERWRITE defaults to on in os_unix.c.
-        return .{ .powersafe_overwrite = true };
+    /// Port of unixDeviceCharacteristics() (setDeviceCharacteristics()):
+    /// powersafe overwrite unless the URI parameter psow=0 or
+    /// SQLITE_FCNTL_POWERSAFE_OVERWRITE turned it off, and sub-page
+    /// reads.
+    pub fn deviceCharacteristics(f: *UnixFile) vfs.DeviceCharacteristics {
+        return .{ .powersafe_overwrite = f.ctrl.psow, .subpage_read = true };
     }
 
     pub fn isReadOnly(f: *UnixFile) bool {
-        return f.read_only;
+        return f.ctrl.rdonly;
+    }
+
+    pub fn foreign(f: *UnixFile) *vfs.ForeignSlot {
+        return &f.foreign_slot;
+    }
+
+    /// Port of fileHasMoved(): whether the name the file was opened by
+    /// names another file now, or none.
+    fn hasMoved(f: *UnixFile) bool {
+        const inode = f.inode orelse return false;
+        var st: Stat = undefined;
+        return os(.stat)(f.path.ptr, &st) != 0 or @as(u64, @intCast(st.ino)) != inode.id.ino;
+    }
+
+    /// Port of unixModeBit().
+    fn modeBit(bit: *bool, arg: *i32) void {
+        if (arg.* < 0) {
+            arg.* = @intFromBool(bit.*);
+        } else {
+            bit.* = arg.* != 0;
+        }
+    }
+
+    /// Port of unixFileControl() (but SQLITE_FCNTL_MMAP_SIZE: mmapSize(),
+    /// and those the C ABI answers: VFSNAME, TEMPFILENAME).
+    pub fn fileControl(f: *UnixFile, op: vfs.FileControl) Error!bool {
+        switch (op) {
+            .lockstate => |out| out.* = f.level,
+            .last_errno => |out| out.* = f.last_errno,
+            .chunk_size => |n| f.sz_chunk = n,
+            .size_hint => |n| try f.sizeHint(n),
+            .persist_wal => |arg| {
+                var b = f.ctrl.persist_wal;
+                modeBit(&b, arg);
+                f.ctrl.persist_wal = b;
+            },
+            .powersafe_overwrite => |arg| {
+                var b = f.ctrl.psow;
+                modeBit(&b, arg);
+                f.ctrl.psow = b;
+            },
+            .has_moved => |out| out.* = f.hasMoved(),
+            .external_reader => |out| out.* = try f.externalReader(),
+            .vfsname => |out| out.* = if (f.owner.excl) "unix-excl" else "unix",
+        }
+        return true;
+    }
+
+    /// Port of fcntlSizeHint(): with a chunk size, grow the file to a
+    /// multiple of it that holds `n_byte` bytes, writing a byte per
+    /// filesystem block (C uses posix_fallocate() where configured); then
+    /// map that much if memory maps are on.
+    fn sizeHint(f: *UnixFile, n_byte: i64) Error!void {
+        if (f.sz_chunk > 0) {
+            var st: Stat = undefined;
+            if (os(.fstat)(f.h, &st) != 0) return error.IoErr;
+            const n_size = @divTrunc(n_byte + f.sz_chunk - 1, f.sz_chunk) * f.sz_chunk;
+            if (n_size > st.size) {
+                const n_blk: i64 = @intCast(st.blksize);
+                var i_write = @divTrunc(@as(i64, @intCast(st.size)), n_blk) * n_blk + n_blk - 1;
+                while (i_write < n_size + n_blk - 1) : (i_write += n_blk) {
+                    if (i_write >= n_size) i_write = n_size - 1;
+                    if (seekAndWriteFd(f.h, @intCast(i_write), &.{0}, &f.last_errno) != 1) return error.IoErr;
+                }
+            }
+        }
+        if (f.mmap_size_max > 0 and n_byte > f.mmap_size) {
+            if (f.sz_chunk <= 0) {
+                if (robustFtruncate(f.h, n_byte) != 0) {
+                    f.last_errno = errno();
+                    logError(ioerr_truncate, "ftruncate", f.path, @src().line);
+                    return error.IoErr;
+                }
+            }
+            try f.mapFile(@intCast(n_byte));
+        }
+    }
+
+    /// Port of unixFcntlExternalReader(): whether another process holds a
+    /// read lock of the wal-index (slots 3 and up).
+    fn externalReader(f: *UnixFile) Error!bool {
+        const p = f.shm orelse return false;
+        const node = p.node;
+        const io = f.owner.io;
+        var fl = flock(.write, shm_base + 3, vfs.shm_nlock - 3);
+        node.mutex.lockUncancelable(io);
+        defer node.mutex.unlock(io);
+        if (os(.fcntl)(node.h_shm, c.F.GETLK, &fl) < 0) return error.LockErr;
+        return fl.type != c.F.UNLCK;
     }
 
     /// Port of unixOpenSharedMemory(): connect this handle to the inode's
@@ -766,43 +1594,48 @@ const UnixFile = struct {
         std.debug.assert(f.shm == null);
         const io = f.owner.io;
         const gpa = Inodes.gpa;
+        const inode = f.inode orelse return error.ShmOpen;
         const p = try gpa.create(Shm);
         errdefer gpa.destroy(p);
 
         inodes.big_lock.lockUncancelable(io);
         defer inodes.big_lock.unlock(io);
-        const inode = f.inode;
         var cant_init = false;
         const node = inode.shm_node orelse blk: {
-            const base = f.path orelse return error.ShmOpen;
-            const st = f.file.stat(io) catch return error.IoErr;
-            const name = try std.mem.concat(gpa, u8, &.{ base, "-shm" });
-            // Create it with the permissions of the database.
-            const perm: Io.File.Permissions = @fromBackingInt(@backingInt(st.permissions) & 0o777);
-            var read_only = false;
-            const file = f.owner.dir.createFile(io, name, .{
-                .read = true,
-                .truncate = false,
-                .permissions = perm,
-            }) catch open_ro: {
-                read_only = true;
-                break :open_ro f.owner.dir.openFile(io, name, .{ .mode = .read_only, .allow_directory = false }) catch {
-                    gpa.free(name);
-                    return error.CantOpen;
-                };
-            };
+            var st: Stat = undefined;
+            if (os(.fstat)(f.h, &st) != 0) return error.IoErr;
+            const name = try std.mem.concatWithSentinel(gpa, u8, &.{ f.path, "-shm" }, 0);
             const node = gpa.create(ShmNode) catch |err| {
-                file.close(io);
                 gpa.free(name);
                 return err;
             };
-            node.* = .{ .inode = inode, .filename = name, .file = file, .is_readonly = read_only };
+            node.* = .{ .inode = inode, .filename = name, .h_shm = -1 };
             inode.shm_node = node;
-            cant_init = shmLockSharedMemory(node) catch |err| {
-                // Frees the node, which nothing refers to yet.
-                shmPurge(io, inode);
-                return err;
-            };
+            if (!inode.process_lock) {
+                // Create it with the permissions of the database.
+                const perm: mode_t = @intCast(@as(u32, st.mode) & 0o777);
+                const readonly_shm = if (f.main_path) |mp| vfs.uriBoolean(mp, "readonly_shm", false) else false;
+                if (!readonly_shm) {
+                    node.h_shm = robustOpen(name.ptr, oflags(.{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true }), perm);
+                }
+                if (node.h_shm < 0) {
+                    node.h_shm = robustOpen(name.ptr, oflags(.{ .NOFOLLOW = true }), perm);
+                    if (node.h_shm < 0) {
+                        logError(sqlite_cantopen, "open", name, @src().line);
+                        shmPurge(inode);
+                        return error.CantOpen;
+                    }
+                    node.is_readonly = true;
+                }
+                // If this process runs as root, the owner of the database
+                // keeps access to the -shm file.
+                robustFchown(node.h_shm, st.uid, st.gid);
+                cant_init = shmLockSharedMemory(node) catch |err| {
+                    // Frees the node, which nothing refers to yet.
+                    shmPurge(inode);
+                    return err;
+                };
+            }
             break :blk node;
         };
         p.* = .{ .node = node };
@@ -811,30 +1644,63 @@ const UnixFile = struct {
         return cant_init;
     }
 
-    /// Port of unixShmMap(): region `region` of the shared memory, each
-    /// region `size` bytes, extending the -shm file if `extend`.
     // ========================================================= memory map
 
     /// Port of unixUnmapfile().
     fn unmapFile(f: *UnixFile) void {
         std.debug.assert(f.n_fetch_out == 0);
-        if (f.map_region) |r| std.posix.munmap(r);
-        f.map_region = null;
-        f.mmap_size = 0;
+        if (f.map_region) |r| {
+            _ = os(.munmap)(@ptrCast(@constCast(r)), f.mmap_size_actual);
+            f.map_region = null;
+            f.mmap_size = 0;
+            f.mmap_size_actual = 0;
+        }
     }
 
     /// Port of unixRemapfile(): map the first `n_new` bytes of the file.
     /// A failure leaves the file unmapped and turns memory maps off for
-    /// it, as C assumes later attempts would fail too.
-    fn remapFile(f: *UnixFile, n_new: u64) void {
-        std.debug.assert(f.n_fetch_out == 0 and n_new > 0);
-        f.unmapFile();
-        const m = std.posix.mmap(null, @intCast(n_new), .{ .READ = true }, .{ .TYPE = .SHARED }, f.fd(), 0) catch {
+    /// it, as C assumes later attempts would fail too. Growing a mapping
+    /// extends it in place where the system allows (mremap() on Linux).
+    fn remapFile(f: *UnixFile, n_new_arg: u64) void {
+        std.debug.assert(f.n_fetch_out == 0 and n_new_arg > 0);
+        var n_new = n_new_arg;
+        const prot: c_int = 1; // PROT_READ
+        const map_shared: c_int = 1;
+        var err_name: []const u8 = "mmap";
+        var p_new: ?*anyopaque = null;
+        if (f.map_region) |orig_c| {
+            const orig: [*]u8 = @constCast(orig_c);
+            const pgsz: u64 = @intCast(os(.getpagesize)());
+            const n_reuse = f.mmap_size & ~(pgsz - 1);
+            if (n_reuse < f.mmap_size_actual) _ = os(.munmap)(orig + n_reuse, f.mmap_size_actual - n_reuse);
+            if (n_reuse > 0) {
+                if (is_linux) {
+                    p_new = os(.mremap)(orig, n_reuse, n_new, 1); // MREMAP_MAYMOVE
+                    err_name = "mremap";
+                } else {
+                    p_new = os(.mmap)(orig + n_reuse, n_new - n_reuse, prot, map_shared, f.h, @intCast(n_reuse));
+                    if (p_new != c.MAP_FAILED) {
+                        if (p_new != @as(?*anyopaque, orig + n_reuse)) {
+                            _ = os(.munmap)(p_new, n_new - n_reuse);
+                            p_new = null;
+                        } else {
+                            p_new = orig;
+                        }
+                    }
+                }
+                if (p_new == c.MAP_FAILED or p_new == null) _ = os(.munmap)(orig, n_reuse);
+            }
+        }
+        if (p_new == null) p_new = os(.mmap)(null, n_new, prot, map_shared, f.h, 0);
+        if (p_new == c.MAP_FAILED) {
+            p_new = null;
+            n_new = 0;
+            logError(0, err_name, f.path, @src().line);
             f.mmap_size_max = 0;
-            return;
-        };
-        f.map_region = m;
+        }
+        f.map_region = @ptrCast(p_new);
         f.mmap_size = n_new;
+        f.mmap_size_actual = n_new;
     }
 
     /// Port of unixMapfile(): map the file, up to `n_map` bytes or its
@@ -842,7 +1708,11 @@ const UnixFile = struct {
     /// changes while pointers into the map are out.
     fn mapFile(f: *UnixFile, n_map_arg: ?u64) Error!void {
         if (f.n_fetch_out > 0) return;
-        var n_map = n_map_arg orelse (f.file.length(f.owner.io) catch return error.IoErr);
+        var n_map = n_map_arg orelse blk: {
+            var st: Stat = undefined;
+            if (os(.fstat)(f.h, &st) != 0) return error.IoErr;
+            break :blk @as(u64, @intCast(st.size));
+        };
         if (n_map > @as(u64, @intCast(f.mmap_size_max))) n_map = @intCast(f.mmap_size_max);
         if (n_map == f.mmap_size) return;
         if (n_map == 0) return f.unmapFile();
@@ -858,7 +1728,7 @@ const UnixFile = struct {
         if (f.map_region == null) try f.mapFile(null);
         if (f.mmap_size >= offset + amt + eof_buffer) {
             f.n_fetch_out += 1;
-            return f.map_region.?.ptr + @as(usize, @intCast(offset));
+            return f.map_region.? + @as(usize, @intCast(offset));
         }
         return null;
     }
@@ -890,6 +1760,8 @@ const UnixFile = struct {
         return old;
     }
 
+    /// Port of unixShmMap(): region `region` of the shared memory, each
+    /// region `size` bytes, extending the -shm file if `extend`.
     pub fn shmMap(f: *UnixFile, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
         const io = f.owner.io;
         const cant_init: vfs.ShmRegion = .{ .ptr = null, .read_only = true, .cant_init = true };
@@ -910,29 +1782,43 @@ const UnixFile = struct {
         if (node.regions.items.len < n_req) map: {
             node.sz_region = size;
             const n_byte = @as(u64, n_req) * size;
-            const cur = node.file.length(io) catch return error.ShmSize;
-            if (cur < n_byte) {
-                if (!extend) break :map;
-                // Write the last byte of every new 4 KiB page, so that the
-                // OS allocates them now rather than raising SIGBUS later.
-                const pgsz = 4096;
-                var pg = cur / pgsz;
-                while (pg < n_byte / pgsz) : (pg += 1) {
-                    node.file.writePositionalAll(io, &.{0}, pg * pgsz + pgsz - 1) catch return error.ShmSize;
+            if (node.h_shm >= 0) {
+                var st: Stat = undefined;
+                if (os(.fstat)(node.h_shm, &st) != 0) return error.ShmSize;
+                const cur: u64 = @intCast(st.size);
+                if (cur < n_byte) {
+                    if (!extend) break :map;
+                    // Write the last byte of every new 4 KiB page, so that
+                    // the OS allocates them now rather than raising SIGBUS
+                    // later.
+                    const pgsz = 4096;
+                    var pg = cur / pgsz;
+                    while (pg < n_byte / pgsz) : (pg += 1) {
+                        var x: c_int = 0;
+                        if (seekAndWriteFd(node.h_shm, pg * pgsz + pgsz - 1, &.{0}, &x) != 1) {
+                            logError(ioerr_shmsize, "write", node.filename, @src().line);
+                            return error.ShmSize;
+                        }
+                    }
                 }
             }
             try node.regions.ensureTotalCapacity(Inodes.gpa, n_req);
             while (node.regions.items.len < n_req) {
                 const n_map = @as(usize, size) * per_map;
-                const mem = std.posix.mmap(
-                    null,
-                    n_map,
-                    if (node.is_readonly) .{ .READ = true } else .{ .READ = true, .WRITE = true },
-                    .{ .TYPE = .SHARED },
-                    node.fd(),
-                    @as(u64, size) * node.regions.items.len,
-                ) catch return error.ShmMap;
-                for (0..per_map) |i| node.regions.appendAssumeCapacity(@alignCast(mem.ptr + size * i));
+                const mem: [*]align(8) u8 = if (node.h_shm >= 0) m: {
+                    const prot: c_int = if (node.is_readonly) 1 else 3;
+                    const m = os(.mmap)(null, n_map, prot, 1, node.h_shm, @intCast(@as(u64, size) * node.regions.items.len));
+                    if (m == c.MAP_FAILED or m == null) {
+                        logError(ioerr_shmmap, "mmap", node.filename, @src().line);
+                        return error.ShmMap;
+                    }
+                    break :m @ptrCast(@alignCast(m.?));
+                } else m: {
+                    const m = try Inodes.gpa.alignedAlloc(u8, .@"8", n_map);
+                    @memset(m, 0);
+                    break :m m.ptr;
+                };
+                for (0..per_map) |i| node.regions.appendAssumeCapacity(@alignCast(mem + size * i));
             }
         }
         return .{
@@ -975,8 +1861,8 @@ const UnixFile = struct {
         std.debug.assert(node.n_ref > 0);
         node.n_ref -= 1;
         if (node.n_ref == 0) {
-            if (delete_flag) f.owner.dir.deleteFile(io, node.filename) catch {};
-            shmPurge(io, f.inode);
+            if (delete_flag and node.h_shm >= 0) _ = os(.unlink)(node.filename.ptr);
+            shmPurge(f.inode.?);
         }
     }
 };
@@ -1110,4 +1996,134 @@ test "unix: in-process locking protocol" {
     try c2.unlock(.none);
     try a.lock(.shared);
     try a.unlock(.none);
+}
+
+test "unix: file controls" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = testVfs(&tmp);
+    const v = u.interface();
+    const f = try v.open("fc.db", .{ .create = true });
+    defer f.close();
+
+    // PERSIST_WAL and POWERSAFE_OVERWRITE: -1 asks, 0 and 1 set.
+    var x: i32 = -1;
+    try testing.expect(try f.fileControl(.{ .persist_wal = &x }));
+    try testing.expectEqual(@as(i32, 0), x);
+    x = 1;
+    _ = try f.fileControl(.{ .persist_wal = &x });
+    x = -1;
+    _ = try f.fileControl(.{ .persist_wal = &x });
+    try testing.expectEqual(@as(i32, 1), x);
+    try testing.expect(f.deviceCharacteristics().powersafe_overwrite);
+    x = 0;
+    _ = try f.fileControl(.{ .powersafe_overwrite = &x });
+    try testing.expect(!f.deviceCharacteristics().powersafe_overwrite);
+
+    // CHUNK_SIZE rounds truncations and size hints up.
+    _ = try f.fileControl(.{ .chunk_size = 16 });
+    try f.write("abc", 0);
+    try f.truncate(5);
+    try testing.expectEqual(@as(u64, 16), try f.fileSize());
+    _ = try f.fileControl(.{ .size_hint = 45 });
+    try testing.expectEqual(@as(u64, 48), try f.fileSize());
+
+    var level: vfs.LockLevel = .exclusive;
+    _ = try f.fileControl(.{ .lockstate = &level });
+    try testing.expectEqual(vfs.LockLevel.none, level);
+    var name: []const u8 = "";
+    _ = try f.fileControl(.{ .vfsname = &name });
+    try testing.expectEqualStrings("unix", name);
+
+    // HAS_MOVED: the name no longer leads to the file.
+    var moved = true;
+    _ = try f.fileControl(.{ .has_moved = &moved });
+    try testing.expect(!moved);
+    try tmp.dir.rename("fc.db", tmp.dir, "fc2.db", testing.io);
+    _ = try f.fileControl(.{ .has_moved = &moved });
+    try testing.expect(moved);
+    try testing.expect(f.foreign() != null);
+}
+
+test "unix: URI parameters psow and readonly_shm" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = testVfs(&tmp);
+    const v = u.interface();
+    {
+        const f = try v.open("u.db", .{ .create = true });
+        defer f.close();
+        try f.write(&(@as([4096]u8, @splat(1))), 0);
+        const shm = try v.open("u.db-shm", .{ .create = true, .kind = .wal });
+        shm.close();
+    }
+    // The name in SQLite's filename layout, parameters after it.
+    const layout = "\x00\x00\x00\x00u.db\x00psow\x000\x00readonly_shm\x001\x00\x00";
+    const name = layout[4..8];
+    const f = try v.open(name, .{ .uri = true, .sqlite_filename = true });
+    defer f.close();
+    try testing.expect(!f.deviceCharacteristics().powersafe_overwrite);
+    try f.lock(.shared);
+    defer f.unlock(.none) catch {};
+    // No other connection: the read-only -shm file cannot be trusted.
+    const r = try f.shmMap(0, 32768, true);
+    defer f.shmUnmap(false);
+    try testing.expect(r.read_only and r.cant_init);
+}
+
+fn failOpen(_: [*:0]const u8, _: c_int, _: c_int) callconv(.c) c_int {
+    c._errno().* = eno(.ACCES);
+    return -1;
+}
+
+test "unix: overriding system calls" {
+    try testing.expectEqualStrings("open", nextSystemCall(null).?);
+    try testing.expectEqualStrings("close", nextSystemCall("open").?);
+    try testing.expect(getSystemCall("nosuchcall") == null);
+    try testing.expect(!setSystemCall("nosuchcall", null));
+    // Every name listed has a function.
+    var it = nextSystemCall(null);
+    while (it) |n| : (it = nextSystemCall(n)) try testing.expect(getSystemCall(n) != null);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = testVfs(&tmp);
+    const v = u.interface();
+    const orig = getSystemCall("open").?;
+    try testing.expect(setSystemCall("open", @ptrCast(&failOpen)));
+    try testing.expectError(error.CantOpen, v.open("s.db", .{ .create = true }));
+    // Null restores the original; a null name all of them.
+    try testing.expect(setSystemCall("open", null));
+    try testing.expect(getSystemCall("open") == orig);
+    try testing.expect(setSystemCall("open", @ptrCast(&failOpen)));
+    try testing.expect(setSystemCall(null, null));
+    const f = try v.open("s.db", .{ .create = true });
+    f.close();
+}
+
+test "unix-excl: the process locks the file, the wal-index is heap memory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = testVfs(&tmp);
+    u.excl = true;
+    const v = u.interface();
+    const a = try v.open("x.db", .{ .create = true });
+    defer a.close();
+    const b = try v.open("x.db", .{});
+    defer b.close();
+    try a.lock(.shared);
+    try b.lock(.shared);
+    try a.lock(.reserved);
+    // Connections of the process still exclude each other.
+    try testing.expectError(error.Busy, b.lock(.reserved));
+    try testing.expect(try a.checkReservedLock());
+    const r = try a.shmMap(0, 32768, true);
+    try testing.expect(r.ptr != null and !r.read_only);
+    try testing.expect(!try v.access("x.db-shm", .exists));
+    a.shmUnmap(true);
+    try a.unlock(.none);
+    try b.unlock(.none);
+    var name: []const u8 = "";
+    _ = try a.fileControl(.{ .vfsname = &name });
+    try testing.expectEqualStrings("unix-excl", name);
 }

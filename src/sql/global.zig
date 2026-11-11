@@ -57,6 +57,11 @@ pub const TestCtrl = struct {
     saved_out: [64]u8 = @splat(0),
     saved_n: u8 = 0,
 };
+/// sqlite3_enable_shared_cache() (sqlite3GlobalConfig.sharedCacheEnabled):
+/// connections opened from now on share their cache unless asked not to
+/// (OpenFlags.private_cache).
+pub var shared_cache_enabled: bool = false;
+
 /// The VFS registry of the C ABI (sqlite3_vfs_find()), which resolves a
 /// URI's "vfs" parameter in ATTACH (OpenFlags.vfs_resolved). Null without
 /// a registry: ATTACH uses the connection's VFS.

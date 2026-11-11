@@ -375,9 +375,8 @@ pub export fn sqlite3_memory_alarm(_: ?*const anyopaque, _: ?*anyopaque, _: i64)
     return RC.OK;
 }
 
-pub export fn sqlite3_enable_shared_cache(_: c_int) callconv(.c) c_int {
-    // There is no shared cache; enabling it is accepted, as SQLite
-    // (which deprecates it) does.
+pub export fn sqlite3_enable_shared_cache(enable: c_int) callconv(.c) c_int {
+    @import("../sql/global.zig").shared_cache_enabled = enable != 0;
     return RC.OK;
 }
 

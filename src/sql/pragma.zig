@@ -884,7 +884,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 // The C b-tree reads cell_size_check from db->flags; this
                 // one keeps its own copy, set here and when a b-tree opens.
                 for (db.dbs.items) |*d| if (d.bt) |bt| {
-                    bt.cell_size_check = db.flags.CellSizeCk;
+                    bt.bs.cell_size_check = db.flags.CellSizeCk;
                 };
             } else {
                 setPragmaResultColumnNames(v, pn);
@@ -1356,6 +1356,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
         i_db = @intCast(prepare.schemaToIndex(db, t.schema));
         zdb = db.dbs.items[i_db].name;
         build.codeVerifySchema(p, i_db);
+        build.tableLock(p, i_db, t.tnum, false, t.name);
         expr.touchRegister(p, t.nCol() + reg_row);
         insert.openTable(p, 0, i_db, t, OP.OpenRead);
         _ = aux.loadString(v, reg_result, t.name);
@@ -1369,6 +1370,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
         }) {
             const parent = build.findTable(db, fk.to, zdb) orelse continue;
             var idx: ?*Index = null;
+            build.tableLock(p, i_db, parent.tnum, false, parent.name);
             if (!fkey.fkLocateIndex(p, parent, fk, &idx, null)) {
                 if (idx) |ix| {
                     _ = aux.addOp3(v, OP.OpenRead, i, @intCast(ix.tnum), @intCast(i_db));

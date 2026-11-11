@@ -631,13 +631,12 @@ static int xqtclFakeBigFile(void *cd, Tcl_Interp *interp, int objc,
   return TCL_OK;
 }
 
-/* SQLITE_FCNTL_FILE_POINTER. libxqlite3 answers it only for files of a C
-** VFS; on its built-in "unix" VFS the pointer stays NULL (docs/c-api.md),
-** and the helpers below then dereference NULL. The fixture would crash
-** at the first such call, which most journal, WAL and pager test files
-** make at the top (atomic_batch_write): these wrappers turn it into a
-** result or a Tcl error so the rest of the file runs, and the
-** incompatibility shows as the failures of the tests that need it. */
+/* SQLITE_FCNTL_FILE_POINTER. libxqlite3 answers it for files of a C VFS
+** and of its default VFS ("unix", "unix-excl"), but not for memdb files,
+** where the pointer stays NULL (docs/c-api.md) and the helpers below
+** would dereference NULL: these wrappers turn that into a result or a
+** Tcl error so the rest of the file runs, and the incompatibility shows
+** as the failures of the tests that need it. */
 static sqlite3_file *xqtclFilePointer(sqlite3 *db, const char *zDb){
   sqlite3_file *pFd = 0;
   if( sqlite3_file_control(db, zDb, SQLITE_FCNTL_FILE_POINTER, (void*)&pFd) ){

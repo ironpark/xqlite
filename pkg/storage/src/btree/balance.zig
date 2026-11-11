@@ -17,7 +17,7 @@ const page = @import("page.zig");
 const ptrmap = @import("ptrmap.zig");
 const alloc = @import("alloc.zig");
 
-const Btree = btree.Btree;
+const BtShared = btree.BtShared;
 const Error = btree.Error;
 const Pgno = btree.Pgno;
 const Payload = btree.Payload;
@@ -32,7 +32,7 @@ const put4 = page.put4;
 /// Port of balance_quick(): `pg` is the rightmost leaf of a table and
 /// overflows with one cell at its end, as when appending rows. Put that
 /// cell alone on a new right sibling instead of redistributing.
-pub fn balanceQuick(bt: *Btree, parent: *MemPage, pg: *MemPage, space: *[13]u8) Error!void {
+pub fn balanceQuick(bt: *BtShared, parent: *MemPage, pg: *MemPage, space: *[13]u8) Error!void {
     std.debug.assert(pg.n_overflow == 1);
     if (pg.n_cell == 0) return corrupt(@src());
     const new = try alloc.allocatePage(bt, 0, .any);
@@ -77,7 +77,7 @@ pub fn balanceQuick(bt: *Btree, parent: *MemPage, pg: *MemPage, space: *[13]u8) 
 /// Port of balance_deeper(): the root overflows. Move its content to a
 /// new child and leave the root empty with that child on the right.
 /// Returns the child, referenced.
-pub fn balanceDeeper(bt: *Btree, root: *MemPage) Error!*MemPage {
+pub fn balanceDeeper(bt: *BtShared, root: *MemPage) Error!*MemPage {
     std.debug.assert(root.n_overflow > 0);
     try bt.pager.write(root.db_page);
     const child = try alloc.allocatePage(bt, root.pgno, .any);
@@ -103,7 +103,7 @@ pub fn balanceDeeper(bt: *Btree, root: *MemPage) Error!*MemPage {
 /// parent and must live until the parent is balanced. On error the
 /// database may be inconsistent and must be rolled back.
 pub fn balanceNonroot(
-    bt: *Btree,
+    bt: *BtShared,
     parent: *MemPage,
     i_parent_idx: u32,
     ovfl_space: []u8,
@@ -133,7 +133,7 @@ pub fn balanceNonroot(
 /// The state of one balanceNonroot(), whose steps (the sections of
 /// balance_nonroot()) are its methods, in the order they run.
 const Balance = struct {
-    bt: *Btree,
+    bt: *BtShared,
     parent: *MemPage,
     i_parent_idx: u32,
     ovfl_space: []u8,

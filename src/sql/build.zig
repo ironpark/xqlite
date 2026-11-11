@@ -388,6 +388,10 @@ pub fn finishCoding(p: *Parse) void {
         }
         p.vtab_lock = .empty;
 
+        // Once the cookies are verified and the transactions open, the
+        // table locks (shared cache only).
+        if (p.table_locks.items.len > 0) codeTableLocks(p);
+
         if (p.uses_ainc) insert_mod.autoincrementBegin(p);
 
         // Code the constant expressions factored out of loops.
@@ -689,6 +693,41 @@ pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
     s.schema_flags.ResetWanted = false;
 }
 
+/// Port of sqlite3SchemaGet() for a b-tree opened with shared cache: the
+/// schema its BtShared keeps for every connection, made by the first.
+/// Null on OOM. Its objects must not come from a connection's lookaside
+/// (see prepare.initOne()): another connection may free them.
+pub fn sharedSchema(bt: *btree.Btree) ?*Schema {
+    const p = bt.schema(makeSharedSchema, freeSharedSchema) orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+fn makeSharedSchema() ?*anyopaque {
+    const s = @import("malloc.zig").allocator.create(Schema) catch return null;
+    s.* = .{ .enc = 1 };
+    return s;
+}
+
+/// The xFreeSchema of a shared schema, when the last connection closes
+/// the b-tree: sqlite3SchemaClear() with a connection object of its own
+/// (C's xdb), then the schema itself.
+fn freeSharedSchema(p: ?*anyopaque) void {
+    const malloc = @import("malloc.zig");
+    const s: *Schema = @ptrCast(@alignCast(p.?));
+    var xdb: Sqlite3 = .{ .gpa = undefined };
+    xdb.gpa = malloc.dbAllocator(&xdb);
+    schemaFree(&xdb, s);
+    malloc.allocator.destroy(s);
+}
+
+/// Free the schema of entry `d` of db.dbs, unless the shared cache owns
+/// it (Db.shared).
+pub fn dbSchemaFree(db: *Sqlite3, d: *const int.Db) void {
+    if (d.shared) return;
+    schemaFree(db, d.schema);
+    db.gpa.destroy(d.schema);
+}
+
 /// Free the maps of a schema whose objects are cleared.
 pub fn schemaFree(db: *Sqlite3, s: *Schema) void {
     schemaClear(db, s);
@@ -859,10 +898,41 @@ pub fn unlinkAndDeleteTable(db: *Sqlite3, i_db: usize, name: [:0]const u8) void 
     db.m_db_flags.SchemaChange = true;
 }
 
+/// Port of sqlite3TableLock(): the statement is to lock table `i_tab` of
+/// database `i_db` (named `name`, for the error message) for reading or
+/// writing, if that database is in shared cache. The top-level Parse
+/// codes one OP_TableLock per table (codeTableLocks()).
+pub fn tableLock(p: *Parse, i_db: usize, i_tab: u32, write: bool, name: [:0]const u8) void {
+    if (i_db == 1) return;
+    const bt = p.db.dbs.items[i_db].bt orelse return;
+    if (!bt.sharable) return;
+    const top = toplevel(p);
+    for (top.table_locks.items) |*l| {
+        if (l.i_db == i_db and l.i_tab == i_tab) {
+            l.write = l.write or write;
+            return;
+        }
+    }
+    top.table_locks.append(top.arena, .{ .i_db = i_db, .i_tab = i_tab, .write = write, .name = name }) catch {
+        top.table_locks = .empty;
+        p.db.oomFault();
+    };
+}
+
+/// Port of codeTableLocks(): an OP_TableLock for each table the
+/// statement locks.
+fn codeTableLocks(p: *Parse) void {
+    const v = p.vdbe.?;
+    for (p.table_locks.items) |l| {
+        _ = aux.addOp4(v, OP.TableLock, @intCast(l.i_db), @intCast(l.i_tab), @intFromBool(l.write), .{ .z = l.name });
+    }
+}
+
 /// Port of sqlite3OpenSchemaTable(): open sqlite_schema of `i_db` for
 /// writing on cursor 0.
 pub fn openSchemaTable(p: *Parse, i_db: usize) void {
     const v = getVdbe(p) orelse return;
+    tableLock(p, i_db, int.SCHEMA_ROOT, true, int.LEGACY_SCHEMA_TABLE);
     _ = aux.addOp4Int(v, OP.OpenWrite, 0, int.SCHEMA_ROOT, @intCast(i_db), 5);
     if (p.n_tab == 0) p.n_tab = 1;
 }
@@ -1383,7 +1453,7 @@ fn addCheckConstraintImpl(p: *Parse, e: ?*Expr, start_arg: ?[*]const u8, end_arg
     const db = p.db;
     const t = p.new_table orelse return;
     if (p.inDeclareVtab()) return;
-    if (db.dbs.items[db.init.i_db].bt) |bt| if (bt.read_only) return;
+    if (db.dbs.items[db.init.i_db].bt) |bt| if (bt.bs.read_only) return;
     const a = tableAlloc(p, t);
     // In rename mode the expression itself is kept: the rename map has
     // its nodes.
@@ -2590,6 +2660,8 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     p.n_tab += 2;
     const i_db: i32 = @intCast(prepare.schemaToIndex(db, idx.schema));
     if (auth.check(p, auth.Code.REINDEX, idx.name, null, db.dbs.items[@intCast(i_db)].name) != auth.OK) return;
+    // A write lock on the table.
+    tableLock(p, @intCast(i_db), t.tnum, true, t.name);
     const v = getVdbe(p) orelse return;
     const tnum: i32 = if (mem_root_page >= 0) mem_root_page else @intCast(idx.tnum);
     const key = keyInfoOfIndex(p, idx);
@@ -2646,7 +2718,7 @@ pub fn beginTransaction(p: *Parse, kind: i32) void {
     const v = getVdbe(p) orelse return;
     if (kind != TK.DEFERRED) {
         for (db.dbs.items, 0..) |*d, i| {
-            const txn: i32 = if (d.bt != null and d.bt.?.read_only) 0 else if (kind == TK.EXCLUSIVE) 2 else 1;
+            const txn: i32 = if (d.bt != null and d.bt.?.bs.read_only) 0 else if (kind == TK.EXCLUSIVE) 2 else 1;
             _ = aux.addOp2(v, OP.Transaction, @intCast(i), txn);
             aux.usesBtree(v, @intCast(i));
         }

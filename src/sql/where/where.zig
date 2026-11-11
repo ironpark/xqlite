@@ -1679,7 +1679,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
                 _ = aux.addOp2(v, OP.IfEmpty, tab_item.i_cursor, w.i_break);
             }
         } else {
-            // sqlite3TableLock(): nothing to do without shared cache.
+            build.tableLock(p, @intCast(i_db), tab.tnum, false, tab.name);
         }
         if (loop.ws_flags.INDEXED) {
             const ix = loop.btree.index.?;

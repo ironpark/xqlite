@@ -57,7 +57,7 @@ const RowCnt = u64;
 /// sqlite_stat3) about `where` (all if null), a table or index name as
 /// `where_type` says, and open it for writing on cursor `i_stat_cur`.
 fn openStatTable(p: *Parse, i_db: usize, i_stat_cur: i32, where: ?[]const u8, where_type: []const u8) void {
-    const Stat = struct { name: []const u8, cols: ?[]const u8 };
+    const Stat = struct { name: [:0]const u8, cols: ?[]const u8 };
     const tables = [_]Stat{
         .{ .name = "sqlite_stat1", .cols = "tbl,idx,stat" },
         .{ .name = "sqlite_stat4", .cols = null },
@@ -78,6 +78,7 @@ fn openStatTable(p: *Parse, i_db: usize, i_stat_cur: i32, where: ?[]const u8, wh
             // entries associated with the table `where`. If it is null,
             // delete the entire contents of the table.
             roots[i] = stat.tnum;
+            build.tableLock(p, i_db, roots[i], true, st.name);
             if (where) |w| {
                 build.nestedParse(p, "DELETE FROM %Q.%s WHERE %s=%Q", &.{
                     .{ .str = pdb.name }, .{ .str = st.name }, .{ .str = where_type }, .{ .str = w },
@@ -285,6 +286,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_m
     // Open a read-only cursor on the table. Also allocate a cursor number
     // to use for scanning indexes (i_idx_cur). No index cursor is opened
     // at this time though.
+    build.tableLock(p, i_db, t.tnum, false, t.name);
     const i_tab_cur = i_tab;
     i_tab += 1;
     const i_idx_cur = i_tab;

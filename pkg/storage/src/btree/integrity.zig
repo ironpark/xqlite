@@ -8,7 +8,7 @@ const page = @import("page.zig");
 const header = @import("header.zig");
 const ptrmap = @import("ptrmap.zig");
 
-const Btree = btree.Btree;
+const BtShared = btree.BtShared;
 const Pgno = btree.Pgno;
 const Error = btree.Error;
 const MemPage = page.MemPage;
@@ -34,7 +34,7 @@ const Prefix = enum { none, freelist, tree_page, tree_cell, tree_right_child };
 
 /// IntegrityCk.
 const Check = struct {
-    bt: *Btree,
+    bt: *BtShared,
     gpa: std.mem.Allocator,
     /// One bit per page: referenced so far.
     pg_ref: std.DynamicBitSetUnmanaged = .{},
@@ -376,7 +376,7 @@ fn heapPull(heap: []u32) ?u32 {
 /// every b-tree. If roots[0] is 0 this is a partial check of the trees
 /// that follow: unreferenced pages are not reported, and the freelist is
 /// only checked if roots[1] is 1. A read transaction must be open.
-pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u32) Error!Report {
+pub fn check(bt: *BtShared, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u32) Error!Report {
     std.debug.assert(roots.len > 0 and bt.in_trans != .none);
     const partial = roots[0] == 0;
     const check_freelist = !partial or (roots.len > 1 and roots[1] == 1);

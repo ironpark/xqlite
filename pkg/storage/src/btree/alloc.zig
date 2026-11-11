@@ -13,7 +13,7 @@ const header = btree.header;
 const page = @import("page.zig");
 const ptrmap = @import("ptrmap.zig");
 
-const Btree = btree.Btree;
+const BtShared = btree.BtShared;
 const Error = btree.Error;
 const Pgno = btree.Pgno;
 const Payload = btree.Payload;
@@ -38,7 +38,7 @@ pub const AllocMode = enum {
 /// Port of allocateBtreePage(): take a page from the freelist, or
 /// append one. The page is writable and referenced, its content
 /// undefined. Modes other than `any` are only for auto-vacuum.
-pub fn allocatePage(bt: *Btree, nearby: Pgno, mode: AllocMode) Error!*MemPage {
+pub fn allocatePage(bt: *BtShared, nearby: Pgno, mode: AllocMode) Error!*MemPage {
     std.debug.assert(mode == .any or (nearby > 0 and bt.isAutoVacuum()));
     const p1 = bt.page1.?;
     const mx_page = bt.n_page;
@@ -155,7 +155,7 @@ pub fn allocatePage(bt: *Btree, nearby: Pgno, mode: AllocMode) Error!*MemPage {
 
 /// The append half of allocateBtreePage(): extend the database by one
 /// page (two if the next one must be a pointer-map page).
-pub fn appendPage(bt: *Btree) Error!*MemPage {
+pub fn appendPage(bt: *BtShared) Error!*MemPage {
     const p1 = bt.page1.?;
     // After an incremental vacuum, pages between the image and the end
     // of the file may hold content a rollback needs: read (and journal)
@@ -180,7 +180,7 @@ pub fn appendPage(bt: *Btree) Error!*MemPage {
 
 /// Port of freePage2(): put page `pgno` on the freelist. `mem` is the
 /// page if the caller has it; its reference count is not changed.
-pub fn freePage2(bt: *Btree, mem: ?*MemPage, pgno: Pgno) Error!void {
+pub fn freePage2(bt: *BtShared, mem: ?*MemPage, pgno: Pgno) Error!void {
     const p1 = bt.page1.?;
     if (pgno < 2 or pgno > bt.n_page) return corrupt(@src());
     var pg: ?*MemPage = null;
@@ -240,14 +240,14 @@ pub fn freePage2(bt: *Btree, mem: ?*MemPage, pgno: Pgno) Error!void {
     header.put(p1.data, .first_freelist_trunk, pgno);
 }
 
-pub fn freePage(bt: *Btree, pg: *MemPage) Error!void {
+pub fn freePage(bt: *BtShared, pg: *MemPage) Error!void {
     return freePage2(bt, pg, pg.pgno);
 }
 
 /// Port of getOverflowPage(): the overflow page after `ovfl`, or 0.
 /// `page` is `ovfl` itself, referenced, unless `want_page` is false or
 /// the pointer map answered without reading it.
-pub fn getOverflowPage(bt: *Btree, ovfl: Pgno, want_page: bool) Error!struct { next: Pgno, page: ?*MemPage } {
+pub fn getOverflowPage(bt: *BtShared, ovfl: Pgno, want_page: bool) Error!struct { next: Pgno, page: ?*MemPage } {
     if (bt.isAutoVacuum()) {
         // Guess that the chain continues on the next page and check
         // the guess against the pointer map.
@@ -266,7 +266,7 @@ pub fn getOverflowPage(bt: *Btree, ovfl: Pgno, want_page: bool) Error!struct { n
 }
 
 /// Port of clearCellOverflow(): free the overflow chain of a cell.
-pub fn clearCellOverflow(bt: *Btree, pg: *MemPage, cell: [*]u8, info: CellInfo) Error!void {
+pub fn clearCellOverflow(bt: *BtShared, pg: *MemPage, cell: [*]u8, info: CellInfo) Error!void {
     if (@intFromPtr(cell) + info.n_size > @intFromPtr(pg.data_end)) return corrupt(@src());
     var ovfl = get4(cell + info.n_size - 4);
     const ovfl_size = bt.usable_size - 4;
@@ -291,7 +291,7 @@ pub fn clearCellOverflow(bt: *Btree, pg: *MemPage, cell: [*]u8, info: CellInfo) 
 }
 
 /// BTREE_CLEAR_CELL: parse a cell and free its overflow chain.
-pub fn clearCell(bt: *Btree, pg: *MemPage, cell: [*]u8) Error!CellInfo {
+pub fn clearCell(bt: *BtShared, pg: *MemPage, cell: [*]u8) Error!CellInfo {
     const info = pg.parseCell(cell);
     if (info.n_local != info.n_payload) try clearCellOverflow(bt, pg, cell, info);
     return info;
@@ -299,7 +299,7 @@ pub fn clearCell(bt: *Btree, pg: *MemPage, cell: [*]u8) Error!CellInfo {
 
 /// Port of fillInCell(): build the cell for `x` in `cell`, allocating
 /// and filling overflow pages as needed. Returns the cell size.
-pub fn fillInCell(bt: *Btree, pg: *MemPage, cell: [*]u8, x: Payload) Error!u32 {
+pub fn fillInCell(bt: *BtShared, pg: *MemPage, cell: [*]u8, x: Payload) Error!u32 {
     const n_size = try fillInCellUnchecked(bt, pg, cell, x);
     if (checking()) {
         // The cell parses back to what was written.
@@ -311,7 +311,7 @@ pub fn fillInCell(bt: *Btree, pg: *MemPage, cell: [*]u8, x: Payload) Error!u32 {
     return n_size;
 }
 
-pub fn fillInCellUnchecked(bt: *Btree, pg: *MemPage, cell: [*]u8, x: Payload) Error!u32 {
+pub fn fillInCellUnchecked(bt: *BtShared, pg: *MemPage, cell: [*]u8, x: Payload) Error!u32 {
     var n_header: u32 = pg.child_ptr_size;
     var n_payload: u32 = undefined;
     var src: []const u8 = undefined;

@@ -409,7 +409,9 @@ pub fn opParseSchema(e: *Exec, op: *Op) Error!Flow {
         v.expired = 0;
     } else {
         db.init.busy = true;
+        const no_lookaside = prepare.sharedSchemaInit(db, i_db);
         rc = prepare.parseSchemaWhere(db, i_db, std.mem.span(op.p4.z), &err_msg);
+        if (no_lookaside) @import("../../sql/malloc.zig").enableLookaside(db);
         db.init.busy = false;
     }
     if (err_msg) |m| aux.setErrMsg(v, m);
@@ -547,6 +549,21 @@ pub fn opIncrVacuum(e: *Exec, op: *Op) Error!Flow {
     const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
     const more = try bt.incrVacuum();
     return if (more) .next else .jump_p2;
+}
+
+/// Port of OP_TableLock: lock table P2 of database P1 for reading (P3 0)
+/// or writing in the shared cache. Read locks are skipped with PRAGMA
+/// read_uncommitted.
+pub fn opTableLock(e: *Exec, op: *Op) Error!Flow {
+    const write = op.p3 != 0;
+    if (write or !e.db.flags.ReadUncommit) {
+        const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
+        bt.lockTable(@intCast(op.p2), write) catch |err| {
+            if (err == error.LockedSharedCache) aux.vdbeError(e.v, "database table is locked: {s}", .{std.mem.span(op.p4.z)});
+            return err;
+        };
+    }
+    return .next;
 }
 
 pub fn opExpire(e: *Exec, op: *Op) Flow {

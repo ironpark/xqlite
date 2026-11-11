@@ -23,6 +23,14 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "pkg/vfs/src/vfs.zig", "max_size" },
     // sqlite3PendingByte (SQLITE_TESTCTRL_PENDING_BYTE).
     .{ "pkg/vfs/src/vfs.zig", "pending_byte" },
+    // sqlite3GlobalConfig.sharedCacheEnabled (sqlite3_enable_shared_cache()),
+    // sqlite3SharedCacheList, and the mutexes shared cache takes, which
+    // the C ABI sets (sqlite3MutexAlloc()).
+    .{ "src/sql/global.zig", "shared_cache_enabled" },
+    .{ "pkg/storage/src/btree/btree.zig", "shared_list" },
+    .{ "pkg/storage/src/btree/btree.zig", "mutex_hooks" },
+    // The sqlite3_log() of the embedder, set once by the C ABI.
+    .{ "pkg/vfs/src/vfs.zig", "log_fn" },
     // The C ABI's VFS registry, for ATTACH's vfs= parameter.
     .{ "src/sql/global.zig", "find_vfs" },
     // The shared stores of the memdb VFS (memdb_g) and its settings.
@@ -38,6 +46,8 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "load_extension" },
     // The POSIX lock table, which every connection has to share.
     .{ "pkg/vfs/src/unix.zig", "inodes" },
+    // aSyscall[] of os_unix.c: xSetSystemCall() overrides, process-wide.
+    .{ "pkg/vfs/src/unix.zig", "syscalls" },
     // The C ABI's process-wide state (sqlite3_config(), the auto
     // extensions), its VFS list, the sqlite3_str of a failed
     // sqlite3_str_new() and the variables sqlite3.h declares.
@@ -45,6 +55,12 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/capi/vfs.zig", "unix_vfs" },
     .{ "src/capi/vfs.zig", "unix_c" },
     .{ "src/capi/vfs.zig", "unix_entry" },
+    .{ "src/capi/vfs.zig", "unix_excl_vfs" },
+    .{ "src/capi/vfs.zig", "unix_excl_c" },
+    .{ "src/capi/vfs.zig", "unix_excl_entry" },
+    .{ "src/capi/vfs.zig", "unix_none_vfs" },
+    .{ "src/capi/vfs.zig", "unix_none_c" },
+    .{ "src/capi/vfs.zig", "unix_none_entry" },
     .{ "src/capi/vfs.zig", "memdb_c" },
     .{ "src/capi/vfs.zig", "memdb_entry" },
     .{ "src/capi/vfs.zig", "head" },

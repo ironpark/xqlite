@@ -436,6 +436,8 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
             }
         }
 
+        // A shared-cache advisory read lock on the parent table.
+        build.tableLock(p, @intCast(i_db), pt.tnum, false, pt.name);
         p.n_tab += 1;
         // A child row removed may resolve a violation; one added may
         // cause one (but not as the SET NULL action of this very key).

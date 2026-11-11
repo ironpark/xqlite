@@ -14,7 +14,7 @@ const page = @import("page.zig");
 const ptrmap = @import("ptrmap.zig");
 const alloc = @import("alloc.zig");
 
-const Btree = btree.Btree;
+const BtShared = btree.BtShared;
 const Error = btree.Error;
 const Pgno = btree.Pgno;
 const Payload = btree.Payload;
@@ -28,7 +28,7 @@ const put4 = page.put4;
 
 /// Port of invalidateAllOverflowCache(): pages are about to move, so
 /// cached overflow page numbers may go stale.
-pub fn invalidateAllOverflowCache(bt: *Btree) void {
+pub fn invalidateAllOverflowCache(bt: *BtShared) void {
     var it = bt.cursors;
     while (it) |c| : (it = c.next_cursor) c.flags.valid_ovfl = false;
 }
@@ -37,7 +37,7 @@ pub fn invalidateAllOverflowCache(bt: *Btree) void {
 /// `e_type`/`ptr_page`) to the unused location `free_pgno`, fixing the
 /// pointer to it and the pointer-map entries of the pages it points
 /// to. `pg` stays referenced. See `Pager.movePage` for `is_commit`.
-pub fn relocatePage(bt: *Btree, pg: *MemPage, e_type: ptrmap.Type, ptr_page: Pgno, free_pgno: Pgno, is_commit: bool) Error!void {
+pub fn relocatePage(bt: *BtShared, pg: *MemPage, e_type: ptrmap.Type, ptr_page: Pgno, free_pgno: Pgno, is_commit: bool) Error!void {
     std.debug.assert(e_type != .free_page);
     const old_pgno = pg.pgno;
     if (old_pgno < 3) return corrupt(@src());
@@ -67,7 +67,7 @@ pub fn relocatePage(bt: *Btree, pg: *MemPage, e_type: ptrmap.Type, ptr_page: Pgn
 /// until the file is `n_fin` pages and then drops the whole freelist;
 /// otherwise each call also shrinks `n_page`. Returns false when there
 /// is nothing left to do.
-pub fn incrVacuumStep(bt: *Btree, n_fin: Pgno, last_pg_arg: Pgno, at_commit: bool) Error!bool {
+pub fn incrVacuumStep(bt: *BtShared, n_fin: Pgno, last_pg_arg: Pgno, at_commit: bool) Error!bool {
     std.debug.assert(last_pg_arg > n_fin);
     var last_pg = last_pg_arg;
     if (!ptrmap.isReserved(bt, last_pg)) {
@@ -117,7 +117,7 @@ pub fn incrVacuumStep(bt: *Btree, n_fin: Pgno, last_pg_arg: Pgno, at_commit: boo
 /// Port of finalDbSize(): the size of a database of `n_orig` pages
 /// after vacuuming away `n_free` free pages, along with the
 /// pointer-map pages no longer needed.
-pub fn finalDbSize(bt: *Btree, n_orig: Pgno, n_free: Pgno) Pgno {
+pub fn finalDbSize(bt: *BtShared, n_orig: Pgno, n_free: Pgno) Pgno {
     const n_entry = bt.usable_size / 5;
     const n_ptrmap = (n_free -% n_orig +% ptrmap.pageno(bt, n_orig) +% n_entry) / n_entry;
     var n_fin = n_orig -% n_free -% n_ptrmap;

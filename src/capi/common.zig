@@ -256,6 +256,37 @@ extern fn xq_mutex_init() c_int;
 extern fn xq_mutex_end() void;
 pub const MUTEX_RECURSIVE = 1;
 
+/// The mutexes of shared cache (btree.MutexHooks): sqlite3_mutex objects.
+const shared_cache_mutexes: @import("xqlite_storage").btree.MutexHooks = .{
+    .alloc = struct {
+        fn f() ?*anyopaque {
+            return sqlite3_mutex_alloc(MUTEX_RECURSIVE);
+        }
+    }.f,
+    .free = struct {
+        fn f(m: *anyopaque) void {
+            sqlite3_mutex_free(@ptrCast(m));
+        }
+    }.f,
+    .enter = struct {
+        fn f(m: *anyopaque) void {
+            sqlite3_mutex_enter(@ptrCast(m));
+        }
+    }.f,
+    .leave = struct {
+        fn f(m: *anyopaque) void {
+            sqlite3_mutex_leave(@ptrCast(m));
+        }
+    }.f,
+    .static = struct {
+        // SQLITE_MUTEX_STATIC_OPEN and SQLITE_MUTEX_STATIC_MAIN.
+        fn f(open: bool, enter: bool) void {
+            const m = sqlite3_mutex_alloc(if (open) 4 else 2);
+            if (enter) sqlite3_mutex_enter(m) else sqlite3_mutex_leave(m);
+        }
+    }.f,
+};
+
 /// Whether the library has mutexes (SQLITE_THREADSAFE != 0): not on
 /// single-threaded WebAssembly.
 pub const have_threads = !builtin.cpu.arch.isWasm();
@@ -263,20 +294,43 @@ pub const have_threads = !builtin.cpu.arch.isWasm();
 /// What sqlite3_mutex_enter(db->mutex) took, for leaving it.
 pub const Lock = struct {
     m: ?*Mutex,
+    /// The connection whose shared caches were entered too.
+    shared: ?*Handle = null,
 
     pub fn unlock(l: Lock) void {
+        if (l.shared) |db| {
+            var i = db.dbs.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (db.dbs.items[i].bt) |bt| bt.unlockMutex();
+            }
+        }
         if (l.m) |m| sqlite3_mutex_leave(m);
+    }
+
+    /// The lock of a connection just closed: closing its b-trees left
+    /// their mutexes (Btree.close()).
+    pub fn closed(l: Lock) Lock {
+        return .{ .m = l.m };
     }
 };
 
 /// sqlite3_mutex_enter(db->mutex): in serialized mode, take the mutex
 /// of `db` (none for a null `db` or in multi-thread mode). The mutex is
-/// recursive: callbacks may call the interfaces again.
+/// recursive: callbacks may call the interfaces again. Then, as
+/// sqlite3BtreeEnterAll() does, the mutexes of its databases in shared
+/// cache, which other connections use too, in any threading mode.
 pub inline fn lock(db: ?*Handle) Lock {
     const e = extOf(db) orelse return .{ .m = null };
-    const m = e.mutex orelse return .{ .m = null };
-    sqlite3_mutex_enter(m);
-    return .{ .m = m };
+    if (e.mutex) |m| sqlite3_mutex_enter(m);
+    if (db.?.n_shared == 0) return .{ .m = e.mutex };
+    return enterShared(db.?, e.mutex);
+}
+
+/// lock(): sqlite3BtreeEnterAll() for a connection with shared caches.
+noinline fn enterShared(db: *Handle, m: ?*Mutex) Lock {
+    for (db.dbs.items) |d| if (d.bt) |bt| bt.lockMutex();
+    return .{ .m = m, .shared = db };
 }
 
 /// lock() for the connection of statement `v`.
@@ -362,6 +416,9 @@ pub fn ensureInit() ?c_int {
     @import("vfs.zig").initDefault();
     @import("loadext.zig").initHook();
     @import("xqlite_storage").corrupt.hook = logCorrupt;
+    // No mutexes for shared cache in single-thread mode (bCoreMutex).
+    @import("xqlite_storage").btree.mutex_hooks = if (have_threads and state.core_mutex) shared_cache_mutexes else null;
+    vfs.log_fn = logVfs;
     @atomicStore(bool, &state.initialized, true, .release);
     return null;
 }
@@ -377,6 +434,13 @@ pub fn shutdown() void {
         if (state.mem_methods) |m| if (m.xShutdown) |f| f(m.pAppData);
     }
     xq_mutex_end();
+}
+
+/// The OS errors the VFS reports (unixLogErrorAtLine()), through the
+/// SQLITE_CONFIG_LOG logger.
+fn logVfs(code: i32, msg: [:0]const u8) void {
+    const f = state.log.f orelse return;
+    f(state.log.arg, code, msg.ptr);
 }
 
 /// Logs where the storage layer found the file corrupt through the

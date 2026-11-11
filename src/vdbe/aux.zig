@@ -72,7 +72,9 @@ pub fn setSql(v: *Vdbe, z: []const u8, prep_flags: u8) void {
         v.expmask = 0;
         v.smimask = 0;
     }
-    v.sql = v.alloc().dupeSentinel(u8, z, 0) catch null;
+    // From the connection, not the statement's arena: sqlite3VdbeSwap()
+    // leaves each statement its own text.
+    v.sql = v.db.gpa.dupeSentinel(u8, z, 0) catch null;
 }
 
 /// SQLITE_PREPARE_* flags.
@@ -1101,7 +1103,9 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
         const bt = d.bt orelse continue;
         if (bt.txnState() != .write) continue;
         need_xcommit = true;
-        const pager = bt.pager;
+        // sqlite3BtreeEnter(): the busy handler of a shared cache is this
+        // connection's.
+        const pager = bt.enter().pager;
         // aMJNeeded: DELETE, PERSIST and TRUNCATE journals. A temporary
         // or in-memory database (one pager here) needs none.
         const mj_needed = switch (pager.journal_mode) {
@@ -1467,6 +1471,9 @@ pub fn swap(a: *Vdbe, b: *Vdbe) void {
     std.mem.swap(Vdbe, a, b);
     std.mem.swap(?*Vdbe, &a.next, &b.next);
     std.mem.swap(?*Vdbe, &a.prev, &b.prev);
+    // Each keeps its own SQL text: a caller may hold sqlite3_sql() of the
+    // statement recompiled (tclsqlite's statement cache does).
+    std.mem.swap(?[:0]const u8, &a.sql, &b.sql);
     b.expmask |= a.expmask;
     b.smimask |= a.smimask;
     b.prep_flags = a.prep_flags;
@@ -1564,6 +1571,7 @@ pub fn delete(v: *Vdbe) void {
     }
     setErrMsg(v, null);
     freeFkOwned(v);
+    if (v.sql) |z| db.gpa.free(z);
     v.arena.deinit();
     db.gpa.destroy(v);
 }

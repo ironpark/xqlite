@@ -285,6 +285,53 @@ test "pager: a database without write permission opens read-only" {
     try testing.expectError(error.ReadOnly, p.begin(false));
 }
 
+test "pager: URI parameters nolock and immutable" {
+    if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = UnixVfs.init(testing.allocator, testing.io);
+    u.dir = tmp.dir;
+    const v = u.interface();
+    {
+        const p = try openPager(v, .{});
+        defer p.close(.{});
+        try commitFill(p, 2, 0x31);
+    }
+    {
+        // nolock=1: no file locks, and no WAL mode.
+        const p = try openPager(v, .{ .uri_params = "nolock\x001\x00", .uri = true });
+        defer p.close(.{});
+        try testing.expect(p.no_lock and !p.temp_file);
+        try testing.expect(!p.walSupported());
+        try expectDb(p, 2, 0x31);
+        try testing.expectEqual(vfs.LockLevel.none, p.lock);
+    }
+    {
+        // immutable=1: read-only, as a temporary file (no locks).
+        const p = try openPager(v, .{ .uri_params = "immutable\x00on\x00", .uri = true });
+        defer p.close(.{});
+        try testing.expect(p.temp_file and p.no_lock and p.isReadOnly());
+        try testing.expect(p.fd.isOpen() and p.fd.isReadOnly());
+        try expectDb(p, 2, 0x31);
+    }
+}
+
+test "pager: a database renamed while open is read-only (SQLITE_READONLY_DBMOVED)" {
+    if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = UnixVfs.init(testing.allocator, testing.io);
+    u.dir = tmp.dir;
+    const v = u.interface();
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    try commitFill(p, 2, 0x41);
+    try tmp.dir.rename(db_name, tmp.dir, "moved.db", testing.io);
+    const p1 = try beginWrite(p);
+    defer p.unrefPageOne(p1);
+    try testing.expectError(error.ReadOnlyDbMoved, p.write(p1));
+}
+
 test "pager: crash before the journal is synced leaves the database intact" {
     var mem = MemVfs.init(testing.allocator, testing.io);
     defer mem.deinit();

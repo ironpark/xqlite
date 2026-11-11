@@ -86,6 +86,8 @@ fn toBits(f: OpenFlags) u32 {
     var b: u32 = if (f.read_only) READONLY else READWRITE;
     if (f.create and !f.read_only) b |= CREATE;
     if (f.memory) b |= MEMORY;
+    if (f.shared_cache) b |= SHAREDCACHE;
+    if (f.private_cache) b |= PRIVATECACHE;
     return b;
 }
 
@@ -96,6 +98,8 @@ fn fromBits(b: u32, uri: bool) OpenFlags {
         .read_only = b & READONLY != 0,
         .create = b & CREATE != 0,
         .memory = b & MEMORY != 0,
+        .shared_cache = b & SHAREDCACHE != 0,
+        .private_cache = b & PRIVATECACHE != 0,
         .uri = uri,
     };
 }

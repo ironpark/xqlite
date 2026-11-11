@@ -15,6 +15,7 @@ const dialect = @import("../dialect/dialect.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
+const malloc = @import("malloc.zig");
 const Schema = int.Schema;
 const Vdbe = vi.Vdbe;
 const RC = int.RC;
@@ -163,6 +164,17 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
     return false;
 }
 
+/// xqlite: before reading into the schema of database `i_db`, keep its
+/// objects out of the connection's lookaside if the shared cache owns
+/// the schema (Db.shared): another connection may free them (C frees a
+/// schema with no connection, sqlite3SchemaClear()). True if lookaside
+/// was disabled, for malloc.enableLookaside() once done.
+pub fn sharedSchemaInit(db: *Sqlite3, i_db: usize) bool {
+    if (!db.dbs.items[i_db].shared) return false;
+    malloc.disableLookaside(db);
+    return true;
+}
+
 /// Port of sqlite3InitOne(): read the schema of database `i_db`. On error
 /// returns the code and sets `err_msg` (owned by the caller, from gpa).
 pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
@@ -171,6 +183,8 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
     const encoding_was_fixed = db.m_db_flags.EncodingFixed;
     db.init.busy = true;
     defer db.init.busy = false;
+    const no_lookaside = sharedSchemaInit(db, i_db);
+    defer if (no_lookaside) malloc.enableLookaside(db);
     var rc: i32 = RC.OK;
 
     // The schema table itself, made by the parser from its definition.
@@ -325,8 +339,15 @@ pub fn readSchema(p: *Parse) int.ParseError!void {
             p.n_err += 1;
             return error.ParseFailed;
         }
-        db.m_db_flags.SchemaKnownOk = true;
+        // With shared cache another connection may change the schema at
+        // any time (db->noSharedCache).
+        if (noSharedCache(db)) db.m_db_flags.SchemaKnownOk = true;
     }
+}
+
+/// db->noSharedCache: no database of the connection is in shared cache.
+pub fn noSharedCache(db: *const Sqlite3) bool {
+    return db.n_shared == 0;
 }
 
 /// Port of schemaIsValid(): if a schema cookie changed, set p.rc to
@@ -405,6 +426,17 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
         @import("malloc.zig").disableLookaside(db);
     }
     p.prep_flags = prep_flags;
+
+    // With shared cache, another connection may be writing the schema:
+    // its write lock on sqlite_schema keeps this one from compiling. (C
+    // checks every b-tree, sharable or not; only sharable ones lock.)
+    if (!noSharedCache(db)) for (db.dbs.items) |d| {
+        const bt = d.bt orelse continue;
+        if (bt.schemaLocked()) {
+            main_mod.errorWithMsg(db, RC.LOCKED_SHAREDCACHE, "database schema is locked: {s}", .{d.name});
+            return error.LockedSharedCache;
+        }
+    };
 
     if (db.disconnect != null) @import("vtab.zig").unlockList(db);
 

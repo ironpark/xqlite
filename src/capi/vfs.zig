@@ -102,6 +102,7 @@ const OPEN_SUBJOURNAL = 0x2000;
 const OPEN_SUPER_JOURNAL = 0x4000;
 const OPEN_WAL = 0x80000;
 const OPEN_MEMORY = 0x80;
+const OPEN_URI = 0x40;
 
 const kind_bits = [_]struct { c.vfs.FileKind, c_int }{
     .{ .main_db, OPEN_MAIN_DB },
@@ -119,6 +120,7 @@ fn toCFlags(f: c.vfs.OpenFlags) c_int {
     if (f.create) b |= OPEN_CREATE;
     if (f.exclusive) b |= OPEN_EXCLUSIVE;
     if (f.delete_on_close) b |= OPEN_DELETEONCLOSE;
+    if (f.uri) b |= OPEN_URI;
     for (kind_bits) |k| if (k[0] == f.kind) {
         b |= k[1];
     };
@@ -131,6 +133,7 @@ fn fromCFlags(b: c_int) c.vfs.OpenFlags {
         .create = b & OPEN_CREATE != 0,
         .exclusive = b & OPEN_EXCLUSIVE != 0,
         .delete_on_close = b & OPEN_DELETEONCLOSE != 0,
+        .uri = b & OPEN_URI != 0,
     };
     for (kind_bits) |k| if (b & k[1] != 0) {
         f.kind = k[0];
@@ -188,6 +191,18 @@ pub const Entry = struct {
 var unix_vfs: c.OsVfs = undefined;
 var unix_c: sqlite3_vfs = undefined;
 var unix_entry: Entry = undefined;
+/// "unix-excl" (not on WebAssembly): the default VFS with exclusive
+/// process locks (UnixVfs.excl).
+var unix_excl_vfs: c.OsVfs = undefined;
+var unix_excl_c: sqlite3_vfs = undefined;
+var unix_excl_entry: Entry = undefined;
+/// "unix-none": the default VFS without locks or shared memory
+/// (UnixVfs.none).
+var unix_none_vfs: c.OsVfs = undefined;
+var unix_none_c: sqlite3_vfs = undefined;
+var unix_none_entry: Entry = undefined;
+/// The default VFS is the POSIX one (unix.zig), not WebAssembly's.
+const is_unix = @hasField(c.OsVfs, "excl");
 var memdb_c: sqlite3_vfs = undefined;
 var memdb_entry: Entry = undefined;
 /// The first VFS of the list is the default.
@@ -248,6 +263,20 @@ pub fn initDefault() void {
     };
     memdb_entry = .{ .cvfs = &memdb_c, .engine = memdb.interface() };
     unix_entry.next = &memdb_entry;
+    if (is_unix) {
+        unix_excl_vfs = c.OsVfs.init(c.gpa, c.io());
+        unix_excl_vfs.excl = true;
+        unix_excl_c = unix_c;
+        unix_excl_c.zName = "unix-excl";
+        unix_excl_entry = .{ .cvfs = &unix_excl_c, .engine = unix_excl_vfs.interface() };
+        memdb_entry.next = &unix_excl_entry;
+        unix_none_vfs = c.OsVfs.init(c.gpa, c.io());
+        unix_none_vfs.none = true;
+        unix_none_c = unix_c;
+        unix_none_c.zName = "unix-none";
+        unix_none_entry = .{ .cvfs = &unix_none_c, .engine = unix_none_vfs.interface() };
+        unix_excl_entry.next = &unix_none_entry;
+    }
     relink();
     @import("../sql/global.zig").find_vfs = findEngine;
 }
@@ -259,6 +288,8 @@ pub fn cVfsOf(v: Vfs) ?*sqlite3_vfs {
     c.state.lock.lock();
     defer c.state.lock.unlock();
     if (v.vtable == unix_entry.engine.vtable and v.ptr == unix_entry.engine.ptr) return &unix_c;
+    if (is_unix and v.vtable == unix_excl_entry.engine.vtable and v.ptr == unix_excl_entry.engine.ptr) return &unix_excl_c;
+    if (is_unix and v.vtable == unix_none_entry.engine.vtable and v.ptr == unix_none_entry.engine.ptr) return &unix_none_c;
     if (memdb.isMemdb(v)) return &memdb_c;
     var all = all_entries;
     while (all) |x| : (all = x.all_next) {
@@ -314,6 +345,8 @@ pub export fn sqlite3_vfs_register(p: ?*sqlite3_vfs, make_dflt: c_int) callconv(
     }
     if (v == &unix_c) found = &unix_entry;
     if (v == &memdb_c) found = &memdb_entry;
+    if (is_unix and v == &unix_excl_c) found = &unix_excl_entry;
+    if (is_unix and v == &unix_none_c) found = &unix_none_entry;
     const e = found orelse blk: {
         const a = c.gpa.create(CVfsEntry) catch return RC.NOMEM;
         a.* = .{ .entry = .{ .cvfs = v, .engine = .{ .ptr = undefined, .vtable = &c_vfs_vtable } }, .all_next = all_entries };
@@ -388,9 +421,10 @@ const ZigFile = extern struct {
     }
 };
 
-fn zOpen(_: *sqlite3_vfs, z_name: ?[*:0]const u8, p: *sqlite3_file, flags: c_int, out_flags: ?*c_int) callconv(.c) c_int {
+fn zOpen(v: *sqlite3_vfs, z_name: ?[*:0]const u8, p: *sqlite3_file, flags: c_int, out_flags: ?*c_int) callconv(.c) c_int {
     p.pMethods = null;
-    const f = unix_vfs.interface().open(c.span(z_name), fromCFlags(flags)) catch |err| return errCode(err);
+    const os_vfs = if (is_unix and v == &unix_excl_c) &unix_excl_vfs else if (is_unix and v == &unix_none_c) &unix_none_vfs else &unix_vfs;
+    const f = os_vfs.interface().open(c.span(z_name), fromCFlags(flags)) catch |err| return errCode(err);
     const z = ZigFile.of(p);
     z.ptr = f.ptr;
     z.vtable = f.vtable;
@@ -476,16 +510,30 @@ fn zGetLastError(_: *sqlite3_vfs, _: c_int, _: ?[*]u8) callconv(.c) c_int {
     return 0;
 }
 
-fn zSetSystemCall(_: *sqlite3_vfs, _: ?[*:0]const u8, _: ?*const anyopaque) callconv(.c) c_int {
-    return RC.NOTFOUND;
+/// The system calls of the default VFS (os_unix.c's aSyscall[],
+/// unix.zig); none on WebAssembly.
+const syscalls = if (is_unix) @import("xqlite_vfs").unix else struct {
+    fn setSystemCall(_: ?[]const u8, _: ?*const anyopaque) bool {
+        return false;
+    }
+    fn getSystemCall(_: []const u8) ?*const anyopaque {
+        return null;
+    }
+    fn nextSystemCall(_: ?[]const u8) ?[:0]const u8 {
+        return null;
+    }
+};
+
+fn zSetSystemCall(_: *sqlite3_vfs, z_name: ?[*:0]const u8, p: ?*const anyopaque) callconv(.c) c_int {
+    return if (syscalls.setSystemCall(c.span(z_name), p)) RC.OK else RC.NOTFOUND;
 }
 
-fn zGetSystemCall(_: *sqlite3_vfs, _: ?[*:0]const u8) callconv(.c) ?*const anyopaque {
-    return null;
+fn zGetSystemCall(_: *sqlite3_vfs, z_name: ?[*:0]const u8) callconv(.c) ?*const anyopaque {
+    return syscalls.getSystemCall(c.span(z_name) orelse return null);
 }
 
-fn zNextSystemCall(_: *sqlite3_vfs, _: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
-    return null;
+fn zNextSystemCall(_: *sqlite3_vfs, z_name: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
+    return if (syscalls.nextSystemCall(c.span(z_name))) |n| n.ptr else null;
 }
 
 /// Port of memdbOpen() for C: an engine memdb file behind a ZigFile.
@@ -614,19 +662,29 @@ fn zfFileControl(p: *sqlite3_file, op: c_int, arg: ?*anyopaque) callconv(.c) c_i
 }
 
 // SQLITE_FCNTL_* answered for the engine's files.
+pub const FCNTL_LOCKSTATE = 1;
+pub const FCNTL_LAST_ERRNO = 4;
+pub const FCNTL_SIZE_HINT = 5;
+pub const FCNTL_CHUNK_SIZE = 6;
+pub const FCNTL_PERSIST_WAL = 10;
+pub const FCNTL_POWERSAFE_OVERWRITE = 13;
+pub const FCNTL_HAS_MOVED = 20;
+pub const FCNTL_EXTERNAL_READER = 40;
 pub const FCNTL_VFSNAME = 12;
+pub const FCNTL_TEMPFILENAME = 16;
 pub const FCNTL_MMAP_SIZE = 18;
 pub const FCNTL_SIZE_LIMIT = 36;
 
 /// The file controls of the engine's files: SQLITE_FCNTL_MMAP_SIZE of a
-/// file with memory maps (unixFileControl()), and those of memdb
-/// (memdbFileControl()); the other files have none.
+/// file with memory maps, those of File.fileControl (the default VFS's,
+/// unixFileControl()), and those of memdb (memdbFileControl()).
 pub fn fileControl(f: File, op: c_int, arg: ?*anyopaque) c_int {
     if (op == FCNTL_MMAP_SIZE and f.hasFetch()) {
         const sz: *i64 = @ptrCast(@alignCast(arg orelse return RC.MISUSE));
         sz.* = (f.mmapSize(sz.*) catch |err| return errCode(err)) orelse return RC.NOTFOUND;
         return RC.OK;
     }
+    if (engineFileControl(f, op, arg)) |rc| return rc;
     const m = memdb.fileOf(f) orelse return RC.NOTFOUND;
     switch (op) {
         FCNTL_VFSNAME => {
@@ -643,6 +701,73 @@ pub fn fileControl(f: File, op: c_int, arg: ?*anyopaque) c_int {
         },
         else => return RC.NOTFOUND,
     }
+}
+
+/// The SQLITE_FCNTL_* opcode `op` with its C argument `arg` sent to
+/// File.fileControl; null if `f` does not know it.
+fn engineFileControl(f: File, op: c_int, arg: ?*anyopaque) ?c_int {
+    const S = struct {
+        fn int(a: ?*anyopaque) ?*c_int {
+            return @ptrCast(@alignCast(a orelse return null));
+        }
+    };
+    if (op == FCNTL_TEMPFILENAME and is_unix and f.foreign() != null) {
+        // A name for a temporary file, from sqlite3_malloc()
+        // (unixGetTempname()).
+        const out: *?[*:0]u8 = @ptrCast(@alignCast(arg orelse return RC.MISUSE));
+        var buf: [c.vfs.max_path_bytes + 1]u8 = undefined;
+        const name = unix_vfs.tempName(&buf) catch |err| return errCode(err);
+        out.* = c.dupZ(name) orelse return RC.NOMEM;
+        return RC.OK;
+    }
+    var level: c.vfs.LockLevel = .none;
+    var flag = false;
+    var i: i32 = 0;
+    var name: []const u8 = "";
+    const fc: c.vfs.FileControl = switch (op) {
+        FCNTL_LOCKSTATE => .{ .lockstate = &level },
+        FCNTL_LAST_ERRNO => .{ .last_errno = &i },
+        FCNTL_SIZE_HINT => .{ .size_hint = (@as(?*i64, @ptrCast(@alignCast(arg))) orelse return RC.MISUSE).* },
+        FCNTL_CHUNK_SIZE => .{ .chunk_size = (S.int(arg) orelse return RC.MISUSE).* },
+        FCNTL_PERSIST_WAL, FCNTL_POWERSAFE_OVERWRITE => blk: {
+            i = (S.int(arg) orelse return RC.MISUSE).*;
+            break :blk if (op == FCNTL_PERSIST_WAL) .{ .persist_wal = &i } else .{ .powersafe_overwrite = &i };
+        },
+        FCNTL_HAS_MOVED => .{ .has_moved = &flag },
+        FCNTL_EXTERNAL_READER => .{ .external_reader = &flag },
+        FCNTL_VFSNAME => .{ .vfsname = &name },
+        else => return null,
+    };
+    const known = f.fileControl(fc) catch |err| return errCode(err);
+    if (!known) return null;
+    switch (op) {
+        FCNTL_LOCKSTATE => S.int(arg).?.* = @backingInt(level),
+        FCNTL_LAST_ERRNO, FCNTL_PERSIST_WAL, FCNTL_POWERSAFE_OVERWRITE => S.int(arg).?.* = i,
+        FCNTL_HAS_MOVED, FCNTL_EXTERNAL_READER => S.int(arg).?.* = @intFromBool(flag),
+        FCNTL_VFSNAME => {
+            const out: *?[*:0]u8 = @ptrCast(@alignCast(arg orelse return RC.MISUSE));
+            out.* = c.dupZ(name) orelse return RC.NOMEM;
+        },
+        else => {},
+    }
+    return RC.OK;
+}
+
+/// The sqlite3_file of SQLITE_FCNTL_FILE_POINTER for an engine file:
+/// the C VFS's own (cFileOf()), or for a file of the default VFS one
+/// kept in the file (File.foreign) whose methods call it; null for
+/// others.
+pub fn filePointer(f: File) ?*sqlite3_file {
+    if (cFileOf(f)) |p| return p;
+    const slot = f.foreign() orelse return null;
+    comptime std.debug.assert(@sizeOf(ZigFile) <= @sizeOf(c.vfs.ForeignSlot));
+    const z: *ZigFile = @ptrCast(@alignCast(slot));
+    if (z.base.pMethods == null) {
+        z.ptr = f.ptr;
+        z.vtable = f.vtable;
+        z.base.pMethods = if (f.hasShm()) &zig_methods_shm else &zig_methods;
+    }
+    return &z.base;
 }
 
 /// The sqlite3_file of an engine file opened through a C VFS, or null.
@@ -855,6 +980,7 @@ const c_file_vtable: File.VTable = .{
     .sectorSize = cfSectorSize,
     .deviceCharacteristics = cfDeviceCharacteristics,
     .isReadOnly = cfIsReadOnly,
+    .fileControl = cfFileControl,
 };
 
 const c_file_vtable_shm: File.VTable = blk: {
@@ -896,6 +1022,54 @@ fn cfMmapSize(ptr: *anyopaque, new_limit: i64) Error!?i64 {
     if (rc == RC.NOTFOUND) return null;
     try check(rc);
     return sz;
+}
+
+/// File.fileControl of a C VFS's file: its xFileControl with the
+/// SQLITE_FCNTL_* opcode and C argument of `op`.
+fn cfFileControl(ptr: *anyopaque, op: c.vfs.FileControl) Error!bool {
+    const f = cf(ptr);
+    const fc = f.methods().xFileControl orelse return false;
+    var i: c_int = 0;
+    var n: i64 = 0;
+    var z: ?[*:0]u8 = null;
+    const code: c_int, const arg: ?*anyopaque = switch (op) {
+        .lockstate => .{ FCNTL_LOCKSTATE, &i },
+        .last_errno => .{ FCNTL_LAST_ERRNO, &i },
+        .size_hint => |x| blk: {
+            n = x;
+            break :blk .{ FCNTL_SIZE_HINT, &n };
+        },
+        .chunk_size => |x| blk: {
+            i = x;
+            break :blk .{ FCNTL_CHUNK_SIZE, &i };
+        },
+        .persist_wal => |x| blk: {
+            i = x.*;
+            break :blk .{ FCNTL_PERSIST_WAL, &i };
+        },
+        .powersafe_overwrite => |x| blk: {
+            i = x.*;
+            break :blk .{ FCNTL_POWERSAFE_OVERWRITE, &i };
+        },
+        .has_moved => .{ FCNTL_HAS_MOVED, &i },
+        .external_reader => .{ FCNTL_EXTERNAL_READER, &i },
+        .vfsname => .{ FCNTL_VFSNAME, @ptrCast(&z) },
+    };
+    const rc = fc(f.cfile(), code, arg);
+    if (rc == RC.NOTFOUND) return false;
+    try check(rc);
+    switch (op) {
+        .lockstate => |out| out.* = lockLevel(i),
+        .last_errno, .persist_wal, .powersafe_overwrite => |out| out.* = i,
+        .has_moved, .external_reader => |out| out.* = i != 0,
+        // Only the C ABI asks for the name, and of the C method itself.
+        .vfsname => |out| {
+            out.* = "";
+            if (z) |p| c.malloc.free(p);
+        },
+        .size_hint, .chunk_size => {},
+    }
+    return true;
 }
 
 fn cf(ptr: *anyopaque) *CFile {

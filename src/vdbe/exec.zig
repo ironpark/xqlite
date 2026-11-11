@@ -389,10 +389,11 @@ pub const Exec = struct {
                 OP.Noop, OP.Explain, OP.CursorHint, OP.Abortable, OP.ReleaseReg => .next,
                 OP.RowCell => btree_ops.opRowCell(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.Vacuum => txn.opVacuum(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                // Only with a shared cache (TableLock) or in C builds with
-                // SQLITE_ENABLE_OFFSET_SQL_FUNC (Offset) or
-                // SQLITE_ENABLE_COLUMN_USED_MASK (ColumnsUsed); never coded.
-                OP.TableLock, OP.Offset, OP.ColumnsUsed => misc.opNotSupported(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
+                OP.TableLock => txn.opTableLock(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
+                // Only in C builds with SQLITE_ENABLE_OFFSET_SQL_FUNC
+                // (Offset) or SQLITE_ENABLE_COLUMN_USED_MASK (ColumnsUsed);
+                // never coded.
+                OP.Offset, OP.ColumnsUsed => misc.opNotSupported(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
             };
             if (scan) if (stat) |st| {
                 st.n_cycle +%= hwtime() -% t0;

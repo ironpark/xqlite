@@ -150,6 +150,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
 
     if (rcauth == auth.OK and where == null and !b_complex and !t.isVirtual()) {
         // Without a WHERE clause the b-trees are just cleared.
+        build.tableLock(p, @intCast(i_db), t.tnum, true, t.name);
         if (t.hasRowid()) {
             _ = aux.addOp4Str(v, OP.Clear, @intCast(t.tnum), @intCast(i_db), if (mem_cnt != 0) mem_cnt else -1, t.name);
         }

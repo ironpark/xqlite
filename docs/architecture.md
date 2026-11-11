@@ -506,13 +506,13 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 
 ## VFS
 
-방언과 상관없이 엔진 맨 아래에는 VFS(`pkg/vfs/src/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`), 메모리 맵(`fetch`, `unfetch`, `mmapSize`)을 정합니다. `File.unopened`는 열리지 않은 파일(C의 `pMethods == 0`)로, 페이저가 아직 쓰지 않은 임시 데이터베이스와 인메모리 데이터베이스의 파일 자리에 둡니다.
+방언과 상관없이 엔진 맨 아래에는 VFS(`pkg/vfs/src/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`), 메모리 맵(`fetch`, `unfetch`, `mmapSize`), 파일 제어(`fileControl`: `SQLITE_FCNTL_PERSIST_WAL`, `HAS_MOVED` 같은 연산을 태그 붙은 공용체 `FileControl`로)를 정합니다. 페이저와 WAL은 SQLite처럼 파일 제어로 VFS에 묻고(WAL을 남길지, 데이터베이스가 옮겨졌는지), C ABI는 C의 연산 번호를 이 공용체로 바꿉니다. `foreign`은 파일 안에 둔 자리로, C ABI가 `SQLITE_FCNTL_FILE_POINTER`에 줄 `sqlite3_file`을 거기 만듭니다. `File.unopened`는 열리지 않은 파일(C의 `pMethods == 0`)로, 페이저가 아직 쓰지 않은 임시 데이터베이스와 인메모리 데이터베이스의 파일 자리에 둡니다.
 
 구현은 메서드 표를 손으로 채우지 않습니다. 구체 타입을 받는 `pub` 메서드(`pub fn read(f: *MemFile, buf: []u8, offset: u64) Error!usize`)를 쓰면 `&vfs.FileImpl(MemFile).vtable`이 표를 컴파일 시점에 만들고, 타입 지운 포인터를 되돌리는 호출은 인라인됩니다. 선택 메서드를 선언하지 않으면 null로 남고, 필수 메서드가 없으면 컴파일 오류입니다. 표는 타입마다 하나라 주소로 구현을 알아볼 수 있고(memdb), `FileImplWithout(T, &.{"shmMap", ...})`은 선언된 메서드를 빼고 만듭니다(crash VFS의 공유 메모리 없는 변형).
 
 | 구현 | 파일 | 잠금 | wal-index |
 | --- | --- | --- | --- |
-| POSIX | `unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀 | mmap한 `-shm` 파일. `PRAGMA mmap_size`면 데이터베이스 파일도 읽기 전용으로 mmap |
+| POSIX | `unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀. `excl`(`"unix-excl"`)이면 프로세스가 파일을 배타 잠금, `none`(`"unix-none"`)이면 잠금 없음 | mmap한 `-shm` 파일(`excl`이면 힙 메모리). `PRAGMA mmap_size`면 데이터베이스 파일도 읽기 전용으로 mmap. 시스템 호출은 바꿀 수 있는 표(`aSyscall[]`)를 거침 |
 | WASI | `wasi.zig` | 프로세스 안에서만(`inproc.zig`, 장치·inode 번호로) | 힙 메모리 |
 | 호스트(wasm32-freestanding) | `host.zig` | 프로세스 안에서(이름으로) 중재한 뒤 호스트에 물음(`xq_host_lock`) | 힙 메모리 |
 | 메모리 | `mem.zig` | `MemVfs` 객체 안에서 | 힙 메모리 |
@@ -572,7 +572,7 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 
 `corrupt.never_corrupt`(`SQLITE_TESTCTRL_NEVER_CORRUPT`, 테스트 빌드의 기본값은 켜짐)가 켜져 있고 런타임 안전 검사가 있는 빌드이면, SQLite가 `CORRUPT_DB`로 감싼 디버그 검사가 돕니다. 손상된 파일이면 실패할 수 있는 검사들입니다. 커서가 캐시한 셀 정보(`assertCellInfo`), 부모 페이지의 자식 포인터(`assertParentIndex`), `at_last` 표시(`cursorIsAtLastEntry`), `editPage`가 만든 셀, `fillInCell`이 쓴 셀, 빠른 `cellSize`와 전체 파싱의 일치, 밸런싱 뒤의 포인터 맵(`ptrmapCheckPages`, SQLite에서는 `#if 0`)을 확인합니다. ReleaseFast에서는 comptime에 빠집니다. 손상된 파일을 다루는 테스트와 `btree_corrupt` 퍼저는 이 검사를 끕니다.
 
-B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니다. `Btree`와 `Cursor`는 서로의 내부 메서드를 많이 부르므로 `btree.zig`에 함께 두고, 따로 떨어지는 부분은 `*Btree`를 받는 함수로 다른 파일에 둡니다. `btree.zig`가 그 함수들을 비공개 별칭(`const allocatePage = alloc.allocatePage;`)으로 메서드처럼 부르고 다시 내보내지 않으므로 엔진이 보는 API는 그대로입니다.
+B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니다. C처럼 데이터베이스 파일 하나는 `BtShared`(페이저, 페이지 1, 커서, 트랜잭션 상태)이고, 연결이 쥐는 것은 그 위의 핸들 `Btree`(연결의 트랜잭션 상태와 공유 캐시의 테이블 잠금)입니다. 공유 캐시가 아니면 `BtShared` 하나에 핸들 하나이고, 공유 캐시면 같은 파일을 연 연결들의 핸들이 한 `BtShared`를 함께 씁니다(`Options.shared_key`). 엔진은 핸들의 메서드를 부르고, 핸들은 바쁨 처리기 같은 연결의 콜백을 `BtShared`에 건 뒤(`enter()`, C의 `pBt->db = p->db`) 넘깁니다. `BtShared`와 `Cursor`는 서로의 내부 메서드를 많이 부르므로 `btree.zig`에 함께 두고, 따로 떨어지는 부분은 `*BtShared`를 받는 함수로 다른 파일에 둡니다. `btree.zig`가 그 함수들을 비공개 별칭(`const allocatePage = alloc.allocatePage;`)으로 메서드처럼 부르고 다시 내보내지 않으므로 엔진이 보는 API는 그대로입니다.
 
 ## 공용 패키지
 
@@ -665,7 +665,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `pkg/storage/build.zig`, `build.zig.zon` | 스토리지 패키지(`xqlite_storage`): 모듈과 `zig build test`([스토리지 패키지](#스토리지-패키지)) |
 | `pkg/storage/src/pager/{pager,pcache,wal,journal}.zig` | 페이저, 페이지 캐시, WAL, 롤백 저널 |
 | `pkg/storage/src/pager/memjournal.zig` | 메모리 저널(memjournal.c): `journal_mode=MEMORY`와 `:memory:`의 저널, 커지면 파일로 넘기는 임시 데이터베이스의 저널 |
-| `pkg/storage/src/btree/btree.zig` | B-tree 층: `Btree`(열기, 잠금, 트랜잭션, 테이블)와 `Cursor` |
+| `pkg/storage/src/btree/btree.zig` | B-tree 층: 연결의 핸들 `Btree`(열기, 트랜잭션, 공유 캐시의 테이블 잠금), 파일의 `BtShared`(잠금, 테이블)와 `Cursor` |
 | `pkg/storage/src/btree/{page,header,ptrmap,integrity}.zig` | 페이지(`MemPage`, 셀 파싱, 페이지 접근), 파일 헤더, 포인터 맵, 무결성 검사 |
 | `pkg/storage/src/btree/alloc.zig` | 페이지 할당: freelist, 셀의 overflow 체인 |
 | `pkg/storage/src/btree/balance.zig` | 밸런싱(`balance_nonroot`를 단계별 메서드로 나눈 `Balance`, `balance_quick`, `balance_deeper`, CellArray) |

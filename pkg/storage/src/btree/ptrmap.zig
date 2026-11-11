@@ -11,7 +11,7 @@ const corrupt = @import("../corrupt.zig").corrupt;
 const btree = @import("btree.zig");
 const page = @import("page.zig");
 
-const Btree = btree.Btree;
+const BtShared = btree.BtShared;
 const Pgno = btree.Pgno;
 const Error = btree.Error;
 const MemPage = page.MemPage;
@@ -37,7 +37,7 @@ pub const Entry = struct { e_type: Type, parent: Pgno };
 
 /// Port of ptrmapPageno(): the pointer-map page holding the entry for
 /// `pgno` (`pgno` itself if it is a pointer-map page). 0 for page 1.
-pub fn pageno(bt: *const Btree, pgno: Pgno) Pgno {
+pub fn pageno(bt: *const BtShared, pgno: Pgno) Pgno {
     if (pgno < 2) return 0;
     const per_page = bt.usable_size / 5 + 1;
     const i_ptrmap = (pgno - 2) / per_page;
@@ -47,17 +47,17 @@ pub fn pageno(bt: *const Btree, pgno: Pgno) Pgno {
 }
 
 /// PTRMAP_ISPAGE.
-pub fn isPage(bt: *const Btree, pgno: Pgno) bool {
+pub fn isPage(bt: *const BtShared, pgno: Pgno) bool {
     return pageno(bt, pgno) == pgno;
 }
 
 /// PTRMAP_ISPAGE or the lock page: pages that never hold b-tree data.
-pub fn isReserved(bt: *const Btree, pgno: Pgno) bool {
+pub fn isReserved(bt: *const BtShared, pgno: Pgno) bool {
     return isPage(bt, pgno) or bt.pager.isLockPage(pgno);
 }
 
 /// PTRMAP_PTROFFSET, or null if `key` has no entry on `i_ptrmap`.
-fn offsetOf(bt: *const Btree, i_ptrmap: Pgno, key: Pgno) ?u32 {
+fn offsetOf(bt: *const BtShared, i_ptrmap: Pgno, key: Pgno) ?u32 {
     if (key <= i_ptrmap) return null;
     const offset = 5 * (key - i_ptrmap - 1);
     if (offset > bt.usable_size - 5) return null;
@@ -65,7 +65,7 @@ fn offsetOf(bt: *const Btree, i_ptrmap: Pgno, key: Pgno) ?u32 {
 }
 
 /// Port of ptrmapGet().
-pub fn get(bt: *Btree, key: Pgno) Error!Entry {
+pub fn get(bt: *BtShared, key: Pgno) Error!Entry {
     const i_ptrmap = pageno(bt, key);
     const pg = try bt.pager.get(i_ptrmap, .{});
     defer bt.pager.unref(pg);
@@ -77,7 +77,7 @@ pub fn get(bt: *Btree, key: Pgno) Error!Entry {
 
 /// Port of ptrmapPut(): record that page `key` is of type `e_type` and
 /// pointed to by `parent`.
-pub fn put(bt: *Btree, key: Pgno, e_type: Type, parent: Pgno) Error!void {
+pub fn put(bt: *BtShared, key: Pgno, e_type: Type, parent: Pgno) Error!void {
     std.debug.assert(bt.isAutoVacuum());
     if (key == 0) return corrupt(@src());
     const i_ptrmap = pageno(bt, key);

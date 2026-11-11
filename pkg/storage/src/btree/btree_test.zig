@@ -371,10 +371,10 @@ test "btree: incremental blob cursors" {
     var blob: Cursor = undefined;
     try bt.cursor(&blob, root, .{ .write = true });
     defer blob.close();
-    try testing.expect(!bt.has_incrblob_cur);
+    try testing.expect(!bt.bs.has_incrblob_cur);
     try testing.expectEqual(std.math.Order.eq, try blob.tableMoveto(26, false));
     blob.incrblobCursor();
-    try testing.expect(bt.has_incrblob_cur);
+    try testing.expect(bt.bs.has_incrblob_cur);
 
     // Writes and reads go through the overflow chain, the cursor moved
     // away by inserts elsewhere in the table.
@@ -979,4 +979,39 @@ test "btree: page 1 as a table root grows and shrinks" {
     try testing.expect(try cur.isEmpty());
     cur.close();
     try bt.commit();
+}
+
+// ========================================================== shared cache
+
+test "btree: shared cache shares one BtShared and keeps table locks" {
+    var e: Env = .init();
+    defer e.deinit();
+    const a = try e.open(.{ .shared_key = db_name });
+    defer a.close(.{});
+    const b = try e.open(.{ .shared_key = db_name });
+    defer b.close(.{});
+    // A private handle on the same file gets a cache of its own.
+    const c = try e.open(.{});
+    defer c.close(.{});
+    try testing.expect(a.bs == b.bs and a.bs != c.bs);
+    try testing.expectEqual(2, a.connectionCount());
+
+    try a.beginTrans(.write, 0);
+    const root = try a.createTable(.intkey);
+    try a.lockTable(root, true);
+    // Another handle may begin reading, but not take the locked table,
+    // nor write while `a` does.
+    try b.beginTrans(.read, 0);
+    try testing.expectError(error.LockedSharedCache, b.lockTable(root, false));
+    try testing.expectError(error.LockedSharedCache, b.beginTrans(.write, 0));
+    // Once `a` commits, its locks are gone.
+    try a.commit();
+    try b.lockTable(root, false);
+    try testing.expect(!b.schemaLocked());
+    // `b` reading the table keeps `a` from writing it.
+    try a.beginTrans(.write, 0);
+    try testing.expectError(error.LockedSharedCache, a.lockTable(root, true));
+    try b.commit();
+    try a.lockTable(root, true);
+    try a.commit();
 }

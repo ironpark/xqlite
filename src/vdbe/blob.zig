@@ -223,8 +223,8 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
     aux.changeP5(v, 1);
     std.debug.assert(aux.currentAddr(v) == 2 or db.malloc_failed);
     const ops = aux.addOpList(v, &.{
-        // 0: OP_TableLock: without a shared cache, OP_Noop.
-        .{ .opcode = OP.Noop },
+        // 0: acquire a read or write lock (shared cache only).
+        .{ .opcode = OP.TableLock },
         // 1: open a cursor.
         .{ .opcode = OP.OpenRead },
         // 2: seek to rowid r[1] (seekToRow() sets it).
@@ -239,6 +239,12 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
     aux.usesBtree(v, @intCast(i_db));
     if (!db.malloc_failed) {
         const o = ops.?;
+        // The table to lock. (C copies the name, P4_TRANSIENT; the
+        // statement only runs the lock while the schema stays.)
+        o[0].p1 = i_db;
+        o[0].p2 = @intCast(tab.tnum);
+        o[0].p3 = @intFromBool(wr_flag);
+        aux.changeP4(v, 2, .{ .z = tab.name });
         // Open the cursor for writing if asked, on the table's root.
         if (wr_flag) o[1].opcode = OP.OpenWrite;
         o[1].p2 = @intCast(tab.tnum);

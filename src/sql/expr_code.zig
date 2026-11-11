@@ -295,6 +295,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
         const t = s.src.?.at(0).s_tab.?;
         const i_db: usize = @intCast(@import("prepare.zig").schemaToIndex(db, t.schema));
         build.codeVerifySchema(p, i_db);
+        build.tableLock(p, i_db, t.tnum, false, t.name);
         if (n_expr == 1 and e_list.at(0).expr.?.i_column < 0) {
             // "x IN (SELECT rowid FROM table)".
             const addr = aux.addOp0(v, OP.Once);

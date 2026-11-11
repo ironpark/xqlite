@@ -134,21 +134,35 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         .autovac_pages = main_mod.btreeAutovacPages(db),
         .busy_handler = main_mod.btreeBusyHandler(db),
         .uri_params = parsed.params(),
+        .shared_key = main_mod.sharedKey(flags, is_memdb, path_name),
+        .uri = parsed.flags.uri,
     }) catch |err| blk: {
         rc = int.errorCode(err);
         break :blk null;
     };
-    const schema = gpa.create(Schema) catch {
+    // The shared cache of a database the connection has open already.
+    if (bt) |b| if (b.sharable) for (db.dbs.items) |d| {
+        if (d.bt != null and d.bt.?.bs == b.bs) {
+            b.close(main_mod.pagerConn(db));
+            return api.resultError(ctx, "database is already attached");
+        }
+    };
+    const shared = if (bt) |b| b.sharable else false;
+    const schema = if (shared) build.sharedSchema(bt.?) orelse {
+        bt.?.close(main_mod.pagerConn(db));
+        return db.oomFault();
+    } else gpa.create(Schema) catch {
         if (bt) |b| b.close(main_mod.pagerConn(db));
         return db.oomFault();
     };
-    schema.* = .{ .enc = 1 };
+    if (!shared) schema.* = .{ .enc = 1 };
     const db_name = gpa.dupeSentinel(u8, name, 0) catch {
-        gpa.destroy(schema);
+        if (!shared) gpa.destroy(schema);
         if (bt) |b| b.close(main_mod.pagerConn(db));
         return db.oomFault();
     };
-    db.dbs.appendAssumeCapacity(.{ .name = db_name, .bt = bt, .schema = schema });
+    db.dbs.appendAssumeCapacity(.{ .name = db_name, .bt = bt, .schema = schema, .shared = shared });
+    if (shared) db.n_shared += 1;
     if (bt) |b| {
         // The default locking mode, and the pager settings of main.
         _ = b.pager.lockingMode(db.dflt_lock_mode);
@@ -157,6 +171,12 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     }
     // SQLITE_DEFAULT_SYNCHRONOUS+1.
     db.dbs.items[db.dbs.items.len - 1].safety_level = 3;
+    // A shared schema another connection has read already: its encoding
+    // must be the connection's.
+    if (rc == RC.OK and schema.file_format != 0 and schema.enc != db.enc) {
+        err_dyn = gpa.dupeSentinel(u8, "attached databases must use the same text encoding as main database", 0) catch null;
+        rc = RC.ERROR;
+    }
 
     // Read the schema of the new database. If that fails, or opening it
     // did, put everything back the way it was.
@@ -269,8 +289,8 @@ pub fn closeDb(db: *Sqlite3, i_db: usize) void {
 fn dropEntry(db: *Sqlite3, i_db: usize) void {
     const d = db.dbs.items[i_db];
     std.debug.assert(i_db >= 2 and d.bt == null);
-    build.schemaFree(db, d.schema);
-    db.gpa.destroy(d.schema);
+    build.dbSchemaFree(db, &d);
+    if (d.shared) db.n_shared -= 1;
     db.gpa.free(d.name);
     _ = db.dbs.orderedRemove(i_db);
 }

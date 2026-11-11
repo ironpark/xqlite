@@ -71,6 +71,9 @@ pub const Error = wal_mod.Error || error{
     /// A hot journal must be rolled back but the database is read-only
     /// (SQLITE_READONLY_ROLLBACK).
     ReadOnlyRollback,
+    /// The database file was renamed or deleted while open, so its
+    /// journal could not be found again (SQLITE_READONLY_DBMOVED).
+    ReadOnlyDbMoved,
     /// A transaction with journal_mode=OFF was rolled back; the cache can no
     /// longer be trusted (SQLITE_ABORT).
     Abort,
@@ -171,6 +174,9 @@ pub const Options = struct {
     /// The URI parameters of the database (pairs of NUL-terminated name
     /// and value), kept after its name in `Pager.names` for the VFS.
     uri_params: []const u8 = "",
+    /// The database was opened with a URI (SQLITE_OPEN_URI): the VFS may
+    /// read the URI parameters after its name.
+    uri: bool = false,
 };
 
 pub const State = enum(u8) {
@@ -313,6 +319,9 @@ pub const Pager = struct {
     db_size: Pgno = 0,
     /// `db_size` when the write transaction started.
     db_orig_size: Pgno = 0,
+    /// The size last passed to SQLITE_FCNTL_SIZE_HINT, in pages
+    /// (dbHintSize).
+    db_hint_size: Pgno = 0,
     /// Size of the database file in pages, as far as we know.
     db_file_size: Pgno = 0,
     mx_pgno: Pgno = max_page_count,
@@ -391,16 +400,24 @@ pub const Pager = struct {
         errdefer gpa.free(names.buf);
 
         // A temporary or in-memory database has no file yet: act like a
-        // temp file (act_like_temp_file).
-        const temp_file = path_arg == null or opts.memory;
-        const fd = if (temp_file) vfs.File.unopened else try v.open(names.path, .{
+        // temp file (act_like_temp_file). So does an immutable one (URI
+        // parameter immutable=1, opened read-only, or a file of a VFS
+        // with SQLITE_IOCAP_IMMUTABLE): no locks, no journal and no
+        // change of the file by anyone is assumed.
+        const has_file = path_arg != null and !opts.memory;
+        const immutable_uri = has_file and vfs.uriBoolean(names.path, "immutable", false);
+        const fd = if (!has_file) vfs.File.unopened else try v.open(names.path, .{
             .kind = .main_db,
-            .read_write = !opts.read_only,
-            .create = opts.create and !opts.read_only,
+            .read_write = !opts.read_only and !immutable_uri,
+            .create = opts.create and !opts.read_only and !immutable_uri,
             .sqlite_filename = true,
+            .uri = opts.uri,
         });
         errdefer fd.close();
         const mem_vfs = fd.isMemory();
+        const immutable = immutable_uri or (has_file and fd.deviceCharacteristics().immutable);
+        const temp_file = !has_file or immutable;
+        const read_only = opts.read_only or immutable;
 
         p.* = .{
             .gpa = gpa,
@@ -415,7 +432,10 @@ pub const Pager = struct {
             .temp_kind = opts.temp_kind,
             .mem_vfs = mem_vfs,
             // The VFS may fall back to read-only (pOutFlags).
-            .read_only = opts.read_only or fd.isReadOnly(),
+            .read_only = read_only or fd.isReadOnly(),
+            // URI parameter nolock=1: take no file locks (except in WAL
+            // mode, which nolock rules out).
+            .no_lock = has_file and !immutable and vfs.uriBoolean(names.path, "nolock", false),
             // An in-memory database, or a VFS-implemented one, journals
             // in memory.
             .journal_mode = if (opts.memory or mem_vfs) .memory else opts.journal_mode,
@@ -451,7 +471,10 @@ pub const Pager = struct {
         p.freeMapHdrs();
         p.exclusive_mode = false;
         if (p.wal) |w| {
-            const buf: ?[]u8 = if (db.no_ckpt_on_close) null else p.tmp_space[0..p.page_size];
+            // No checkpoint (nor deletion of the WAL) for a database that
+            // was moved: the WAL is no longer next to it.
+            const unmoved = if (p.databaseIsUnmoved()) |_| true else |_| false;
+            const buf: ?[]u8 = if (db.no_ckpt_on_close or !unmoved) null else p.tmp_space[0..p.page_size];
             w.close(db.interrupt, p.wal_sync_flags, buf) catch {};
             p.wal = null;
         }
@@ -1367,6 +1390,7 @@ pub const Pager = struct {
         // WAL mode never goes past writer_cachemod: in writer_dbmod a
         // savepoint rollback could write the sub-journal to the database.
         p.state = .writer_locked;
+        p.db_hint_size = p.db_size;
         p.db_file_size = p.db_size;
         p.db_orig_size = p.db_size;
         p.journal_off = 0;
@@ -1394,8 +1418,12 @@ pub const Pager = struct {
                         .exclusive = true,
                         .delete_on_close = true,
                     }, stmt_spill)
-                else
-                    try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .create = true, .sqlite_filename = true });
+                else blk: {
+                    // The database must still have the name the journal
+                    // is named after.
+                    try p.databaseIsUnmoved();
+                    break :blk try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .create = true, .sqlite_filename = true });
+                };
             }
             p.n_rec = 0;
             p.journal_off = 0;
@@ -1404,6 +1432,17 @@ pub const Pager = struct {
             try p.writeJournalHdr();
         }
         p.state = .writer_cachemod;
+    }
+
+    /// Port of databaseIsUnmoved(): fails with ReadOnlyDbMoved if the
+    /// database file was renamed or deleted since it was opened
+    /// (SQLITE_FCNTL_HAS_MOVED; a file that cannot tell has not moved).
+    fn databaseIsUnmoved(p: *Pager) Error!void {
+        if (p.temp_file or p.db_size == 0) return;
+        var moved = false;
+        if (try p.fd.fileControl(.{ .has_moved = &moved })) {
+            if (moved) return error.ReadOnlyDbMoved;
+        }
     }
 
     /// Port of sqlite3PagerWrite(). Must be called before modifying a page.
@@ -1996,6 +2035,7 @@ pub const Pager = struct {
             // at the end instead.
             const zeros = p.tmp_space[0..p.page_size];
             @memset(zeros, 0);
+            p.fd.fileControlHint(.{ .size_hint = @intCast(new) });
             try p.fd.write(zeros, new - p.page_size);
         }
         p.db_file_size = n_page;
@@ -2198,6 +2238,14 @@ pub const Pager = struct {
         if (!p.fd.isOpen()) {
             std.debug.assert(p.temp_file and !p.mem_db);
             p.fd = try p.vfs.open(null, .{ .kind = p.temp_kind });
+        }
+        // Before the first write, tell the VFS the size the file will
+        // have (SQLITE_FCNTL_SIZE_HINT).
+        if (list) |first| {
+            if (p.db_hint_size < p.db_size and (first.dirty != null or first.pgno > p.db_hint_size)) {
+                p.fd.fileControlHint(.{ .size_hint = @as(i64, p.page_size) * p.db_size });
+                p.db_hint_size = p.db_size;
+            }
         }
         var it = list;
         while (it) |pg| : (it = pg.dirty) {

@@ -1790,6 +1790,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.ReadOnly, RC.READONLY },
     .{ error.ReadOnlyRecovery, RC.READONLY_RECOVERY },
     .{ error.ReadOnlyRollback, RC.READONLY_ROLLBACK },
+    .{ error.ReadOnlyDbMoved, RC.READONLY_DBMOVED },
     .{ error.ReadOnlyCantInit, RC.READONLY_CANTINIT },
     .{ error.Interrupt, RC.INTERRUPT },
     .{ error.IoErr, RC.IOERR },
@@ -1809,6 +1810,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.TooBig, RC.TOOBIG },
     .{ error.Constraint, RC.CONSTRAINT },
     .{ error.ConstraintPinned, RC.CONSTRAINT_PINNED },
+    .{ error.LockedSharedCache, RC.LOCKED_SHAREDCACHE },
     .{ error.Mismatch, RC.MISMATCH },
     .{ error.Misuse, RC.MISUSE },
     .{ error.NoLfs, RC.NOLFS },
@@ -1938,6 +1940,15 @@ pub const CreateState = struct {
 };
 
 /// The state of parsing and compiling one statement (Parse).
+/// A lock of shared cache a statement takes on a table (TableLock of
+/// build.c): OP_TableLock.
+pub const TableLock = struct {
+    i_db: usize,
+    i_tab: u32,
+    write: bool,
+    name: [:0]const u8,
+};
+
 pub const Parse = struct {
     db: *Sqlite3,
     /// Holds the parse trees and other per-statement memory.
@@ -2100,6 +2111,9 @@ pub const Parse = struct {
     /// Virtual tables that need an OP_VBegin (apVtabLock); top-level
     /// Parse only.
     vtab_lock: std.ArrayList(*Table) = .empty,
+    /// The table locks the statement takes once its transactions are
+    /// open (aTableLock, see build.tableLock()); top-level Parse only.
+    table_locks: std.ArrayList(TableLock) = .empty,
 
     pub fn inRenameObject(p: *const Parse) bool {
         return @backingInt(p.e_parse_mode) >= @backingInt(ParseMode.rename);
@@ -2367,6 +2381,10 @@ pub const Db = struct {
     safety_level: u8 = 3,
     sync_set: bool = false,
     schema: *Schema,
+    /// The schema is the one of the b-tree's shared cache
+    /// (sqlite3SchemaGet() of a sharable Btree): other connections use it
+    /// too, and the last to close the b-tree frees it.
+    shared: bool = false,
 };
 
 /// A free lookaside slot (LookasideSlot).
@@ -2430,6 +2448,9 @@ pub const Sqlite3 = struct {
     /// The databases: main, temp, then the attached ones (aDb, nDb). The
     /// names of attached databases are owned (from gpa).
     dbs: std.ArrayList(Db) = .empty,
+    /// How many of `dbs` are in shared cache (Db.shared): zero is
+    /// db->noSharedCache, checked on every C API call.
+    n_shared: u8 = 0,
     flags: DbFlag = .{
         .ShortColNames = true,
         .EnableTrigger = true,

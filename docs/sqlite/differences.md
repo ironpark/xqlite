@@ -19,7 +19,7 @@ xqlite의 SQLite 방언이 SQLite 3.54.1과 다른 점입니다. 기준은 옵�
 | `EXPLAIN`의 트리거 서브프로그램 | 메인 프로그램 뒤에 나열 | 메인 프로그램만 |
 | Windows | win32 VFS | 없음(POSIX, WASI, 메모리 VFS) |
 
-공유 캐시(`cache=shared`)는 받고 무시합니다. SQLite도 기본 빌드에서 권하지 않는 기능입니다.
+공유 캐시(`cache=shared`, `sqlite3_enable_shared_cache()`)는 SQLite와 같이 동작합니다: 연결들이 페이지 캐시와 스키마를 함께 쓰고 테이블 잠금(`OP_TableLock`)으로 서로를 막습니다([c-api.md](../c-api.md#공유-캐시)). SQLite도 권하지 않는 기능입니다.
 
 `journal_mode=MEMORY`, `locking_mode=EXCLUSIVE`(WAL이면 힙 메모리의 wal-index), 파일 없는 `:memory:` 데이터베이스, `mmap_size`의 메모리 맵 읽기는 SQLite와 같습니다([지원 기능](features.md#1-스토리지-및-저널링-기능)).
 
@@ -41,10 +41,10 @@ SQLite가 아닌 방언(PostgreSQL, MariaDB, MSSQL, Oracle)은 UTF-8 데이터�
 
 결과와 바이트코드는 같고, 실행 방식만 다릅니다.
 
-- 메모리 맵(`PRAGMA mmap_size`)에서 페이지를 바로 읽는 것은 읽기 트랜잭션 안에서만입니다. SQLite는 쓰기 트랜잭션 안의 읽기 커서도 맵의 페이지를 받는데(`PAGER_GET_READONLY`), xqlite의 B-tree는 이 표시를 넘기지 않아 그때는 페이지 캐시로 읽습니다. 맵을 키울 때는 새로 매핑합니다(SQLite는 Linux에서 `mremap()`).
+- 메모리 맵(`PRAGMA mmap_size`)에서 페이지를 바로 읽는 것은 읽기 트랜잭션 안에서만입니다. SQLite는 쓰기 트랜잭션 안의 읽기 커서도 맵의 페이지를 받는데(`PAGER_GET_READONLY`), xqlite의 B-tree는 이 표시를 넘기지 않아 그때는 페이지 캐시로 읽습니다. 맵을 키우는 것은 SQLite처럼 기존 매핑 뒤에 이어 붙이거나(Linux는 `mremap()`) 안 되면 새로 매핑합니다.
 - 메모리 저널(`memjournal.zig`)은 청크 목록을 SQLite처럼 두지만, 문장 저널(서브 저널)은 예전처럼 늘 메모리 버퍼입니다(`SQLITE_STMTJRNL_SPILL=-1`과 같음).
 - 정렬기는 레코드마다 첫 정렬 열의 64비트 정규화 키를 함께 두고 먼저 비교합니다([internals.md](internals.md)).
 - `ANALYZE`는 `sqlite_stat1`만 만듭니다. SQLite 기본 빌드처럼 `SQLITE_ENABLE_STAT4`가 꺼져 있습니다.
 - collation은 SQLite처럼 이름마다 인코딩별 정의를 둡니다. 데이터베이스 인코딩의 정의가 없으면 다른 인코딩의 정의를 그대로 씁니다(UTF-16be, UTF-16le, UTF-8 순). SQLite의 `synthCollSeq()`는 그것을 인코딩 칸에 복사해 두지만, 고르는 정의와 비교할 때의 변환은 같습니다. 한 가지 다른 경우는 응용이 내장 collation(NOCASE 등)을 UTF-8로 지운 뒤 UTF-16 데이터베이스에서 쓰는 것입니다. SQLite는 정의가 없다는 오류를 내고 xqlite는 내장 정의를 씁니다.
 - UTF-16 데이터베이스에서 `OP_String8`은 처음 실행될 때 UTF-16 사본을 프로그램의 arena에 만들어 P4로 바꿉니다(C는 `sqlite3DbMalloc()`한 버퍼를 `P4_DYNAMIC`으로).
-- 검증 방법은 [testing.md](testing.md)에 있습니다. SQLite의 TCL 테스트 스위트(`xqt tcl`)에서 xqlite만 실패하는 테스트와 그 원인(공유 캐시, `unix-excl` VFS, 몇 가지 패닉 등)은 [testing.md의 기준선](../testing.md#기준선)에 있습니다.
+- 검증 방법은 [testing.md](testing.md)에 있습니다. SQLite의 TCL 테스트 스위트(`xqt tcl`)에서 xqlite만 실패하는 테스트와 그 원인(공유 캐시, 몇 가지 패닉 등)은 [testing.md의 기준선](../testing.md#기준선)에 있습니다.

@@ -22,6 +22,8 @@ const OPEN_URI = 0x40;
 const OPEN_MEMORY = 0x80;
 const OPEN_NOMUTEX = 0x8000;
 const OPEN_FULLMUTEX = 0x10000;
+const OPEN_SHAREDCACHE = 0x20000;
+const OPEN_PRIVATECACHE = 0x40000;
 const OPEN_EXRESCODE = 0x02000000;
 
 // ================================================================== open
@@ -39,6 +41,8 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
         .uri = flags & OPEN_URI != 0 or c.state.uri,
         .memory = flags & OPEN_MEMORY != 0,
         .vfs_resolved = true,
+        .shared_cache = flags & OPEN_SHAREDCACHE != 0,
+        .private_cache = flags & OPEN_PRIVATECACHE != 0,
     };
 
     // The URI parameters the C ABI reads itself: vfs= (the registry is
@@ -187,7 +191,7 @@ fn close(db_arg: ?*Handle, zombie: bool) c_int {
         return RC.BUSY;
     }
     // The mutex goes with the connection (sqlite3LeaveMutexAndCloseZombie()).
-    lk.unlock();
+    lk.closed().unlock();
     freeExt(e);
     return rc;
 }
@@ -198,7 +202,7 @@ fn close(db_arg: ?*Handle, zombie: bool) c_int {
 pub fn leaveAndCloseZombie(db: *Handle, lk: c.Lock) void {
     const e = c.extOf(db) orelse return lk.unlock();
     if (!e.zombie or db.vdbe != null or c.main.close(db) != RC.OK) return lk.unlock();
-    lk.unlock();
+    lk.closed().unlock();
     freeExt(e);
 }
 
@@ -377,8 +381,9 @@ const TabResult = struct {
     fn callback(p: ?*anyopaque, n_col: c_int, argv: ?[*]?[*:0]u8, colv: ?[*]?[*:0]u8) callconv(.c) c_int {
         const t: *TabResult = @ptrCast(@alignCast(p.?));
         const n: usize = @intCast(n_col);
-        t.collect(n, argv, colv) catch {
-            t.rc = RC.NOMEM;
+        t.collect(n, argv, colv) catch |err| {
+            // collect() set the error of incompatible queries itself.
+            if (err == error.OutOfMemory) t.rc = RC.NOMEM;
             return 1;
         };
         return 0;
@@ -398,8 +403,10 @@ const TabResult = struct {
                 const z: ?[*:0]u8 = if (a[i]) |v| c.dupZ(std.mem.span(v)) orelse return error.OutOfMemory else null;
                 try t.az.append(c.gpa, z);
             }
+            // Only rows count: the call of an empty result
+            // (empty_result_callbacks) brings the column names alone.
+            t.n_row += 1;
         }
-        t.n_row += 1;
     }
 };
 
@@ -689,12 +696,13 @@ pub fn xq_db_config(db_arg: ?*Handle, op: c_int, a: i64, b: i64, p: ?*anyopaque,
     }
 }
 
-/// sqlite3_file_control(): SQLITE_FCNTL_VFS_POINTER, and
-/// SQLITE_FCNTL_FILE_POINTER for a file of a C VFS. Other operations go
-/// to the file: the xFileControl of a C VFS's file, memdb's own
-/// (SQLITE_FCNTL_SIZE_LIMIT, SQLITE_FCNTL_VFSNAME), and
-/// SQLITE_FCNTL_MMAP_SIZE of a file with memory maps (vfs.fileControl());
-/// the engine's other files have none (SQLITE_NOTFOUND).
+/// sqlite3_file_control(): those of main.c (SQLITE_FCNTL_FILE_POINTER,
+/// VFS_POINTER, JOURNAL_POINTER, DATA_VERSION, RESERVE_BYTES,
+/// RESET_CACHE). The others go to the file: the xFileControl of a C
+/// VFS's file, the default VFS's (unixFileControl(), File.fileControl),
+/// memdb's own (SQLITE_FCNTL_SIZE_LIMIT, SQLITE_FCNTL_VFSNAME), and
+/// SQLITE_FCNTL_MMAP_SIZE of a file with memory maps
+/// (vfs.fileControl()); SQLITE_NOTFOUND for the rest.
 /// SQLITE_FCNTL_PRAGMA for the engine (Sqlite3.fcntl_pragma): the
 /// char*[4] of pragma.c sent to the file of database `i_db`, and the
 /// string the VFS left in the first (from sqlite3_malloc()) copied.
@@ -714,6 +722,10 @@ fn fcntlPragma(db: *Handle, i_db: usize, name: [:0]const u8, arg: ?[:0]const u8,
 /// SQLITE_FCNTL_PRAGMA.
 const FCNTL_PRAGMA = 14;
 
+/// The sqlite3_file of SQLITE_FCNTL_JOURNAL_POINTER while no journal is
+/// open (C hands out the pager's jfd, whose pMethods is then null).
+const closed_file: vfs_mod.sqlite3_file = .{ .pMethods = null };
+
 pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, op: c_int, p_arg: ?*anyopaque) callconv(.c) c_int {
     const lk = c.lock(db_arg);
     defer lk.unlock();
@@ -728,7 +740,35 @@ pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, 
         },
         7 => {
             const out: *?*vfs_mod.sqlite3_file = @ptrCast(@alignCast(p_arg orelse return RC.MISUSE));
-            out.* = vfs_mod.cFileOf(fd) orelse return RC.NOTFOUND;
+            out.* = vfs_mod.filePointer(fd) orelse return RC.NOTFOUND;
+            return RC.OK;
+        },
+        // SQLITE_FCNTL_JOURNAL_POINTER: the WAL file in WAL mode, else
+        // the rollback journal (a closed sqlite3_file if none is open).
+        28 => {
+            const out: *?*vfs_mod.sqlite3_file = @ptrCast(@alignCast(p_arg orelse return RC.MISUSE));
+            const j: ?c.vfs.File = if (bt.pager.wal) |w| w.wal_fd else bt.pager.jfd;
+            out.* = if (j) |f| vfs_mod.filePointer(f) orelse @constCast(&closed_file) else @constCast(&closed_file);
+            return RC.OK;
+        },
+        // SQLITE_FCNTL_DATA_VERSION.
+        35 => {
+            const out: *c_uint = @ptrCast(@alignCast(p_arg orelse return RC.MISUSE));
+            out.* = bt.pager.dataVersion();
+            return RC.OK;
+        },
+        // SQLITE_FCNTL_RESERVE_BYTES: the reserve asked for; a new one
+        // of 0..255 is set (sqlite3BtreeSetPageSize(pBtree, 0, iNew, 0)).
+        38 => {
+            const arg: *c_int = @ptrCast(@alignCast(p_arg orelse return RC.MISUSE));
+            const new = arg.*;
+            arg.* = bt.getRequestedReserve();
+            if (new >= 0 and new <= 255) bt.setPageSize(0, @intCast(new), false) catch {};
+            return RC.OK;
+        },
+        // SQLITE_FCNTL_RESET_CACHE (sqlite3BtreeClearCache()).
+        42 => {
+            if (bt.txnState() == .none) bt.pager.clearCache();
             return RC.OK;
         },
         else => {
@@ -838,10 +878,13 @@ pub export fn sqlite3_db_status64(db_arg: ?*Handle, op: c_int, p_cur: ?*i64, p_h
             cur.* = @intFromBool(db.n_deferred_imm_cons > 0 or db.n_deferred_cons > 0);
             return RC.OK;
         },
-        // CACHE_USED and CACHE_USED_SHARED (no shared cache: the same).
+        // CACHE_USED, and CACHE_USED_SHARED, which divides a shared
+        // cache among its connections.
         1, 11 => {
             for (db.dbs.items) |d| if (d.bt) |bt| {
-                cur.* += bt.pager.memUsed();
+                var n: i64 = @intCast(bt.pager.memUsed());
+                if (op == 11) n = @divTrunc(n, bt.connectionCount());
+                cur.* += @intCast(n);
             };
             return RC.OK;
         },

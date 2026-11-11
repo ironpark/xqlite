@@ -818,8 +818,17 @@ pub const Wal = struct {
             if (w.db_fd.lock(.exclusive)) |_| {
                 if (w.exclusive_mode == .normal) w.exclusive_mode = .exclusive;
                 if (w.checkpoint(interrupt, .passive, null, sync_flags, b, null, null)) |_| {
-                    // No SQLITE_FCNTL_PERSIST_WAL: always delete.
-                    is_delete = true;
+                    // Delete the WAL unless it is persistent
+                    // (SQLITE_FCNTL_PERSIST_WAL); then truncate it to
+                    // zero bytes if journal_size_limit is set (to the
+                    // limit might leave a corrupt WAL behind).
+                    var persist: i32 = -1;
+                    w.db_fd.fileControlHint(.{ .persist_wal = &persist });
+                    if (persist != 1) {
+                        is_delete = true;
+                    } else if (w.mx_wal_size >= 0) {
+                        w.limitSize(0);
+                    }
                 } else |err| result = err;
             } else |err| result = err;
         }
@@ -916,8 +925,13 @@ pub const Wal = struct {
                         const n_size = try w.db_fd.fileSize();
                         // Growing by more than the WAL holds (plus a
                         // lock page) means corruption.
-                        if (n_size < n_req and n_size + 65536 + @as(u64, w.hdr.mx_frame) * sz_page < n_req) {
-                            return corrupt(@src());
+                        if (n_size < n_req) {
+                            if (n_size + 65536 + @as(u64, w.hdr.mx_frame) * sz_page < n_req) {
+                                return corrupt(@src());
+                            }
+                            // The database may grow: tell the VFS how much
+                            // (SQLITE_FCNTL_SIZE_HINT).
+                            w.db_fd.fileControlHint(.{ .size_hint = @intCast(n_req) });
                         }
 
                         while (it.next()) |e| {

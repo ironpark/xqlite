@@ -4311,6 +4311,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 var best: ?*Index = null;
                 var i_root = t.tnum;
                 build.codeVerifySchema(p, i_db);
+                build.tableLock(p, i_db, t.tnum, false, t.name);
                 if (!t.hasRowid()) best = build.primaryKeyIndex(t);
                 if (!s.src.?.at(0).fg.not_indexed) {
                     var idx = t.index;

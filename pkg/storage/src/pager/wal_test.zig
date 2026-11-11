@@ -328,6 +328,36 @@ test "wal: shared memory on disk (unix)" {
     try testing.expect(!try v.access("w.db-shm", .exists));
 }
 
+test "wal: a persistent WAL is kept, and emptied with a size limit" {
+    if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = UnixVfs.init(testing.allocator, testing.io);
+    u.dir = tmp.dir;
+    const v = u.interface();
+    var ps: Pages = .{};
+    var buf: [page_size]u8 = undefined;
+    for ([_]i64{ -1, 0 }) |limit| {
+        const a = try openWal(v);
+        defer a.db.close();
+        a.w.setLimit(limit);
+        try commit(a.w, &ps, &.{ 1, 2 }, 0x05, 2);
+        var on: i32 = 1;
+        try testing.expect(try a.db.fileControl(.{ .persist_wal = &on }));
+        var q: i32 = -1;
+        try testing.expect(try a.db.fileControl(.{ .persist_wal = &q }));
+        try testing.expectEqual(@as(i32, 1), q);
+        try a.w.close(null, sync_full, &buf);
+        // SQLITE_FCNTL_PERSIST_WAL: the checkpointed WAL stays, emptied
+        // when journal_size_limit is set.
+        const wal = try v.open("w.db-wal", .{ .kind = .wal });
+        defer wal.close();
+        const sz = try wal.fileSize();
+        if (limit < 0) try testing.expect(sz > 0) else try testing.expectEqual(@as(u64, 0), sz);
+        try a.db.unlock(.none);
+    }
+}
+
 test "wal: read-only shared memory falls back to a heap wal-index" {
     // A -shm file (the WASI VFS keeps the wal-index in memory).
     if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;

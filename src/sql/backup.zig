@@ -429,7 +429,7 @@ pub fn copyFile(to: *Btree, from: *Btree, db: *Sqlite3) i32 {
     std.debug.assert(b.rc != RC.OK);
     const rc = release(&b);
     if (rc == RC.OK) {
-        to.page_size_fixed = false;
+        to.bs.page_size_fixed = false;
     } else {
         to.pager.clearCache();
     }

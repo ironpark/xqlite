@@ -194,7 +194,95 @@ pub const OpenFlags = struct {
     /// database name is a pointer-sized slot for the database's
     /// sqlite3_file (sqlite3_database_file_object()).
     sqlite_filename: bool = false,
+    /// The database was opened with a URI filename (SQLITE_OPEN_URI): its
+    /// name is in SQLite's filename layout and the VFS may read URI
+    /// parameters after it (uriParameter()), as unixOpen() reads "psow".
+    uri: bool = false,
 };
+
+/// Port of sqlite3_uri_parameter() for the name `path` of a database
+/// in SQLite's filename layout (see OpenFlags.sqlite_filename): the
+/// value of query parameter `param`, or null. The pairs of name and
+/// value follow the NUL after the name, up to an empty name.
+pub fn uriParameter(path: []const u8, param: []const u8) ?[:0]const u8 {
+    var z: [*:0]const u8 = @ptrCast(path.ptr + path.len + 1);
+    while (z[0] != 0) {
+        const name = std.mem.span(z);
+        z += name.len + 1;
+        const value = std.mem.span(z);
+        if (std.mem.eql(u8, name, param)) return value;
+        z += value.len + 1;
+    }
+    return null;
+}
+
+/// Port of sqlite3_uri_boolean(): the query parameter `param` of
+/// `path` as a boolean (sqlite3GetBoolean()), `dflt` if absent.
+pub fn uriBoolean(path: []const u8, param: []const u8, dflt: bool) bool {
+    const z = uriParameter(path, param) orelse return dflt;
+    return getBoolean(z, dflt);
+}
+
+/// Port of sqlite3GetBoolean(): an integer is true if not 0; "yes",
+/// "true", "on" and "no", "false", "off" in any case; else `dflt`.
+pub fn getBoolean(z: []const u8, dflt: bool) bool {
+    if (z.len > 0 and z[0] >= '0' and z[0] <= '9') {
+        return (std.fmt.parseInt(i64, z, 10) catch 1) != 0;
+    }
+    for ([_][]const u8{ "yes", "true", "on" }) |y| if (std.ascii.eqlIgnoreCase(z, y)) return true;
+    for ([_][]const u8{ "no", "false", "off" }) |n| if (std.ascii.eqlIgnoreCase(z, n)) return false;
+    return dflt;
+}
+
+/// The file controls of `File.fileControl` (SQLITE_FCNTL_*, as
+/// xFileControl receives them; the C ABI maps the opcodes). Each
+/// carries its argument; one that answers writes through its pointer.
+pub const FileControl = union(enum) {
+    /// SQLITE_FCNTL_LOCKSTATE: the lock this handle holds.
+    lockstate: *LockLevel,
+    /// SQLITE_FCNTL_LAST_ERRNO: the errno of the last failed system call.
+    last_errno: *i32,
+    /// SQLITE_FCNTL_SIZE_HINT: the file is expected to grow to this size.
+    size_hint: i64,
+    /// SQLITE_FCNTL_CHUNK_SIZE: grow and truncate the file in multiples
+    /// of this many bytes (0 for none).
+    chunk_size: i32,
+    /// SQLITE_FCNTL_PERSIST_WAL and SQLITE_FCNTL_POWERSAFE_OVERWRITE: a
+    /// negative value asks for the setting, 0 or 1 sets it; the setting
+    /// is written back for a query.
+    persist_wal: *i32,
+    powersafe_overwrite: *i32,
+    /// SQLITE_FCNTL_HAS_MOVED: whether the file was renamed or deleted
+    /// since it was opened.
+    has_moved: *bool,
+    /// SQLITE_FCNTL_EXTERNAL_READER: whether a connection of another
+    /// process reads the WAL (holds a read lock of the wal-index).
+    external_reader: *bool,
+    /// SQLITE_FCNTL_VFSNAME: the name of the VFS (the C ABI copies it
+    /// with sqlite3_mprintf()).
+    vfsname: *[]const u8,
+};
+
+/// Room in a file for its embedder's handle on it, which lives as long
+/// as the file (`File.foreign`): the C ABI keeps there the sqlite3_file
+/// that SQLITE_FCNTL_FILE_POINTER returns for a file of the default VFS.
+pub const ForeignSlot = [4]usize;
+
+/// The function a VFS reports an OS error through (unixLogErrorAtLine(),
+/// sqlite3_log()), if the embedder sets one: the result code and the
+/// message.
+pub var log_fn: ?*const fn (code: i32, msg: [:0]const u8) void = null;
+
+/// Report through `log_fn` (sqlite3_log()), formatting the message.
+pub fn log(code: i32, comptime fmt: []const u8, args: anytype) void {
+    const f = log_fn orelse return;
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrintSentinel(&buf, fmt, args, 0) catch blk: {
+        buf[buf.len - 1] = 0;
+        break :blk buf[0 .. buf.len - 1 :0];
+    };
+    f(code, msg);
+}
 
 pub const SyncFlags = struct {
     /// Use the strongest durability the platform offers (F_FULLFSYNC on Darwin).
@@ -296,6 +384,12 @@ pub const File = struct {
         fetch: ?*const fn (ptr: *anyopaque, offset: u64, amt: u32) Error!?[*]const u8 = null,
         unfetch: ?*const fn (ptr: *anyopaque, offset: u64, p: ?[*]const u8) void = null,
         mmapSize: ?*const fn (ptr: *anyopaque, new_limit: i64) Error!?i64 = null,
+        /// The other file controls (xFileControl, see FileControl).
+        /// Returns false for one the backend does not know
+        /// (SQLITE_NOTFOUND). Null: none.
+        fileControl: ?*const fn (ptr: *anyopaque, op: FileControl) Error!bool = null,
+        /// The file's ForeignSlot. Null if it has none.
+        foreign: ?*const fn (ptr: *anyopaque) *ForeignSlot = null,
     };
 
     /// A file that is not open (C: pMethods == 0), as the pager's
@@ -366,6 +460,26 @@ pub const File = struct {
     pub fn mmapSize(f: File, new_limit: i64) Error!?i64 {
         const m = f.vtable.mmapSize orelse return null;
         return m(f.ptr, new_limit);
+    }
+
+    /// Port of sqlite3OsFileControl(): send the file control `op`.
+    /// False if the backend does not know it (SQLITE_NOTFOUND).
+    pub fn fileControl(f: File, op: FileControl) Error!bool {
+        const m = f.vtable.fileControl orelse return false;
+        return m(f.ptr, op);
+    }
+
+    /// Port of sqlite3OsFileControlHint(): send `op`, ignoring the
+    /// result; a query's answer is left as it was if the backend does
+    /// not know it.
+    pub fn fileControlHint(f: File, op: FileControl) void {
+        _ = f.fileControl(op) catch {};
+    }
+
+    /// The file's ForeignSlot, or null if it has none.
+    pub fn foreign(f: File) ?*ForeignSlot {
+        const m = f.vtable.foreign orelse return null;
+        return m(f.ptr);
     }
 
     /// Closes the handle, dropping any lock it holds.
@@ -630,6 +744,17 @@ fn method(comptime Fn: type, comptime f: anytype) Fn {
         4 => M.m4,
         else => @compileError("method: too many parameters"),
     };
+}
+
+test "vfs: URI parameters of a filename" {
+    const layout = "\x00\x00\x00\x00db\x00a\x00yes\x00b\x000\x00c\x00x\x00\x00";
+    const name = layout[4..6];
+    try std.testing.expectEqualStrings("yes", uriParameter(name, "a").?);
+    try std.testing.expect(uriParameter(name, "d") == null);
+    try std.testing.expect(uriBoolean(name, "a", false));
+    try std.testing.expect(!uriBoolean(name, "b", true));
+    try std.testing.expect(uriBoolean(name, "c", true));
+    try std.testing.expect(!uriBoolean(name, "d", false));
 }
 
 /// xSleep for the backends on `std.Io` (unixSleep()).

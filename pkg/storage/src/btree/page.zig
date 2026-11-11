@@ -27,7 +27,7 @@ const btree = @import("btree.zig");
 const corrupt = @import("../corrupt.zig").corrupt;
 const ptrmap = @import("ptrmap.zig");
 
-const Btree = btree.Btree;
+const BtShared = btree.BtShared;
 const releasePage = btree.releasePage;
 const Error = btree.Error;
 pub const Pgno = pager_mod.Pgno;
@@ -101,7 +101,7 @@ pub const MemPage = extern struct {
     /// `ap_ovfl[i]` is inserted before the `ai_ovfl[i]`-th cell on the page.
     ai_ovfl: [4]u16,
     ap_ovfl: [4][*]u8,
-    bt: *Btree,
+    bt: *BtShared,
     data: [*]u8,
     /// One past the end of the whole page (not just the usable part).
     data_end: [*]u8,
@@ -741,7 +741,7 @@ pub fn put4(p: [*]u8, v: u32) void {
 // ====================================================== page access
 
 /// Port of btreePageFromDbPage().
-pub fn pageFromDbPage(bt: *Btree, pg: *pager_mod.Page, pgno: Pgno) *MemPage {
+pub fn pageFromDbPage(bt: *BtShared, pg: *pager_mod.Page, pgno: Pgno) *MemPage {
     const mp = MemPage.of(pg);
     if (pgno != mp.pgno) {
         mp.data = pg.data.ptr;
@@ -754,19 +754,19 @@ pub fn pageFromDbPage(bt: *Btree, pg: *pager_mod.Page, pgno: Pgno) *MemPage {
 }
 
 /// Port of btreeGetPage(). The page is not initialized.
-pub fn getPage(bt: *Btree, pgno: Pgno, flags: pager_mod.GetFlags) Error!*MemPage {
+pub fn getPage(bt: *BtShared, pgno: Pgno, flags: pager_mod.GetFlags) Error!*MemPage {
     const pg = try bt.pager.get(pgno, flags);
     return pageFromDbPage(bt, pg, pgno);
 }
 
 /// Port of btreePageLookup(): the page if it is cached, referenced.
-pub fn lookupPage(bt: *Btree, pgno: Pgno) ?*MemPage {
+pub fn lookupPage(bt: *BtShared, pgno: Pgno) ?*MemPage {
     const pg = bt.pager.lookup(pgno) orelse return null;
     return pageFromDbPage(bt, pg, pgno);
 }
 
 /// Port of getAndInitPage().
-pub fn getAndInitPage(bt: *Btree, pgno: Pgno) Error!*MemPage {
+pub fn getAndInitPage(bt: *BtShared, pgno: Pgno) Error!*MemPage {
     if (pgno > bt.n_page) return corrupt(@src());
     const pg = try bt.pager.get(pgno, .{});
     const mp = MemPage.of(pg);
@@ -782,7 +782,7 @@ pub fn getAndInitPage(bt: *Btree, pgno: Pgno) Error!*MemPage {
 
 /// Port of btreeGetUnusedPage(): a page about to be reused, which no one
 /// else may be referencing.
-pub fn getUnusedPage(bt: *Btree, pgno: Pgno, flags: pager_mod.GetFlags) Error!*MemPage {
+pub fn getUnusedPage(bt: *BtShared, pgno: Pgno, flags: pager_mod.GetFlags) Error!*MemPage {
     const mp = try getPage(bt, pgno, flags);
     if (mp.db_page.n_ref > 1) {
         releasePage(mp);

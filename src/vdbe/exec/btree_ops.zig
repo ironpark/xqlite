@@ -215,7 +215,10 @@ pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
         .default_rc = 0,
     };
     const order = try serial.indexMoveto(cur, &r);
-    if (order != .eq) {
+    // Not found: an entry whose expression fields differ (the EIIB bug,
+    // a REAL that came out a few ULPs off) may still be the one
+    // (sqlite3VdbeFindIndexKey()).
+    if (order != .eq and try serial.findIndexKey(cur, op.p4.index, &r, false) != 0) {
         if (!e.db.flags.WriteSchema or e.db.flags.Defensive) {
             aux.vdbeError(e.v, "index corruption", .{});
             return e.abort(RC.CORRUPT_INDEX);

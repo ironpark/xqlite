@@ -83,7 +83,11 @@ fn prepare16(db_arg: ?*Handle, z_sql: ?*const anyopaque, n_byte: c_int, prep_fla
     out.* = null;
     if (pz_tail) |t| t.* = z_sql;
     const db = db_arg orelse return RC.MISUSE;
-    const sql16 = c.utf16Slice(z_sql orelse return RC.MISUSE, n_byte);
+    // The SQL ends at a NUL character within `n_byte` (sqlite3Prepare16()).
+    const whole = c.utf16Slice(z_sql orelse return RC.MISUSE, n_byte);
+    var len: usize = 0;
+    while (len < whole.len and whole[len] != 0) len += 1;
+    const sql16 = whole[0..len];
     const sql8 = c.utf16ToUtf8(sql16, false) orelse return RC.NOMEM;
     defer c.gpa.free(sql8);
     var tail: ?[*]const u8 = null;

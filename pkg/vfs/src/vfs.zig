@@ -7,10 +7,17 @@
 const std = @import("std");
 
 /// Byte offsets of the lock region shared by every SQLite implementation.
-/// Changing these breaks interoperability with real SQLite processes.
-pub const pending_byte: u64 = 0x40000000;
-pub const reserved_byte: u64 = pending_byte + 1;
-pub const shared_first: u64 = pending_byte + 2;
+/// Changing them breaks interoperability with real SQLite processes; as
+/// sqlite3PendingByte, the pending byte can be moved only for tests
+/// (SQLITE_TESTCTRL_PENDING_BYTE), before any database is opened.
+pub var pending_byte: u64 = default_pending_byte;
+pub const default_pending_byte: u64 = 0x40000000;
+pub fn reservedByte() u64 {
+    return pending_byte + 1;
+}
+pub fn sharedFirst() u64 {
+    return pending_byte + 2;
+}
 pub const shared_size: u64 = 510;
 
 /// The longest file name (PATH_MAX); wasm32-freestanding, which has

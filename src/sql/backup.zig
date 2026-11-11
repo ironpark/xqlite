@@ -323,9 +323,9 @@ fn finishCopy(b: *Backup, n_src_page_arg: *i64, dest_mode: pager_mod.JournalMode
         if (rc == RC.OK) rc = code(dest_pager.commitPhaseOne(true));
 
         // The extra pages, and the truncation.
-        const end = @min(@as(i64, vfs.pending_byte) + pgsz_dest, size);
+        const end = @min(@as(i64, @intCast(vfs.pending_byte)) + pgsz_dest, size);
         const src_pager = b.src.pager;
-        var off: i64 = @as(i64, vfs.pending_byte) + pgsz_src;
+        var off: i64 = @as(i64, @intCast(vfs.pending_byte)) + pgsz_src;
         while (rc == RC.OK and off < end) : (off += pgsz_src) {
             const i_src_pg: Pgno = @intCast(@divTrunc(off, pgsz_src) + 1);
             if (src_pager.get(i_src_pg, .{})) |pg| {

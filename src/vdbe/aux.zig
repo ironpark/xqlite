@@ -406,11 +406,42 @@ pub fn addOpList(v: *Vdbe, items: []const OpListItem) ?[]Op {
     return v.ops.items[first..];
 }
 
-/// Port of sqlite3VdbeReprepareOnBind() (without the smimask
-/// refinement): the plan depends on the value bound to ?`i_var`.
-pub fn reprepareOnBind(v: *Vdbe, i_var: i32) void {
+/// Port of sqlite3VdbeReprepareOnBind(): the plan depends on the value
+/// bound to ?`i_var`, so binding another value expires the statement;
+/// with `small_int`, only a change to or from the integer 0 or 1 does
+/// (smimask).
+pub fn reprepareOnBind(v: *Vdbe, i_var: i32, small_int: bool) void {
     std.debug.assert(i_var > 0);
-    v.expmask |= if (i_var >= 32) 0x80000000 else @as(u32, 1) << @intCast(i_var - 1);
+    const m = varMask(@intCast(i_var - 1));
+    if (small_int) {
+        if (v.expmask & m == 0) v.smimask |= m;
+    } else {
+        v.smimask &= ~m;
+    }
+    v.expmask |= m;
+}
+
+/// The expmask bit of parameter `i` (from 0): the last bit stands for
+/// all from the 32nd on.
+pub fn varMask(i: usize) u32 {
+    return if (i >= 31) 0x80000000 else @as(u32, 1) << @intCast(i);
+}
+
+/// Port of sqlite3VdbeGetBoundValue(): a copy of the value bound to
+/// ?`i_var` of `v` (the statement being reprepared) with affinity `aff`,
+/// or null if there is none or it is NULL. The caller releases it.
+pub fn getBoundValue(v_opt: ?*Vdbe, i_var: i32, aff: u8) ?Mem {
+    std.debug.assert(i_var > 0);
+    const v = v_opt orelse return null;
+    const from = &v.vars[@intCast(i_var - 1)];
+    if (from.flags.Null) return null;
+    var m: Mem = .{ .db = v.db, .flags = .{ .Null = true } };
+    mem.copy(&m, from) catch return null;
+    mem.applyAffinity(&m, aff, vi.ENC.UTF8) catch {
+        mem.release(&m);
+        return null;
+    };
+    return m;
 }
 
 pub fn changeOpcode(v: *Vdbe, addr: i32, opcode: OP) void {
@@ -1436,7 +1467,8 @@ pub fn swap(a: *Vdbe, b: *Vdbe) void {
     std.mem.swap(Vdbe, a, b);
     std.mem.swap(?*Vdbe, &a.next, &b.next);
     std.mem.swap(?*Vdbe, &a.prev, &b.prev);
-    b.expmask = a.expmask;
+    b.expmask |= a.expmask;
+    b.smimask |= a.smimask;
     b.prep_flags = a.prep_flags;
     b.counters = a.counters;
     b.counters[vi.STMTSTATUS.REPREPARE] += 1;

@@ -108,7 +108,7 @@ test "pragma: flags and settings" {
     const funcs = try c.query("PRAGMA function_list");
     defer testing.allocator.free(funcs);
     try testing.expect(std.mem.indexOf(u8, funcs, "\nsubstr|1|s|utf8|3|2099200\n") != null);
-    try c.expectRows("PRAGMA collation_list", "0|BINARY\n1|NOCASE\n2|RTRIM\n");
+    try c.expectRows("PRAGMA collation_list", "0|RTRIM\n1|NOCASE\n2|BINARY\n");
 }
 
 test "pragma: header values and page settings" {

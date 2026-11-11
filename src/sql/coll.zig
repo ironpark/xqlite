@@ -102,8 +102,10 @@ pub fn findCollSeq(db: *Sqlite3, name: ?[]const u8, create: bool) ?*const CollSe
     const z = name orelse return dfltColl(db);
     const enc = db.enc;
     const user = db.colls.get(z);
-    // Those of the connection first: they shadow the built-in ones.
-    if (userCollSeq(db, z, enc)) |c| return c;
+    // Those of the connection first: they shadow the built-in ones. An
+    // entry without a function (deleted, or made by `create`) gives way
+    // to a definition for another encoding (synthCollSeq()).
+    if (userCollSeq(db, z, enc)) |c| if (c.cmp != null) return c;
     if (builtinColl(z, enc)) |c| return c;
     for ([_]u8{ ENC.UTF16BE, ENC.UTF16LE, ENC.UTF8 }) |e| {
         if (e == enc) continue;
@@ -150,6 +152,7 @@ fn addCollSeq(db: *Sqlite3, name: []const u8, c: CollSeq) ?*CollSeq {
     };
     new.name = owned;
     new.next = null;
+    new.seq = db.colls.count();
     db.colls.put(a, owned, new) catch {
         a.free(owned);
         a.destroy(new);

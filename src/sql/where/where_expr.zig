@@ -15,6 +15,8 @@ const coll_mod = @import("../coll.zig");
 const ctype = @import("xqlite_base").ctype;
 const aux = @import("../../vdbe/aux.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
+const api = @import("../../vdbe/api.zig");
+const mem = @import("../../vdbe/mem.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -118,8 +120,8 @@ fn operatorMask(op: u8) u16 {
 
 /// Port of isLikeOrGlob(): true if `e` is a LIKE or GLOB that can be
 /// optimized with inequality constraints, setting `prefix` to a TK_STRING
-/// with the pattern prefix. Parse has no pReprepare, so a TK_VARIABLE
-/// pattern never has a bound value (sqlite3VdbeGetBoundValue() is null).
+/// with the pattern prefix. A TK_VARIABLE pattern is used by its value
+/// while the statement is compiled again with one bound.
 fn isLikeOrGlob(p: *Parse, e: *Expr, prefix: *?*Expr, is_complete: *bool, no_case: *bool) Oom!bool {
     const db = p.db;
     var wc: [4]u8 = undefined;
@@ -131,10 +133,15 @@ fn isLikeOrGlob(p: *Parse, e: *Expr, prefix: *?*Expr, is_complete: *bool, no_cas
     const right = expr_mod.skipCollate(list.at(0).expr).?;
     const op = right.op;
     var z_opt: ?[*:0]const u8 = null;
+    var bound: ?vi.Mem = null;
+    defer if (bound) |*b| mem.release(b);
     if (op == TK.VARIABLE and !db.flags.EnableQPSG) {
         const i_col = right.i_column;
-        // sqlite3VdbeGetBoundValue(): no bound value available.
-        aux.reprepareOnBind(p.vdbe.?, i_col);
+        bound = aux.getBoundValue(p.reprepare, i_col, int.Aff.blob);
+        if (bound) |*b| if (api.valueType(b) == vi.SQLITE_TEXT) {
+            if (api.valueText(b)) |t| z_opt = t.ptr;
+        };
+        aux.reprepareOnBind(p.vdbe.?, i_col, false);
         std.debug.assert(right.op == TK.VARIABLE or right.op == TK.REGISTER);
     } else if (op == TK.STRING) {
         z_opt = right.token().ptr;
@@ -204,7 +211,7 @@ fn isLikeOrGlob(p: *Parse, e: *Expr, prefix: *?*Expr, is_complete: *bool, no_cas
             // A bound-parameter pattern: reprepare when it is rebound.
             if (op == TK.VARIABLE) {
                 const v = p.vdbe.?;
-                aux.reprepareOnBind(v, right.i_column);
+                aux.reprepareOnBind(v, right.i_column, false);
                 if (is_complete.* and right.token()[1] != 0) {
                     // Keep an OP_Variable for sqlite3_bind_parameter_name().
                     const r1 = expr_mod.getTempReg(p);
@@ -1033,7 +1040,7 @@ pub fn split(wc: *WhereClause, e: ?*Expr, op: u8) Oom!void {
 fn whereAddLimitExpr(wc: *WhereClause, i_reg: i32, e: ?*Expr, i_csr: i32, e_match_op: u8) Oom!void {
     const p = wc.w_info.parse;
     var new: *Expr = undefined;
-    const i_val = expr_mod.isInteger(e, p);
+    const i_val = expr_mod.isInteger(e, p, false);
     if (i_val != null and i_val.? >= 0) {
         const val = try expr_mod.exprInt32(p.arena, i_val.?);
         new = try expr_mod.pExpr(p, TK.MATCH, null, val);

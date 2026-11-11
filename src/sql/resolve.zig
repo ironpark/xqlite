@@ -1094,7 +1094,7 @@ fn resolveCompoundOrderBy(p: *Parse, sel_arg: *Select) (Oom || int.ParseError)!v
             var i_col: usize = 0;
             if (item.fg.done) continue;
             const e = expr_mod.skipCollateAndLikely(item.expr) orelse continue;
-            if (expr_mod.isInteger(e, null)) |v| {
+            if (expr_mod.isInteger(e, null, false)) |v| {
                 if (v <= 0 or v > e_list.len()) {
                     resolveOutOfRangeError(p, "ORDER", i + 1, e_list.len(), e);
                     return error.ParseFailed;
@@ -1198,7 +1198,7 @@ fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList,
                 continue;
             }
         }
-        if (expr_mod.isInteger(e2, null)) |v| {
+        if (expr_mod.isInteger(e2, null, false)) |v| {
             if (v < 1 or v > 0xffff) {
                 resolveOutOfRangeError(p, typ, i + 1, n_result, e2);
                 return error.ParseFailed;

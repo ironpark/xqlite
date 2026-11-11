@@ -10,6 +10,11 @@ const ctype = @import("xqlite_base").ctype;
 const select_mod = @import("select.zig");
 const window = @import("window.zig");
 const callback = @import("callback.zig");
+const aux = @import("../vdbe/aux.zig");
+const mem = @import("../vdbe/mem.zig");
+const serial = @import("../vdbe/serial.zig");
+const ENC = @import("../vdbe/vdbe_int.zig").ENC;
+const update = @import("update.zig");
 
 const Allocator = std.mem.Allocator;
 const Parse = int.Parse;
@@ -870,12 +875,21 @@ pub fn selectDup(a: Allocator, s_arg: ?*Select) Oom!?*Select {
 
 // ========================================================== comparison
 
-/// Port of exprCompareVariable(). Bound values are only known while
-/// re-preparing, which this port does not do yet, so a variable equals
-/// only the same variable.
-fn compareVariable(v: *const Expr, e: *const Expr) u8 {
+/// Port of exprCompareVariable(): 0 if `e` is the same parameter as
+/// `v`, or a constant equal to the value bound to `v` while compiling
+/// again (after which binding another value reprepares); else 2.
+fn compareVariable(p: *const Parse, v: *const Expr, e: *const Expr) u8 {
     if (e.op == TK.VARIABLE and v.i_column == e.i_column) return 0;
-    return 2;
+    if (p.db.flags.EnableQPSG) return 2;
+    const vdbe = p.vdbe orelse return 2;
+    const r = (update.valueFromExpr(vdbe, e, Aff.blob) catch null) orelse return 2;
+    defer mem.release(r);
+    aux.reprepareOnBind(vdbe, v.i_column, false);
+    var bound = aux.getBoundValue(p.reprepare, v.i_column, Aff.blob) orelse return 2;
+    defer mem.release(&bound);
+    // Both in UTF-8, as C takes them.
+    mem.changeEncoding(r, ENC.UTF8) catch return 2;
+    return if (serial.memCompare(&bound, r, null) != 0) 2 else 0;
 }
 
 /// Port of sqlite3ExprCompare(): 0 if the trees are identical, 1 if they
@@ -885,7 +899,7 @@ fn compareVariable(v: *const Expr, e: *const Expr) u8 {
 pub fn compare(p: ?*const Parse, a_arg: ?*const Expr, b_arg: ?*const Expr, i_tab: i32) u8 {
     const a = a_arg orelse return if (b_arg == null) 0 else 2;
     const b = b_arg orelse return 2;
-    if (p != null and a.op == TK.VARIABLE) return compareVariable(a, b);
+    if (p != null and a.op == TK.VARIABLE) return compareVariable(p.?, a, b);
     const combined = a.flags.with(b.flags);
     if (combined.IntValue) {
         if (a.flags.IntValue and b.flags.IntValue and a.u.value == b.u.value) return 0;
@@ -1241,23 +1255,39 @@ pub fn isConstantOrGroupBy(p: *Parse, e: ?*Expr, group_by: *ExprList) bool {
 }
 
 /// Port of sqlite3ExprIsInteger(): the value of an integer literal in
-/// 0..0x7fffffff (possibly negated), or null. Bound parameters are not
-/// looked at (no reprepare on bind).
-pub fn isInteger(e_arg: ?*const Expr, p: ?*Parse) ?i32 {
-    _ = p;
+/// 0..0x7fffffff (possibly negated), or null. With `p`, a parameter (not
+/// negated) also counts, while compiling again with a value bound to it
+/// in that range; the statement is then reprepared when another value is
+/// bound (with `rsi`, only when it changes to or from 0 or 1).
+pub fn isInteger(e_arg: ?*const Expr, p_arg: ?*Parse, rsi: bool) ?i32 {
+    var p = p_arg;
     var sign: i32 = 1;
     var e = e_arg orelse return null;
     while (true) {
         if (!e.useUToken()) return e.u.value * sign;
         if (e.op == TK.UPLUS) {
             e = e.left orelse return null;
+            p = null;
             continue;
         }
         if (e.op == TK.UMINUS) {
             sign = -sign;
             e = e.left orelse return null;
+            p = null;
             continue;
         }
+        if (e.op == TK.VARIABLE) if (p) |pp| {
+            const v = pp.vdbe orelse return null;
+            if (pp.db.flags.EnableQPSG) return null;
+            var r: ?i32 = null;
+            if (aux.getBoundValue(pp.reprepare, e.i_column, Aff.blob)) |bound| {
+                var val = bound;
+                defer mem.release(&val);
+                if (val.flags.Int and val.u.i >= 0 and val.u.i <= 0x7fffffff) r = @intCast(val.u.i);
+            }
+            aux.reprepareOnBind(v, e.i_column, rsi);
+            return r;
+        };
         return null;
     }
 }
@@ -1344,7 +1374,7 @@ fn impliesNotNull(p: ?*const Parse, e: *const Expr, nn: *const Expr, i_tab: i32,
 fn isNotTrue(e: *Expr) bool {
     if (e.op == TK.NULL) return true;
     if (e.op == TK.TRUEFALSE and !truthValue(e)) return true;
-    if (isInteger(e, null)) |v| if (v == 0) return true;
+    if (isInteger(e, null, false)) |v| if (v == 0) return true;
     return false;
 }
 

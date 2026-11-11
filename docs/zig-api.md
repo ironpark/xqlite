@@ -410,7 +410,7 @@ db.loadExtension("./regex0", null) catch |err| {
 | `sqlite3_bind_parameter_count/name/index` | `parameterCount`, `parameterName`, `parameterIndex` |
 | (매개변수의 타입) | `Stmt.parameterType(i)` (`a = ?`의 `?`는 `a`의 타입. SQLite 방언은 늘 null, [코어의 타입](architecture.md#코어의-타입)) |
 | `sqlite3_step` | `Stmt.step() !bool`, `Stmt.next(T)`, `Iterator(T).next()` |
-| `sqlite3_stmt_status(SQLITE_STMTSTATUS_REPREPARE)` | `Stmt.recompileCount()` (스키마 변경으로 다시 컴파일된 횟수: 결과 열이 바뀌었을 수 있음) |
+| `sqlite3_stmt_status(SQLITE_STMTSTATUS_REPREPARE)` | `Stmt.recompileCount()` (스키마 변경, 또는 계획이 기대던 바인딩 값이 바뀌어 다시 컴파일된 횟수: 결과 열이 바뀌었을 수 있음) |
 | `sqlite3_column_*` | `Stmt.column(T, i)`, `columnAlloc`, `row(T)`, `rowAlloc`, `columnKind` |
 | `sqlite3_column_count/name/decltype` | `columnCount`, `columnName`, `columnDecltype`, `columnIndex` |
 | `sqlite3_column_database/table/origin_name` | `Stmt.columnOrigin(i)` (`OpenOptions.column_metadata`면 다시 컴파일하지 않음) |

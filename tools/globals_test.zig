@@ -21,6 +21,8 @@ const allowed = [_]struct { []const u8, []const u8 }{
     // which the VFS package keeps.
     .{ "pkg/vfs/src/vfs.zig", "default_size" },
     .{ "pkg/vfs/src/vfs.zig", "max_size" },
+    // sqlite3PendingByte (SQLITE_TESTCTRL_PENDING_BYTE).
+    .{ "pkg/vfs/src/vfs.zig", "pending_byte" },
     // The C ABI's VFS registry, for ATTACH's vfs= parameter.
     .{ "src/sql/global.zig", "find_vfs" },
     // The shared stores of the memdb VFS (memdb_g) and its settings.

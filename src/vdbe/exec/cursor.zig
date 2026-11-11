@@ -481,6 +481,16 @@ pub fn opRowid(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
+/// OP_CursorLock and OP_CursorUnlock: pin the b-tree cursor P1 to its
+/// row, so that a trigger which would move it fails with
+/// SQLITE_CONSTRAINT_PINNED, or release it.
+pub fn opCursorLock(e: *Exec, op: *Op) Flow {
+    const c = e.v.csr[@intCast(op.p1)].?;
+    const bc = c.uc.cursor;
+    if (op.opcode == OP.CursorLock) bc.pin() else bc.unpin();
+    return .next;
+}
+
 pub fn opNullRow(e: *Exec, op: *Op) Error!Flow {
     var c: *VdbeCursor = undefined;
     if (e.v.csr[@intCast(op.p1)]) |cx| {

@@ -178,6 +178,7 @@ pub fn clearBindings(v: *Vdbe) void {
         mem.release(m);
         m.flags = .{ .Null = true };
     }
+    if (v.expmask != 0) v.expired = 1;
 }
 
 /// Port of sqlite3_changes64().
@@ -478,6 +479,15 @@ pub fn valueFree(m: ?*Mem) void {
 
 /// Port of vdbeUnbind(): prepare parameter `i` (1-based) for a new value.
 fn unbind(v: *Vdbe, i: usize) i32 {
+    return unbindFor(v, i, null);
+}
+
+/// unbind() for the integer `new` (sqlite3_bind_int64()), or for a value
+/// of another kind (null). A plan made for the value bound before
+/// (expmask) is out of date, so the statement expires; with the smimask
+/// bit, only if the new value and the old one differ in being the
+/// integer 0 or 1. An integer that stays the same keeps the plan.
+fn unbindFor(v: *Vdbe, i: usize, new: ?i64) i32 {
     if (v.e_vdbe_state != .ready) {
         main_mod.errorWithMsg(v.db, RC.MISUSE, "bad parameter or other API misuse", .{});
         return RC.MISUSE;
@@ -487,12 +497,24 @@ fn unbind(v: *Vdbe, i: usize) i32 {
         return RC.RANGE;
     }
     const m = &v.vars[i - 1];
+    const bit = aux.varMask(i - 1);
+    if (v.expmask & bit != 0) {
+        const old_small = m.flags.Int and isSmallInt(m.u.i);
+        const changed = if (new) |x|
+            (if (v.smimask & bit != 0) old_small != isSmallInt(x) else !m.flags.Int or m.u.i != x)
+        else
+            v.smimask & bit == 0 or old_small;
+        if (changed) v.expired = 1;
+    }
     mem.release(m);
     m.flags = .{ .Null = true };
     v.db.err_code = RC.OK;
-    // Statements whose plan depends on bound values (expmask) would be
-    // reprepared here; that comes with sqlite3_prepare_v2().
     return RC.OK;
+}
+
+/// The integer 0 or 1 (the values smimask tells apart).
+fn isSmallInt(x: i64) bool {
+    return x >= 0 and x <= 1;
 }
 
 pub fn bindNull(v: *Vdbe, i: usize) i32 {
@@ -500,7 +522,7 @@ pub fn bindNull(v: *Vdbe, i: usize) i32 {
 }
 
 pub fn bindInt64(v: *Vdbe, i: usize, value: i64) i32 {
-    const rc = unbind(v, i);
+    const rc = unbindFor(v, i, value);
     if (rc == RC.OK) mem.setInt64(&v.vars[i - 1], value);
     return rc;
 }

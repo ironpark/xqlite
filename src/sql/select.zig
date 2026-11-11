@@ -1265,7 +1265,7 @@ fn computeLimitRegisters(p: *Parse, s: *Select, i_break: i32) void {
     const i_limit = p.n_mem;
     s.i_limit = i_limit;
     const v = build.getVdbe(p).?;
-    if (expr_mod.isInteger(limit.left, p)) |n| {
+    if (expr_mod.isInteger(limit.left, p, false)) |n| {
         _ = aux.addOp2(v, OP.Integer, n, i_limit);
         if (n == 0) {
             _ = aux.goto_(v, i_break);
@@ -1490,7 +1490,7 @@ fn unionWithLimitOne(db: *Sqlite3, s: *Select) bool {
     if (s.op != TK.UNION) return false;
     const limit = s.limit orelse return false;
     if (limit.right != null) return false;
-    const v = expr_mod.isInteger(limit.left, null) orelse return false;
+    const v = expr_mod.isInteger(limit.left, null, false) orelse return false;
     if (v != 1) return false;
     if (db.optDisabled(int.OPT.UnionLimit)) return false;
     return true;
@@ -1564,7 +1564,7 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) (Oom || int.ParseEr
         const rc = select(p, s, &dest);
         s.prior = prior;
         s.n_select_row = util.logEstAdd(s.n_select_row, prior.n_select_row);
-        if (s.limit) |lim| if (expr_mod.isInteger(lim.left, p)) |n_limit| {
+        if (s.limit) |lim| if (expr_mod.isInteger(lim.left, p, false)) |n_limit| {
             if (n_limit > 0 and s.n_select_row > util.logEst(@intCast(n_limit))) s.n_select_row = util.logEst(@intCast(n_limit));
         };
         if (addr != 0) aux.jumpHere(v, addr);
@@ -2635,7 +2635,10 @@ fn convertCompoundSelectToSubqueryImpl(w: *Walker, s: *Select) Oom!WRC {
     } else return WRC.Continue;
 
     const p = w.parse.?;
+    // Blank, as C's zeroed allocation: srcListAppendFromTerm() reads its
+    // flags (SF_NestedFrom) before the copy below.
     const new = try p.arena.create(Select);
+    new.* = .{};
     const new_src = (try build.srcListAppendFromTerm(p, null, null, null, .{}, new, null)) orelse return WRC.Abort;
     if (p.n_err != 0) return WRC.Abort;
     new.* = s.*;

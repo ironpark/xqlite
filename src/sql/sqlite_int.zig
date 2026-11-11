@@ -1187,6 +1187,9 @@ pub const CollSeq = struct {
     /// The definition of the same name for another encoding (a
     /// connection's collations: Sqlite3.colls holds the first).
     next: ?*CollSeq = null,
+    /// xqlite: of the first of a connection's names, how many names it
+    /// had before (the order SQLite's hash of them depends on).
+    seq: u32 = 0,
 
     pub const CmpFn = *const fn (user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order;
 };
@@ -1805,6 +1808,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.Schema, RC.SCHEMA },
     .{ error.TooBig, RC.TOOBIG },
     .{ error.Constraint, RC.CONSTRAINT },
+    .{ error.ConstraintPinned, RC.CONSTRAINT_PINNED },
     .{ error.Mismatch, RC.MISMATCH },
     .{ error.Misuse, RC.MISUSE },
     .{ error.NoLfs, RC.NOLFS },
@@ -2070,6 +2074,9 @@ pub const Parse = struct {
     vlist: std.ArrayList(VListEntry) = .empty,
     /// 1 for EXPLAIN, 2 for EXPLAIN QUERY PLAN.
     explain: u8 = 0,
+    /// pReprepare: the statement being compiled again, whose bound values
+    /// the planner may use (aux.getBoundValue()).
+    reprepare: ?*Vdbe = null,
     e_parse_mode: ParseMode = .normal,
     /// The trigger or view the authorizer is told code is made for
     /// (zAuthContext; see auth.zig).
@@ -2574,6 +2581,11 @@ pub const Sqlite3 = struct {
     /// pCollNeededArg).
     coll_needed: ?*const fn (arg: ?*anyopaque, db: *Sqlite3, name: [:0]const u8) void = null,
     coll_needed_arg: ?*anyopaque = null,
+    /// xqlite: the SQLITE_FCNTL_PRAGMA file control of database `i_db`
+    /// (sqlite3_file_control()), which only files of a C VFS answer; the
+    /// C ABI sets it. Returns the VFS's result code, with its text (a
+    /// result or an error message) copied with `a` into `out`.
+    fcntl_pragma: ?*const fn (db: *Sqlite3, i_db: usize, name: [:0]const u8, arg: ?[:0]const u8, a: std.mem.Allocator, out: *?[:0]u8) i32 = null,
     /// How many free pages a full auto-vacuum commit of database `name`
     /// gives back (xAutovacPages, pAutovacPagesArg).
     autovac_pages: ?*const fn (arg: ?*anyopaque, name: [:0]const u8, n_orig: u32, n_free: u32, page_size: u32) u32 = null,

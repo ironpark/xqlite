@@ -360,8 +360,7 @@ pub const Exec = struct {
                 OP.JournalMode => txn.opJournalMode(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.IncrVacuum => txn.opIncrVacuum(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.Expire => txn.opExpire(e, op),
-                // Cursor pinning only matters to the C b-tree's cell cache.
-                OP.CursorLock, OP.CursorUnlock => .next,
+                OP.CursorLock, OP.CursorUnlock => cursor.opCursorLock(e, op),
 
                 // Virtual tables.
                 OP.VBegin => vtab_ops.opVBegin(e, op) catch |err| return e.abortDueToError(err, n_vm_step),

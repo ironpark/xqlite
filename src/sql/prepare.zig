@@ -391,7 +391,10 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
     db.parse = &p;
     defer db.parse = p.outer_parse;
     defer parseObjectResetLookaside(&p);
-    if (old) |r| p.explain = r.explain;
+    if (old) |r| {
+        p.reprepare = r;
+        p.explain = r.explain;
+    }
     if (db.malloc_failed) {
         db.err_code = RC.NOMEM;
         return error.OutOfMemory;

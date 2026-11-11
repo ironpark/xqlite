@@ -106,9 +106,11 @@ pub fn xq_test_control(op: c_int, a: *const Args) callconv(.c) c_int {
             if (f) |x| return x(0);
         },
         PENDING_BYTE => {
-            // The pending byte is fixed (vfs.pending_byte): a new value
-            // is not taken.
-            return @intCast(c.vfs.pending_byte);
+            // The old value; a new one if not 0 (sqlite3PendingByte).
+            const old: c_int = @intCast(c.vfs.pending_byte);
+            const new: u32 = @truncate(@as(u64, @bitCast(a.i[0])));
+            if (new != 0) c.vfs.pending_byte = new;
+            return old;
         },
         // assert() and ALWAYS() of a release build.
         ASSERT => return 0,

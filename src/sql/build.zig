@@ -1095,7 +1095,8 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
     // Code a placeholder row in sqlite_schema now: the rowid of the
     // table's row must be allocated before those of any indexes the
     // PRIMARY KEY or UNIQUE constraints create.
-    if (!db.init.busy) if (getVdbe(p)) |v| {
+    const v_opt = if (!db.init.busy) getVdbe(p) else null;
+    if (v_opt) |v| {
         const null_row = [_]u8{ 6, 0, 0, 0, 0, 0 };
         beginWriteOperation(p, true, i_db);
         if (is_virtual) _ = aux.addOp0(v, OP.VBegin);
@@ -1128,7 +1129,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
     } else if (db.init.imposter_table != 0) {
         t.tab_flags.Imposter = true;
         if (db.init.imposter_table >= 2) t.tab_flags.Readonly = true;
-    };
+    }
 }
 
 /// Port of sqlite3AddColumn(): add a column to the table under
@@ -2457,7 +2458,11 @@ pub fn srcListLookup(p: *Parse, src: *SrcList) ?*Table {
     const t = locateTableItem(p, 0, item);
     item.s_tab = t;
     item.fg.not_cte = true;
-    if (t) |tab| tableRef(p, tab);
+    if (t) |tab| {
+        tableRef(p, tab);
+        // The index of INDEXED BY, or an error.
+        if (item.fg.is_indexed_by and @import("select.zig").indexedByLookup(p, item)) return null;
+    }
     return t;
 }
 

@@ -503,14 +503,31 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
     if (auth.check(p, auth.Code.PRAGMA, left, right, zdb) != auth.OK) return;
 
     db.busy_handler.n_busy = 0;
-    // The SQLITE_FCNTL_PRAGMA file control is not supported by the VFS
-    // layer, which is as if every VFS answered SQLITE_NOTFOUND. But
-    // sqlite3_file_control() fails with SQLITE_ERROR when the database
-    // has no b-tree: TEMP, not opened under EXPLAIN.
+    // The SQLITE_FCNTL_PRAGMA file control: a VFS that handles the
+    // pragma answers OK with its result, or an error. The engine's own
+    // files answer SQLITE_NOTFOUND. sqlite3_file_control() fails with
+    // SQLITE_ERROR when the database has no b-tree: TEMP, not opened
+    // under EXPLAIN.
     if (db.dbs.items[i_db].bt == null) {
         p.n_err += 1;
         p.rc = int.RC.ERROR;
         return;
+    }
+    if (db.fcntl_pragma) |f| {
+        var out: ?[:0]u8 = null;
+        const rc = f(db, i_db, left, right, p.arena, &out);
+        if (rc == int.RC.OK) {
+            aux.setNumCols(v, 1);
+            if (out) |name| aux.setColName(v, 0, vi.COLNAME_NAME, name);
+            returnSingleText(v, out);
+            return;
+        }
+        if (rc != int.RC.NOTFOUND) {
+            if (out) |m| util.errorMsg(p, "{s}", .{m});
+            p.n_err += 1;
+            p.rc = rc;
+            return;
+        }
     }
 
     // Unknown pragmas are silently ignored.
@@ -1050,18 +1067,32 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // PRAGMA collation_list: the built-in collations, then those of the
         // connection.
         .collation_list => {
-            var i: i32 = 0;
             p.n_mem = 2;
-            for (coll.builtins()) |*c| {
-                // A collation of the connection may shadow a built-in one.
-                if (db.colls.contains(c.name)) continue;
-                aux.multiLoad(v, 1, &.{ .{ .i = i }, .{ .s = c.name } }, false);
-                i += 1;
-            }
+            // The names in the order SQLite inserts them into its hash
+            // (the built-in ones when the connection opens; one of the
+            // connection with a built-in name takes its place), listed in
+            // that hash's order.
+            const builtins = coll.builtins();
+            var names: @import("xqlite_base").hash.HashOrder([]const u8) = .{};
+            for (builtins) |*c| try names.insert(p.arena, c.name, c.name);
+            const user = try p.arena.alloc(*int.CollSeq, db.colls.count());
             var it = db.colls.valueIterator();
-            while (it.next()) |c| {
-                aux.multiLoad(v, 1, &.{ .{ .i = i }, .{ .s = c.*.name } }, false);
-                i += 1;
+            var n: usize = 0;
+            while (it.next()) |c| : (n += 1) user[n] = c.*;
+            std.mem.sort(*int.CollSeq, user, {}, struct {
+                fn lt(_: void, a: *int.CollSeq, b: *int.CollSeq) bool {
+                    return a.seq < b.seq;
+                }
+            }.lt);
+            for (user) |c| {
+                for (builtins) |*b| {
+                    if (ctype.eqlNoCase(b.name, c.name)) break;
+                } else try names.insert(p.arena, c.name, c.name);
+            }
+            var names_it = names.iterator();
+            var i: i32 = 0;
+            while (names_it.next()) |name| : (i += 1) {
+                aux.multiLoad(v, 1, &.{ .{ .i = i }, .{ .s = name } }, false);
             }
         },
 

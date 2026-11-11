@@ -725,7 +725,7 @@ fn whereLoopOutputAdjust(wc: *WhereClause, loop: *WhereLoop, n_row: LogEst) void
                     const right = op_expr.right;
                     const p = wc.w_info.parse;
                     var k: LogEst = 20;
-                    if (expr_mod.isInteger(right, p)) |v| {
+                    if (expr_mod.isInteger(right, p, true)) |v| {
                         if (v >= -1 and v <= 1) k = 10;
                     }
                     if (i_reduce < k) {

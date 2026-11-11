@@ -100,75 +100,39 @@ pub fn dupZ(s: []const u8) ?[*:0]u8 {
 // ================================================================= UTF-16
 
 /// UTF-16 text in native byte order (C's `const void*` of the *16
-/// interfaces), or `n` bytes of it if `n` is not negative (an odd last
-/// byte is dropped), stopping at a NUL character.
+/// interfaces): up to its NUL character if `n` is negative, else `n`
+/// bytes (an odd last byte dropped), NULs included, as SQLite takes a
+/// value's text.
 pub fn utf16Slice(z: *const anyopaque, n: i64) []align(1) const u16 {
     const p: [*]align(1) const u16 = @ptrCast(z);
+    if (n >= 0) return p[0..@intCast(@divTrunc(n, 2))];
     var len: usize = 0;
-    if (n < 0) {
-        while (p[len] != 0) len += 1;
-    } else {
-        const max: usize = @intCast(@divTrunc(n, 2));
-        while (len < max and p[len] != 0) len += 1;
-    }
+    while (p[len] != 0) len += 1;
     return p[0..len];
 }
 
 /// UTF-16 (little or big endian) to UTF-8, from sqlite3_malloc() and
-/// NUL-terminated. Unpaired surrogates become U+FFFD, as in SQLite.
+/// NUL-terminated: the engine's conversion (sqlite3VdbeMemTranslate()),
+/// so unpaired surrogates are kept as SQLite keeps them.
 pub fn utf16ToUtf8(s: []align(1) const u16, big_endian: bool) ?[:0]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    out.ensureTotalCapacity(gpa, s.len * 3 + 1) catch return null;
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        var c: u21 = unit(s[i], big_endian);
-        if (c >= 0xd800 and c < 0xdc00 and i + 1 < s.len) {
-            const c2: u21 = unit(s[i + 1], big_endian);
-            if (c2 >= 0xdc00 and c2 < 0xe000) {
-                c = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00);
-                i += 1;
-            } else c = 0xfffd;
-        } else if (c >= 0xd800 and c < 0xe000) c = 0xfffd;
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(c, &buf) catch unreachable;
-        out.appendSliceAssumeCapacity(buf[0..len]);
-    }
-    return out.toOwnedSliceSentinel(gpa, 0) catch null;
+    return translateZ(u8, std.mem.sliceAsBytes(s), if (big_endian) vi.ENC.UTF16BE else vi.ENC.UTF16LE, vi.ENC.UTF8);
 }
 
-fn unit(u: u16, big_endian: bool) u21 {
-    const native_big = builtin.cpu.arch.endian() == .big;
-    return if (big_endian == native_big) u else @byteSwap(u);
-}
-
-/// UTF-8 to native UTF-16, NUL-terminated, from sqlite3_malloc().
-/// Invalid bytes become U+FFFD.
+/// UTF-8 to native UTF-16, NUL-terminated, from sqlite3_malloc(), by the
+/// engine's conversion (invalid bytes as SQLite reads them).
 pub fn utf8ToUtf16(s: []const u8) ?[:0]u16 {
-    var out: std.ArrayList(u16) = .empty;
-    errdefer out.deinit(gpa);
-    out.ensureTotalCapacity(gpa, s.len + 1) catch return null;
-    var i: usize = 0;
-    while (i < s.len) {
-        var c: u21 = 0xfffd;
-        var len: usize = 1;
-        if (std.unicode.utf8ByteSequenceLength(s[i])) |l| {
-            if (i + l <= s.len) {
-                if (std.unicode.utf8Decode(s[i..][0..l])) |d| {
-                    c = d;
-                    len = l;
-                } else |_| {}
-            }
-        } else |_| {}
-        i += len;
-        if (c >= 0x10000) {
-            out.append(gpa, @intCast(0xd800 + ((c - 0x10000) >> 10))) catch return null;
-            out.append(gpa, @intCast(0xdc00 + ((c - 0x10000) & 0x3ff))) catch return null;
-        } else {
-            out.append(gpa, @intCast(c)) catch return null;
-        }
-    }
-    return out.toOwnedSliceSentinel(gpa, 0) catch null;
+    return translateZ(u16, s, vi.ENC.UTF8, utf.UTF16NATIVE);
+}
+
+/// utf.translate() into a NUL-terminated slice of `T` sized to fit.
+fn translateZ(comptime T: type, in: []const u8, from: u8, to: u8) ?[:0]T {
+    const buf = gpa.alignedAlloc(u8, .of(T), utf.maxLen(in.len, to)) catch return null;
+    const n = utf.translate(in, from, to, buf);
+    const out = gpa.realloc(buf, n + @sizeOf(T)) catch {
+        gpa.free(buf);
+        return null;
+    };
+    return @as([]T, @ptrCast(out))[0 .. n / @sizeOf(T) :0];
 }
 
 // ========================================================== the C state

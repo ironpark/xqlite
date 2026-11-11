@@ -56,6 +56,9 @@ pub const Error = pager_mod.Error || error{
     /// The file is not a database, or uses a format this build cannot read
     /// (SQLITE_NOTADB).
     NotADatabase,
+    /// A pinned cursor (Cursor.pin()) would have to give up its position
+    /// (SQLITE_CONSTRAINT_PINNED).
+    ConstraintPinned,
 };
 
 /// Errors a key comparison may report.
@@ -1186,7 +1189,9 @@ pub const Cursor = struct {
         multiple: bool = false,
         /// An incremental blob cursor (BTCF_Incrblob).
         incrblob: bool = false,
-        _: u2 = 0,
+        /// Pinned to its row (BTCF_Pinned): saving its position fails.
+        pinned: bool = false,
+        _: u1 = 0,
     };
 
     pub const Options = struct {
@@ -1241,6 +1246,19 @@ pub const Cursor = struct {
     }
 
     /// Port of btreeReleaseAllCursorPages().
+    /// Port of sqlite3BtreeCursorPin(): until unpin(), a change to the
+    /// b-tree that would move the cursor fails (OP_CursorLock).
+    pub fn pin(cur: *Cursor) void {
+        std.debug.assert(!cur.flags.pinned);
+        cur.flags.pinned = true;
+    }
+
+    /// Port of sqlite3BtreeCursorUnpin().
+    pub fn unpin(cur: *Cursor) void {
+        std.debug.assert(cur.flags.pinned);
+        cur.flags.pinned = false;
+    }
+
     fn releaseAllPages(cur: *Cursor) void {
         if (cur.i_page < 0) return;
         for (cur.ap_page[0..@intCast(cur.i_page)]) |p| releasePage(p);
@@ -1283,6 +1301,7 @@ pub const Cursor = struct {
     /// pages, entering `requireseek`.
     fn savePosition(cur: *Cursor) Error!void {
         std.debug.assert(cur.state == .valid or cur.state == .skipnext);
+        if (cur.flags.pinned) return error.ConstraintPinned;
         if (cur.state == .skipnext) {
             cur.state = .valid;
         } else {

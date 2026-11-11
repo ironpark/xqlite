@@ -85,6 +85,7 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
         return RC.NOMEM;
     };
     db.capi = ext;
+    db.fcntl_pragma = fcntlPragma;
     // The C ABI is built as with SQLITE_ENABLE_CARRAY (capi/carray.zig).
     db.enable_carray = true;
     out.* = db;
@@ -694,6 +695,25 @@ pub fn xq_db_config(db_arg: ?*Handle, op: c_int, a: i64, b: i64, p: ?*anyopaque,
 /// (SQLITE_FCNTL_SIZE_LIMIT, SQLITE_FCNTL_VFSNAME), and
 /// SQLITE_FCNTL_MMAP_SIZE of a file with memory maps (vfs.fileControl());
 /// the engine's other files have none (SQLITE_NOTFOUND).
+/// SQLITE_FCNTL_PRAGMA for the engine (Sqlite3.fcntl_pragma): the
+/// char*[4] of pragma.c sent to the file of database `i_db`, and the
+/// string the VFS left in the first (from sqlite3_malloc()) copied.
+fn fcntlPragma(db: *Handle, i_db: usize, name: [:0]const u8, arg: ?[:0]const u8, a: std.mem.Allocator, out: *?[:0]u8) i32 {
+    const bt = db.dbs.items[i_db].bt orelse return RC.ERROR;
+    const f = vfs_mod.cFileOf(bt.pager.fd) orelse return RC.NOTFOUND;
+    const fc = f.pMethods.?.xFileControl orelse return RC.NOTFOUND;
+    var args = [4]?[*:0]const u8{ null, name.ptr, if (arg) |x| x.ptr else null, null };
+    const rc = fc(f, FCNTL_PRAGMA, @ptrCast(&args));
+    if (args[0]) |z| {
+        defer c.malloc.free(@constCast(z));
+        out.* = a.dupeSentinel(u8, std.mem.span(z), 0) catch null;
+    }
+    return rc;
+}
+
+/// SQLITE_FCNTL_PRAGMA.
+const FCNTL_PRAGMA = 14;
+
 pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, op: c_int, p_arg: ?*anyopaque) callconv(.c) c_int {
     const lk = c.lock(db_arg);
     defer lk.unlock();
@@ -762,10 +782,24 @@ pub export fn sqlite3_set_clientdata(db_arg: ?*Handle, z_name: ?[*:0]const u8, p
     return RC.OK;
 }
 
-pub export fn sqlite3_db_cacheflush(db: ?*Handle) callconv(.c) c_int {
-    const lk = c.lock(db);
+/// Port of sqlite3_db_cacheflush(): write the unreferenced dirty pages
+/// of each database with a write transaction (sqlite3PagerFlush()). A
+/// database that is busy is passed over and reported as SQLITE_BUSY at
+/// the end.
+pub export fn sqlite3_db_cacheflush(db_arg: ?*Handle) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
     defer lk.unlock();
-    return if (db == null) RC.MISUSE else RC.OK;
+    const db = db_arg orelse return RC.MISUSE;
+    var seen_busy = false;
+    for (db.dbs.items) |d| {
+        const bt = d.bt orelse continue;
+        if (bt.txnState() != .write) continue;
+        bt.pager.flush() catch |err| switch (err) {
+            error.Busy => seen_busy = true,
+            else => return c.main.apiExit(db, c.int.errorCode(err)),
+        };
+    }
+    return if (seen_busy) RC.BUSY else RC.OK;
 }
 
 pub export fn sqlite3_db_release_memory(db: ?*Handle) callconv(.c) c_int {

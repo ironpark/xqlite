@@ -478,6 +478,8 @@ pub const CollWrap = struct {
     name: [:0]u8,
     /// The text encoding it compares.
     enc: u8,
+    /// SQLITE_UTF16_ALIGNED: the text is passed at an even address.
+    aligned: bool = false,
     x_compare: CCompare,
     p_arg: ?*anyopaque,
     x_destroy: ?c.CDestructor,
@@ -489,8 +491,27 @@ pub const CollWrap = struct {
     }
 };
 
-fn compareThunk(user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order {
+fn compareThunk(user: ?*anyopaque, a_arg: []const u8, b_arg: []const u8) std.math.Order {
     const w: *CollWrap = @ptrCast(@alignCast(user.?));
+    var a = a_arg;
+    var b = b_arg;
+    // SQLITE_UTF16_ALIGNED: text at an odd address is copied, as
+    // sqlite3ValueText() does for such a collation (short text on the
+    // stack: this runs for every comparison of a sort).
+    var bufs: [2][256]u8 align(2) = undefined;
+    var copies: [2]?[]align(2) u8 = .{ null, null };
+    defer for (copies) |cp| if (cp) |x| c.gpa.free(x);
+    if (w.aligned) {
+        for ([_]*[]const u8{ &a, &b }, &bufs, &copies) |s, *buf, *cp| {
+            if (@intFromPtr(s.ptr) & 1 == 0) continue;
+            const x: []align(2) u8 = if (s.len <= buf.len) buf[0..s.len] else blk: {
+                cp.* = c.gpa.alignedAlloc(u8, .@"2", s.len) catch return .eq;
+                break :blk cp.*.?;
+            };
+            @memcpy(x, s.*);
+            s.* = x;
+        }
+    }
     const r = w.x_compare(w.p_arg, @intCast(a.len), a.ptr, @intCast(b.len), b.ptr);
     return std.math.order(r, 0);
 }
@@ -514,7 +535,7 @@ fn createCollation(db_arg: ?*Handle, name: ?[]const u8, enc_arg: c_int, p_arg: ?
         w.* = .{ .name = c.gpa.dupeSentinel(u8, z, 0) catch {
             c.gpa.destroy(w);
             return RC.NOMEM;
-        }, .enc = enc2, .x_compare = cmp, .p_arg = p_arg, .x_destroy = x_destroy };
+        }, .enc = enc2, .aligned = enc_arg == c.vi.ENC.UTF16_ALIGNED, .x_compare = cmp, .p_arg = p_arg, .x_destroy = x_destroy };
         const rc = c.main.apiExit(db, coll.createCollationEnc(db, z, enc2, w, compareThunk));
         if (rc != RC.OK) {
             // As in SQLite, xDestroy is not called when this fails.

@@ -238,7 +238,7 @@ pub fn fromEngine(err: engine.Error) SqlError {
         error.Empty => error.Empty,
         error.Schema => error.Schema,
         error.TooBig => error.TooBig,
-        error.Constraint => error.Constraint,
+        error.Constraint, error.ConstraintPinned => error.Constraint,
         error.Mismatch => error.Mismatch,
         error.Misuse => error.Misuse,
         error.NoLfs => error.NoLfs,

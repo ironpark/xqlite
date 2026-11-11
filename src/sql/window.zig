@@ -752,7 +752,7 @@ fn exprListAppendList(p: *Parse, list_arg: ?*ExprList, append_arg: ?*ExprList, i
         const dup = try expr_mod.exprDup(p.arena, item.expr);
         if (int_to_null) {
             if (expr_mod.skipCollateAndLikely(dup)) |sub| {
-                if (expr_mod.isInteger(sub, null) != null) {
+                if (expr_mod.isInteger(sub, null, false) != null) {
                     sub.op = TK.NULL;
                     sub.flags.clear(.{ .IntValue = true, .IsTrue = true, .IsFalse = true });
                     sub.u = .{ .token = null };

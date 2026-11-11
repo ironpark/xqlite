@@ -666,7 +666,7 @@ const UnixFile = struct {
             // Read-lock PENDING while taking the shared range so that a
             // writer waiting for EXCLUSIVE is not starved, then drop it.
             try posixLock(f.fd(), .read, vfs.pending_byte, 1);
-            const got = posixLock(f.fd(), .read, vfs.shared_first, vfs.shared_size);
+            const got = posixLock(f.fd(), .read, vfs.sharedFirst(), vfs.shared_size);
             const dropped = posixLock(f.fd(), .unlock, vfs.pending_byte, 1);
             try got;
             dropped catch return error.LockErr;
@@ -690,9 +690,9 @@ const UnixFile = struct {
         }
 
         if (level == .reserved) {
-            try posixLock(f.fd(), .write, vfs.reserved_byte, 1);
+            try posixLock(f.fd(), .write, vfs.reservedByte(), 1);
         } else {
-            try posixLock(f.fd(), .write, vfs.shared_first, vfs.shared_size);
+            try posixLock(f.fd(), .write, vfs.sharedFirst(), vfs.shared_size);
         }
         f.level = level;
         inode.level = level;
@@ -711,7 +711,7 @@ const UnixFile = struct {
             if (level == .shared) {
                 // Cannot fail against a well-behaved peer: we hold a write
                 // lock on the range already.
-                posixLock(f.fd(), .read, vfs.shared_first, vfs.shared_size) catch return error.LockErr;
+                posixLock(f.fd(), .read, vfs.sharedFirst(), vfs.shared_size) catch return error.LockErr;
             }
             // Releases PENDING and RESERVED together.
             posixLock(f.fd(), .unlock, vfs.pending_byte, 2) catch return error.LockErr;
@@ -741,7 +741,7 @@ const UnixFile = struct {
         inode.mutex.lockUncancelable(io);
         defer inode.mutex.unlock(io);
         if (inode.level.atLeast(.reserved)) return true;
-        return posixTestWriteLock(f.fd(), vfs.reserved_byte, 1);
+        return posixTestWriteLock(f.fd(), vfs.reservedByte(), 1);
     }
 
     pub fn sectorSize(_: *UnixFile) u32 {

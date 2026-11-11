@@ -871,8 +871,15 @@ pub fn tableRef(p: *Parse, t: *Table) void {
 
 /// Drop the references taken by tableRef().
 pub fn releaseTableRefs(p: *Parse) void {
-    for (p.tab_refs.items) |t| deleteTable(p.db, t);
+    releaseTableRefsFrom(p, 0);
     p.tab_refs = .empty;
+}
+
+/// Drop the references taken by tableRef() since there were `mark` of
+/// them (p.tab_refs.items.len), as the tree that took them is dropped.
+pub fn releaseTableRefsFrom(p: *Parse, mark: usize) void {
+    for (p.tab_refs.items[mark..]) |t| deleteTable(p.db, t);
+    p.tab_refs.shrinkRetainingCapacity(mark);
 }
 
 /// Port of sqlite3DeleteTable(): free a table once nothing refers to it.
@@ -989,7 +996,7 @@ pub fn twoPartName(p: *Parse, name1: *const Token, name2: *const Token, unqual: 
 }
 
 /// Port of sqlite3WritableSchema(): PRAGMA writable_schema is on.
-pub fn writableSchema(db: *Sqlite3) bool {
+pub fn writableSchema(db: *const Sqlite3) bool {
     return db.flags.WriteSchema and !db.flags.Defensive;
 }
 
@@ -999,7 +1006,7 @@ pub fn writableSchema(db: *Sqlite3) bool {
 /// is in `p`.
 pub fn checkObjectName(p: *Parse, name: []const u8, typ: []const u8, tbl_name: []const u8) int.ParseError!void {
     const db = p.db;
-    if (writableSchema(db) or db.init.imposter_table != 0) return;
+    if (writableSchema(db) or db.init.imposter_table != 0 or !@import("prepare.zig").extraSchemaChecks()) return;
     if (db.init.busy) {
         if (!ctype.eqlNoCase(typ, db.init.az_init[0]) or
             !ctype.eqlNoCase(name, db.init.az_init[1]) or
@@ -2574,6 +2581,12 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) (Oom || int.ParseError)!void {
     // Work on a copy: expanding "*" and assigning cursors must not change
     // the view's SELECT.
     var failed = false;
+    // The references the copy takes to the tables it reads are dropped
+    // with it, as C deletes the copy (sqlite3SelectDelete()): else they
+    // would count against the 65535 references of a table for the rest
+    // of the statement.
+    const n_ref = p.tab_refs.items.len;
+    defer releaseTableRefsFrom(p, n_ref);
     if (try expr_mod.selectDup(p.arena, t.u.view.select)) |sel| {
         const parse_mode = p.e_parse_mode;
         const n_tab = p.n_tab;
@@ -2767,6 +2780,7 @@ pub fn openTempDatabase(p: *Parse) int.ParseError!void {
             .mmap_size = db.sz_mmap,
             .cell_size_check = db.flags.CellSizeCk,
             .n_vdbe_read = &db.n_vdbe_read,
+            .db_flags = main_mod.btreeDbFlags(db),
             .autovac_pages = main_mod.btreeAutovacPages(db),
         }) catch |err| {
             util.errorMsg(p, "unable to open a temporary database file for storing temporary tables", .{});
@@ -3190,9 +3204,8 @@ fn reindexImpl(p: *Parse, name1_arg: ?Token, name2_arg: ?Token) Oom!void {
     }
     for (db.dbs.items, 0..) |*d, i_db| {
         if (i_re_db != null and i_re_db.? != i_db) continue;
-        var it = d.schema.tbl_hash.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
+        var it = d.schema.tbl_order.iterator();
+        while (it.next()) |t| {
             if (t.e_tab_type == .vtab) continue;
             var pidx = t.index;
             while (pidx) |idx| : (pidx = idx.next) {

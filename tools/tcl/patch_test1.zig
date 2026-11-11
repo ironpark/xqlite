@@ -23,6 +23,10 @@ const replacements = [_]Replacement{
     .{ .from = "sqlite3_value_text(pVal)", .to = "xqtcl_value_text(pVal)" },
     .{ .from = "sqlite3_value_text16be(pVal)", .to = "xqtcl_value_text16be(pVal)" },
     .{ .from = "sqlite3_value_text16le(pVal)", .to = "xqtcl_value_text16le(pVal)" },
+    // test_collate_needed_cb reads Sqlite3.enc (ENC(db)), which the
+    // callback is passed as eTextRep (callCollNeeded()).
+    .{ .from = "int enc = ENC(db);", .to = "int enc = eTextRep;" },
+    .{ .from = "db, \"test_collate\", ENC(db), SQLITE_INT_TO_PTR(enc)", .to = "db, \"test_collate\", eTextRep, SQLITE_INT_TO_PTR(enc)" },
     // sqlite3_stmt_scanstatus -debug reads Vdbe.aScan.
     .{
         .from = "ScanStatus *pScan = &((Vdbe*)pStmt)->aScan[idx];",

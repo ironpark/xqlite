@@ -35,6 +35,7 @@ typedef struct XqArg {
 #define XQ_DOUBLE 1
 #define XQ_STR 2
 #define XQ_STR_FREE 3
+#define XQ_COUNT 4
 
 char *xq_vmprintf(const char*, const XqArg*, int);
 char *xq_vsnprintf(int, char*, const char*, const XqArg*, int);
@@ -147,8 +148,7 @@ static int collectArgs(const char *zFormat, va_list *ap, XqArg *a, int nA, XqArg
         aArg[n].kind = XQ_STR_FREE; aArg[n++].v.s = va_arg(*ap, const char*);
         break;
       case 'n':
-        /* The engine writes no count; the int* is skipped. */
-        (void)va_arg(*ap, int*);
+        aArg[n].kind = XQ_COUNT; aArg[n++].v.p = va_arg(*ap, int*);
         break;
       case '%':
         break;

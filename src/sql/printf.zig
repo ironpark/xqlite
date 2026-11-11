@@ -44,6 +44,8 @@ pub const Arg = union(enum) {
     expr: *const int.Expr,
     /// %S: a FROM-clause term.
     src_item: *const int.SrcItem,
+    /// %n: where the count of characters so far is written.
+    count: *c_int,
 };
 
 /// The arguments of the printf() SQL function (PrintfArguments), read
@@ -457,7 +459,8 @@ const ArgReader = struct {
 /// # ! 0 and ',' (thousands), width and precision (possibly *), l and ll,
 /// and the conversions d i u x X o c s z q Q w j J g G e E f p r n % T S.
 /// %z is the same as %s (no ownership is transferred) and %n prints
-/// nothing and reads no argument.
+/// nothing; given an Arg.count, it writes the length so far there (the
+/// SQL function printf() reads no argument for it).
 pub fn vappendf(acc: *StrAccum, fmt: []const u8, args: Args) void {
     var rd: ArgReader = .{ .args = args };
     const sql_func = rd.sqlFunc();
@@ -901,6 +904,10 @@ pub fn vappendf(acc: *StrAccum, fmt: []const u8, args: Args) void {
                 out = z_out[0..length];
             },
             .size => {
+                if (!sql_func) if (rd.take()) |a| switch (a) {
+                    .count => |out_n| out_n.* = @intCast(acc.n_char),
+                    else => {},
+                };
                 width = 0;
             },
             .percent => out = "%",

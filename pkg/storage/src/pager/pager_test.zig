@@ -510,6 +510,9 @@ test "pager: pages sharing a sector are journaled together" {
         const p = try openPager(mem.interface(), .{});
         defer p.close(.{});
         try testing.expectEqual(@as(u32, 4096), p.sector_size);
+        // A new file's page size is raised to the sector size; this test
+        // wants smaller pages in a sector.
+        try p.setPageSize(page_size, null);
         try commitFill(p, 8, 0x80);
 
         const p1 = try beginWrite(p);

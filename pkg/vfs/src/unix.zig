@@ -1,5 +1,5 @@
-//! POSIX VFS (port of the "unix", "unix-excl" and "unix-none" VFSes of os_unix.c,
-//! POSIX advisory locking).
+//! POSIX VFS (port of the "unix", "unix-excl", "unix-none", "unix-dotfile"
+//! and "unix-flock" VFSes of os_unix.c).
 //!
 //! Locks use the same byte ranges as SQLite, so xqlite and real SQLite
 //! processes can safely share a database file.
@@ -35,7 +35,7 @@
 //! xNextSystemCall(): setSystemCall() ...), with the same names and C
 //! signatures, so a test harness can inject faults.
 //!
-//! Not ported: proxy/dotfile/flock/afp locking styles, F_SETLKW timeouts.
+//! Not ported: proxy/afp locking styles, F_SETLKW timeouts.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -509,9 +509,20 @@ pub const UnixVfs = struct {
     /// "unix-excl": files opened read-write take an exclusive lock for
     /// the process (UNIXFILE_EXCL).
     excl: bool = false,
-    /// "unix-none": databases take no locks and have no shared memory
-    /// (nolockIoMethods), so WAL needs exclusive locking mode.
-    none: bool = false,
+    /// How databases are locked. Only POSIX advisory locks come with
+    /// shared memory, so WAL needs exclusive locking mode in the others.
+    style: LockStyle = .posix,
+
+    pub const LockStyle = enum {
+        posix,
+        /// "unix-none" (nolockIoMethods): no locks. Also every file
+        /// that is not a database.
+        none,
+        /// dotlockIoMethods: a directory "<db>.lock" is the lock.
+        dotfile,
+        /// flockIoMethods: flock(2), always exclusive.
+        flock,
+    };
 
     pub fn init(gpa: Allocator, io: Io) UnixVfs {
         return .{ .gpa = gpa, .io = io, .dir = .cwd() };
@@ -545,7 +556,7 @@ pub const UnixVfs = struct {
 
     /// Port of unixFullPathname(): `path` made absolute (against `dir`),
     /// with "." and ".." removed and symbolic links resolved.
-    pub fn fullPathname(self: *UnixVfs, path: []const u8, out: []u8) Error![]u8 {
+    pub fn fullPathname(self: *UnixVfs, path: []const u8, out: []u8, symlink: *bool) Error![]u8 {
         var p: DbPath = .{ .out = out };
         if (path.len == 0 or path[0] != '/') {
             var pwd: [vfs.max_path_bytes + 2]u8 = undefined;
@@ -562,6 +573,7 @@ pub const UnixVfs = struct {
         }
         p.appendAll(path);
         if (p.failed or p.used < 2) return error.CantOpen;
+        symlink.* = p.n_symlink > 0;
         return out[0..p.used];
     }
 
@@ -662,12 +674,14 @@ pub const UnixVfs = struct {
         // data alive until it is closed.
         if (flags.delete_on_close) _ = os(.unlink)(name.ptr);
 
-        const no_lock = flags.kind != .main_db or self.none;
+        // fillInUnixFile(): only a database is locked, and only POSIX
+        // locks need the inode.
+        const style: LockStyle = if (flags.kind != .main_db) .none else self.style;
         const path_copy = try self.gpa.dupeSentinel(u8, name, 0);
         errdefer self.gpa.free(path_copy);
-        // fillInUnixFile(): no lock and no inode for a file that is not a
-        // database.
-        const inode: ?*InodeInfo = if (no_lock) null else try InodeInfo.acquire(self.io, fd);
+        const lock_path: ?[:0]u8 = if (style == .dotfile) try std.fmt.allocPrintSentinel(self.gpa, "{s}.lock", .{name}, 0) else null;
+        errdefer if (lock_path) |l| self.gpa.free(l);
+        const inode: ?*InodeInfo = if (style == .posix) try InodeInfo.acquire(self.io, fd) else null;
         errdefer if (inode) |i| i.release(self.io);
         const handle = try self.gpa.create(UnixFile);
         handle.* = .{
@@ -681,10 +695,12 @@ pub const UnixVfs = struct {
                 .psow = if (flags.uri and path != null) vfs.uriBoolean(path.?, "psow", true) else true,
             },
             .path = path_copy,
+            .style = style,
+            .lock_path = lock_path,
             .main_path = if (flags.kind == .main_db and (flags.uri or flags.sqlite_filename)) path else null,
             .mmap_size_max = vfs.mmap_config.default_size,
         };
-        return .{ .ptr = handle, .vtable = if (self.none) UnixFile.vtable_nolock else UnixFile.vtable };
+        return .{ .ptr = handle, .vtable = if (self.style == .posix) UnixFile.vtable else UnixFile.vtable_nolock };
     }
 
     /// Port of unixDelete().
@@ -692,8 +708,7 @@ pub const UnixVfs = struct {
         var buf: [vfs.max_path_bytes + 1]u8 = undefined;
         const z = try self.resolve(path, &buf);
         if (os(.unlink)(z.ptr) == -1) {
-            // SQLITE_IOERR_DELETE_NOENT is no error to the engine.
-            if (errno() == eno(.NOENT)) return;
+            if (errno() == eno(.NOENT)) return error.DeleteNoEnt;
             logError(ioerr_delete, "unlink", z, @src().line);
             return error.IoErr;
         }
@@ -711,6 +726,11 @@ pub const UnixVfs = struct {
 
     pub fn randomness(self: *UnixVfs, buf: []u8) void {
         self.io.random(buf);
+    }
+
+    /// Port of unixGetLastError(): errno.
+    pub fn lastError(_: *UnixVfs) i32 {
+        return errno();
     }
 
     /// Port of unixSleep().
@@ -981,6 +1001,17 @@ fn setPosixLock(fd: fd_t, kind: LockType, start: u64, len: u64) ?c_int {
     return errno();
 }
 
+const sysFlock = @extern(*const fn (c_int, c_int) callconv(.c) c_int, .{ .name = "flock" });
+
+/// Port of robust_flock(): flock(2), retried on EINTR.
+fn robustFlock(fd: c_int, op: c_int) c_int {
+    while (true) {
+        const rc = sysFlock(fd, op);
+        if (rc < 0 and errno() == eno(.INTR)) continue;
+        return rc;
+    }
+}
+
 /// Port of sqliteErrorFromPosixError(): contention means BUSY, anything
 /// else `other` (SQLITE_IOERR_LOCK and the like).
 /// A failed lock: Busy, or LockErr with errno `e` kept for xGetLastError.
@@ -1131,6 +1162,10 @@ const UnixFile = struct {
     last_errno: c_int = 0,
     /// The name the file was opened with (zPath).
     path: [:0]u8,
+    /// How the file is locked (its io methods).
+    style: UnixVfs.LockStyle,
+    /// "unix-dotfile": the directory that is the lock (lockingContext).
+    lock_path: ?[:0]u8 = null,
     /// The database's name in SQLite's filename layout, as the pager
     /// passed it, for its URI parameters (readonly_shm). Null for other
     /// files, and for a name not in that layout.
@@ -1163,7 +1198,74 @@ const UnixFile = struct {
     /// The methods named after those of vfs.File.VTable implement it
     /// (vfs.FileImpl()).
     const vtable = &vfs.FileImpl(UnixFile).vtable;
-    /// nolockIoMethods: the methods of "unix-none", without shared memory.
+    /// Port of dotlockCheckReservedLock().
+    fn dotlockCheckReservedLock(f: *UnixFile) Error!bool {
+        if (f.level.atLeast(.shared)) return false;
+        return os(.access)(f.lock_path.?.ptr, 0) == 0;
+    }
+
+    /// Port of dotlockLock(): any lock is the directory; a lock held is
+    /// only raised.
+    fn dotlockLock(f: *UnixFile, level: LockLevel) Error!void {
+        if (f.level != .none) {
+            f.level = level;
+            return;
+        }
+        if (os(.mkdir)(f.lock_path.?.ptr, 0o777) < 0) {
+            const e = errno();
+            if (e == eno(.EXIST)) return error.Busy;
+            return lockFailed(f, e);
+        }
+        f.level = level;
+    }
+
+    /// Port of dotlockUnlock().
+    fn dotlockUnlock(f: *UnixFile, level: LockLevel) Error!void {
+        if (f.level == level) return;
+        if (level == .shared) {
+            f.level = .shared;
+            return;
+        }
+        if (os(.rmdir)(f.lock_path.?.ptr) < 0) {
+            const e = errno();
+            if (e == eno(.NOENT)) return;
+            f.last_errno = e;
+            return error.LockErr;
+        }
+        f.level = .none;
+    }
+
+    /// Port of flockCheckReservedLock(): flock locks are exclusive, so
+    /// no other connection can hold RESERVED while we hold anything,
+    /// and without a lock we let the caller try for EXCLUSIVE.
+    fn flockCheckReservedLock(_: *UnixFile) Error!bool {
+        return false;
+    }
+
+    /// Port of flockLock(): every lock is an exclusive flock().
+    fn flockLock(f: *UnixFile, level: LockLevel) Error!void {
+        if (f.level != .none) {
+            f.level = level;
+            return;
+        }
+        if (robustFlock(f.h, c.LOCK.EX | c.LOCK.NB) != 0) return lockFailed(f, errno());
+        f.level = level;
+    }
+
+    /// Port of flockUnlock().
+    fn flockUnlock(f: *UnixFile, level: LockLevel) Error!void {
+        if (f.level == level) return;
+        if (level == .shared) {
+            f.level = .shared;
+            return;
+        }
+        if (robustFlock(f.h, c.LOCK.UN) != 0) return error.LockErr;
+        f.level = .none;
+    }
+
+    /// The methods of the styles without shared memory (nolockIoMethods,
+    /// dotlockIoMethods, flockIoMethods); lock() and the like go by
+    /// `style`.
     const vtable_nolock = &nolock_methods;
     const nolock_methods: vfs.File.VTable = blk: {
         var t = vfs.FileImpl(UnixFile).vtable;
@@ -1182,6 +1284,7 @@ const UnixFile = struct {
         std.debug.assert(f.shm == null);
         if (f.shm != null) shmUnmap(f, false);
         unlock(f, .none) catch {};
+        if (f.lock_path) |l| f.owner.gpa.free(l);
         f.unmapFile();
         if (f.inode) |inode| {
             inode.mutex.lockUncancelable(io);
@@ -1337,9 +1440,15 @@ const UnixFile = struct {
 
     /// Port of unixLock(). See vfs.LockLevel for the allowed transitions.
     pub fn lock(f: *UnixFile, level: LockLevel) Error!void {
+        switch (f.style) {
+            .posix => {},
+            // nolockLock().
+            .none => return,
+            .dotfile => return dotlockLock(f, level),
+            .flock => return flockLock(f, level),
+        }
         if (f.level.atLeast(level)) return;
-        // nolockLock().
-        const inode = f.inode orelse return;
+        const inode = f.inode.?;
 
         const io = f.owner.io;
         inode.mutex.lockUncancelable(io);
@@ -1413,9 +1522,15 @@ const UnixFile = struct {
 
     /// Port of posixUnlock() without the NFS workaround.
     pub fn unlock(f: *UnixFile, level: LockLevel) Error!void {
+        switch (f.style) {
+            .posix => {},
+            // nolockUnlock().
+            .none => return,
+            .dotfile => return dotlockUnlock(f, level),
+            .flock => return flockUnlock(f, level),
+        }
         if (!f.level.atLeast(level) or f.level == level) return;
-        // nolockUnlock().
-        const inode = f.inode orelse return;
+        const inode = f.inode.?;
 
         const io = f.owner.io;
         inode.mutex.lockUncancelable(io);
@@ -1456,7 +1571,13 @@ const UnixFile = struct {
 
     /// Port of unixCheckReservedLock().
     pub fn checkReservedLock(f: *UnixFile) Error!bool {
-        const inode = f.inode orelse return false;
+        switch (f.style) {
+            .posix => {},
+            .none => return false,
+            .dotfile => return dotlockCheckReservedLock(f),
+            .flock => return flockCheckReservedLock(f),
+        }
+        const inode = f.inode.?;
         const io = f.owner.io;
         inode.mutex.lockUncancelable(io);
         defer inode.mutex.unlock(io);
@@ -1935,7 +2056,7 @@ test "unix: delete and temp files" {
     const f = try v.open("j", .{ .create = true });
     f.close();
     try v.delete("j", true);
-    try v.delete("j", false);
+    try testing.expectError(error.DeleteNoEnt, v.delete("j", false));
     try testing.expect(!try v.access("j", .exists));
 
     const d = try v.open("doc", .{ .create = true, .delete_on_close = true });

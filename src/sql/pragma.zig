@@ -952,9 +952,9 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 // computation may change the hash table, so restart the scan.
                 var init_n_col = db.dbs.items[ii].schema.tbl_hash.count();
                 while (init_n_col > 0) : (init_n_col -= 1) {
-                    var it = db.dbs.items[ii].schema.tbl_hash.valueIterator();
-                    const t = while (it.next()) |tp| {
-                        if (tp.*.cols.len == 0) break tp.*;
+                    var it = db.dbs.items[ii].schema.tbl_order.iterator();
+                    const t = while (it.next()) |x| {
+                        if (x.cols.len == 0) break x;
                     } else break;
                     const sql = try build.mprintf(p, "SELECT*FROM\"%w\"", &.{.{ .str = t.name }});
                     var dummy: ?*Vdbe = null;
@@ -963,9 +963,8 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     if (db.malloc_failed) return error.OutOfMemory;
                 }
 
-                var it = db.dbs.items[ii].schema.tbl_hash.valueIterator();
-                while (it.next()) |tp| {
-                    const t = tp.*;
+                var it = db.dbs.items[ii].schema.tbl_order.iterator();
+                while (it.next()) |t| {
                     if (right) |z| if (!ctype.eqlNoCase(z, t.name)) continue;
                     const typ: []const u8 = if (t.isView())
                         "view"
@@ -1340,7 +1339,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
     const reg_row = p.n_mem;
     // As in C, nothing is checked if the schema has no tables, even if a
     // table is named.
-    var it = db.dbs.items[i_db].schema.tbl_hash.valueIterator();
+    var it = db.dbs.items[i_db].schema.tbl_order.iterator();
     var more = db.dbs.items[i_db].schema.tbl_hash.count() > 0;
     while (more) {
         var t_opt: ?*Table = null;
@@ -1348,8 +1347,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
             t_opt = build.locateTable(p, 0, z, zdb);
             more = false;
         } else {
-            const tp = it.next() orelse break;
-            t_opt = tp.*;
+            t_opt = it.next() orelse break;
         }
         const t = t_opt orelse continue;
         if (!t.isOrdinary() or t.u.tab.fkey == null) continue;
@@ -1465,11 +1463,10 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         p.ok_const_factor = false;
 
         // The root pages of every table and index.
-        const tbls = &db.dbs.items[i].schema.tbl_hash;
+        const tbls = &db.dbs.items[i].schema.tbl_order;
         var cnt: usize = 0;
-        var it = tbls.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
+        var it = tbls.iterator();
+        while (it.next()) |t| {
             if (tableSkipIntegrityCheck(t, obj_tab)) continue;
             if (t.hasRowid()) cnt += 1;
             var idx_opt = t.index;
@@ -1484,9 +1481,8 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
             cnt += 1;
             roots[cnt] = 0;
         }
-        it = tbls.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
+        it = tbls.iterator();
+        while (it.next()) |t| {
             if (tableSkipIntegrityCheck(t, obj_tab)) continue;
             if (t.hasRowid()) {
                 cnt += 1;
@@ -1519,9 +1515,8 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         // Every index must have as many entries as its table.
         var k: i32 = if (obj_tab != null) 1 else 0;
         _ = aux.loadString(v, 2, "wrong # of entries in index ");
-        it = tbls.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
+        it = tbls.iterator();
+        while (it.next()) |t| {
             if (tableSkipIntegrityCheck(t, obj_tab)) continue;
             var i_tab: i32 = undefined;
             if (t.hasRowid()) {
@@ -1550,17 +1545,15 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         }
 
         // Check each row of each table.
-        it = tbls.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
+        it = tbls.iterator();
+        while (it.next()) |t| {
             if (tableSkipIntegrityCheck(t, obj_tab)) continue;
             if (!t.isOrdinary()) continue;
             try integrityCheckTable(p, v, t, is_quick);
         }
         // Second pass: the xIntegrity method of the virtual tables.
-        it = tbls.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
+        it = tbls.iterator();
+        while (it.next()) |t| {
             if (tableSkipIntegrityCheck(t, obj_tab)) continue;
             if (t.isOrdinary()) continue;
             if (!t.isVirtual()) continue;

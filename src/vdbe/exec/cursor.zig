@@ -71,7 +71,9 @@ fn openBtreeCursor(c: *VdbeCursor, bt: *btree.Btree, root: int.Pgno, write: bool
 pub fn opReopenIdx(e: *Exec, op: *Op) Error!Flow {
     if (e.v.csr[@intCast(op.p1)]) |c| {
         if (c.pgno_root == @as(u32, @intCast(op.p2))) {
-            // Already open on this index.
+            // Already open on this index: the position is forgotten
+            // (sqlite3BtreeClearCursor()), so that OP_SeekScan seeks.
+            c.uc.cursor.clear();
             c.seek_eq = op.p5 & vi.OPFLAG.SEEKEQ != 0;
             return .next;
         }

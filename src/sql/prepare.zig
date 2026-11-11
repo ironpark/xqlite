@@ -29,9 +29,6 @@ pub const INITFLAG_AlterDropCons: u16 = 0x0004;
 /// SQLITE_MAX_PREPARE_RETRY.
 const max_prepare_retry = 25;
 
-/// SQLITE_LIMIT_SCHEMA default: the most objects a schema may have.
-const max_schema_objects: u32 = 0x7fffffff;
-
 /// The state of reading a schema (InitData).
 pub const InitData = struct {
     db: *Sqlite3,
@@ -96,6 +93,11 @@ pub fn initCallback(data: *InitData, argv: []const ?[*:0]const u8, _: []const [*
     return initRow(data, &obj);
 }
 
+/// sqlite3Config.bExtraSchemaChecks.
+pub fn extraSchemaChecks() bool {
+    return @import("global.zig").testctrl.extra_schema_checks;
+}
+
 fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
     const db = data.db;
     const i_db = data.i_db;
@@ -115,10 +117,10 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
         const saved_i_db = db.init.i_db;
         std.debug.assert(db.init.busy);
         db.init.i_db = @intCast(i_db);
-        if (numeric.getUInt32(argv[3].?)) |tnum| {
-            db.init.new_tnum = tnum;
-        } else {
-            db.init.new_tnum = 0;
+        const tnum = numeric.getUInt32(argv[3].?);
+        db.init.new_tnum = tnum orelse 0;
+        if (extraSchemaChecks() and (tnum == null or (tnum.? > data.mx_page and data.mx_page > 0))) {
+            corruptSchema(data, argv, "invalid rootpage");
         }
         db.init.orphan_trigger = false;
         db.init.az_init = .{ argv[0] orelse "", argv[1] orelse "", argv[2] orelse "" };
@@ -147,14 +149,18 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
         // An index of a PRIMARY KEY or UNIQUE constraint, made with its
         // CREATE TABLE: only the root page needs to be recorded.
         if (build.findIndex(db, argv[1].?, db.dbs.items[i_db].name)) |idx| {
-            idx.tnum = numeric.getUInt32(argv[3].?) orelse 0;
+            const tnum = numeric.getUInt32(argv[3].?);
+            idx.tnum = tnum orelse 0;
+            if (extraSchemaChecks() and (tnum == null or idx.tnum < 2 or idx.tnum > data.mx_page or build.indexHasDuplicateRootPage(idx))) {
+                corruptSchema(data, argv, "invalid rootpage");
+            }
         } else {
             corruptSchema(data, argv, "orphan index");
         }
     }
     if (data.err_msg.* == null) {
         const s = db.dbs.items[i_db].schema;
-        if (s.tbl_hash.count() + s.idx_hash.count() + s.trig_hash.count() > max_schema_objects) {
+        if (s.tbl_hash.count() + s.idx_hash.count() + s.trig_hash.count() > @as(u32, @intCast(db.limit(.schema)))) {
             setErrMsg(data, "too many schema objects");
             data.rc = RC.ERROR;
             return true;
@@ -170,7 +176,11 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
     // C: mask = (mDbFlags & DBFLAG_EncodingFixed) | ~DBFLAG_EncodingFixed.
     const encoding_was_fixed = db.m_db_flags.EncodingFixed;
     db.init.busy = true;
-    defer db.init.busy = false;
+    db.init.alter = m_flags & INITFLAG_AlterAdd != 0;
+    defer {
+        db.init.busy = false;
+        db.init.alter = false;
+    }
     var rc: i32 = RC.OK;
 
     // The schema table itself, made by the parser from its definition.

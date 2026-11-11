@@ -552,7 +552,7 @@ pub fn dynObject(m: *const Mem, comptime del: anytype) ?@typeInfo(@TypeOf(del)).
 }
 
 /// Port of sqlite3NoopDestructor().
-pub fn noopDestructor(_: ?*anyopaque) void {}
+pub fn noopDestructor(_: ?*anyopaque) callconv(.c) void {}
 
 /// Port of sqlite3VdbeMemSetPointer(): a NULL carrying a pointer of type
 /// `ptype` (sqlite3_result_pointer).
@@ -644,7 +644,7 @@ pub fn setStr(m: *Mem, z_arg: ?[]const u8, enc_arg: u8, del: Destructor) Error!v
             else => {},
         }
         setNull(m);
-        return error.TooBig;
+        return errorToParser(m.db);
     }
     switch (del) {
         .transient => {
@@ -673,12 +673,22 @@ pub fn setStr(m: *Mem, z_arg: ?[]const u8, enc_arg: u8, del: Destructor) Error!v
     m.enc = enc;
 }
 
+/// Port of sqlite3ErrorToParser() for SQLITE_TOOBIG: a statement being
+/// compiled (a column name, a constant) fails with it.
+fn errorToParser(db_opt: ?*Sqlite3) error{TooBig} {
+    if (db_opt) |db| if (db.parse) |p| {
+        p.rc = int.RC.TOOBIG;
+        p.n_err += 1;
+    };
+    return error.TooBig;
+}
+
 /// Port of sqlite3VdbeMemSetText() for a NUL-terminated string: like
 /// `setStr` with MEM_Term.
 pub fn setTextZ(m: *Mem, z: [:0]const u8, del: Destructor) Error!void {
     if (z.len > m.db.?.limit(.length)) {
         setNull(m);
-        return error.TooBig;
+        return errorToParser(m.db);
     }
     switch (del) {
         .transient => {

@@ -128,9 +128,11 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         .memory = is_memdb,
         .mmap_size = db.sz_mmap,
         .read_only = flags.read_only,
+        .nofollow = flags.nofollow,
         .create = flags.create and !flags.read_only,
         .cell_size_check = db.flags.CellSizeCk,
         .n_vdbe_read = &db.n_vdbe_read,
+        .db_flags = main_mod.btreeDbFlags(db),
         .autovac_pages = main_mod.btreeAutovacPages(db),
         .busy_handler = main_mod.btreeBusyHandler(db),
         .uri_params = parsed.params(),
@@ -220,6 +222,7 @@ fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
     const bt = btree.Btree.open(malloc.allocator, memdb.interface(), "x", .{
         .cell_size_check = db.flags.CellSizeCk,
         .n_vdbe_read = &db.n_vdbe_read,
+        .db_flags = main_mod.btreeDbFlags(db),
         .busy_handler = main_mod.btreeBusyHandler(db),
     }) catch |err| return api.resultErrorCode(ctx, int.errorCode(err));
     const schema = build.schema_gpa.create(Schema) catch {

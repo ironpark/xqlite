@@ -217,13 +217,19 @@ pub fn createCollation(db: *Sqlite3, name: []const u8, user: ?*anyopaque, cmp: C
 /// (SQLITE_UTF8, UTF16LE or UTF16BE).
 pub fn createCollationEnc(db: *Sqlite3, name: []const u8, enc: u8, user: ?*anyopaque, cmp: ?CollSeq.CmpFn) i32 {
     std.debug.assert(enc >= ENC.UTF8 and enc <= ENC.UTF16BE);
-    if (db.n_vdbe_active != 0) {
-        @import("main.zig").errorWithMsg(db, RC.BUSY, "unable to delete/modify collation sequence due to active statements", .{});
-        return RC.BUSY;
+    // Only replacing or removing a collation (one with a function for
+    // this encoding) disturbs the statements; adding one does not.
+    const user_coll = userCollSeq(db, name, enc);
+    const existing = if (user_coll) |c| c.cmp != null else builtinColl(name, enc) != null;
+    if (existing) {
+        if (db.n_vdbe_active != 0) {
+            @import("main.zig").errorWithMsg(db, RC.BUSY, "unable to delete/modify collation sequence due to active statements", .{});
+            return RC.BUSY;
+        }
+        @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
     }
-    @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
     // Built-in collations are not replaced but shadowed.
-    if (userCollSeq(db, name, enc)) |c| {
+    if (user_coll) |c| {
         c.user = user;
         c.cmp = cmp;
     } else if (addCollSeq(db, name, .{ .name = undefined, .enc = enc, .user = user, .cmp = cmp }) == null) {

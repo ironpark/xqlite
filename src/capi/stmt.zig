@@ -37,6 +37,9 @@ fn prepare(db_arg: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: Fla
     out.* = null;
     if (pz_tail) |t| t.* = z_sql;
     const db = db_arg orelse return RC.MISUSE;
+    // sqlite3SafetyCheckOk(): a connection sqlite3_close_v2() left open
+    // for its statements takes no new ones.
+    if (c.isZombie(db)) return RC.MISUSE;
     const sql = z_sql orelse return RC.MISUSE;
     const flags = prep_flags.stored();
     const text = c.cSliceZ(sql, n_byte);
@@ -222,11 +225,9 @@ fn bindText(v_arg: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: i64, del: ?*const 
     switch (enc) {
         2, 3, 4 => {
             const s16 = c.utf16Slice(p, n);
-            // A UTF-16 database: stored as given, then in its byte order.
-            if (v.db.enc != c.vi.ENC.UTF8) return c.api.bindTextEnc(v, idx(i), std.mem.sliceAsBytes(s16), if (enc == 4) c.utf.UTF16NATIVE else enc);
-            const s8 = c.utf16ToUtf8(s16, enc == 3) orelse return RC.NOMEM;
-            defer c.gpa.free(s8);
-            return c.api.bindText(v, idx(i), s8);
+            // Stored as given (SQLITE_LIMIT_LENGTH counts its bytes), then
+            // in the database encoding, as C's bindText() does.
+            return c.api.bindTextEnc(v, idx(i), std.mem.sliceAsBytes(s16), if (enc == 4) c.utf.UTF16NATIVE else enc);
         },
         else => {
             const s = c.cSlice(@ptrCast(p), n);
@@ -571,7 +572,9 @@ fn appendValue(out: *std.ArrayList(u8), m: *Mem) !void {
             if (m.enc != c.vi.ENC.UTF8) c.mem.shallowCopy(&utf8, m, .{ .Ephem = true });
             defer c.mem.releaseMalloc(&utf8);
             try out.append(a, '\'');
+            // "%.*q": the text ends at a NUL.
             for (c.api.valueText(if (m.enc != c.vi.ENC.UTF8) &utf8 else m) orelse "") |ch| {
+                if (ch == 0) break;
                 if (ch == '\'') try out.append(a, '\'');
                 try out.append(a, ch);
             }

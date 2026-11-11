@@ -36,7 +36,7 @@ pub fn opAutoCommit(e: *Exec, op: *Op) Error!Flow {
     const chain = op.p3 != 0;
     if (desired != db.auto_commit) {
         if (rollback) {
-            main_mod.rollbackAll(db, error.Abort);
+            main_mod.rollbackAll(db, error.AbortRollback);
             db.auto_commit = true;
         } else if (desired and db.n_vdbe_write > 0) {
             aux.vdbeError(v, "cannot commit transaction - SQL statements in progress", .{});
@@ -157,7 +157,7 @@ pub fn opSavepoint(e: *Exec, op: *Op) Error!Flow {
                 is_schema_change = db.m_db_flags.SchemaChange;
                 for (db.dbs.items) |d| {
                     const bt = d.bt orelse continue;
-                    try bt.tripAllCursors(error.Abort, !is_schema_change);
+                    try bt.tripAllCursors(error.AbortRollback, !is_schema_change);
                 }
             }
             for (db.dbs.items) |d| {

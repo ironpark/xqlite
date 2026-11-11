@@ -92,6 +92,8 @@ pub fn thunk(comptime Fn: type, comptime f: anytype) Fn {
     const k = comptime contextIndex(Fn);
     const P = erased.param_types;
     const R = erased.return_type.?;
+    // The calling convention of `Fn`: a C one for callbacks C calls.
+    const cc = erased.attrs.@"callconv";
     comptime {
         if (typed.param_types.len != P.len) @compileError("thunk: arity of " ++ @typeName(@TypeOf(f)) ++ " is not that of " ++ @typeName(Fn));
         for (P, typed.param_types, 0..) |pe, pt, i| {
@@ -108,19 +110,19 @@ pub fn thunk(comptime Fn: type, comptime f: anytype) Fn {
             }
             return @call(.always_inline, f, args);
         }
-        fn f1(a0: P[0].?) R {
+        fn f1(a0: P[0].?) callconv(cc) R {
             return call(.{a0});
         }
-        fn f2(a0: P[0].?, a1: P[1].?) R {
+        fn f2(a0: P[0].?, a1: P[1].?) callconv(cc) R {
             return call(.{ a0, a1 });
         }
-        fn f3(a0: P[0].?, a1: P[1].?, a2: P[2].?) R {
+        fn f3(a0: P[0].?, a1: P[1].?, a2: P[2].?) callconv(cc) R {
             return call(.{ a0, a1, a2 });
         }
-        fn f4(a0: P[0].?, a1: P[1].?, a2: P[2].?, a3: P[3].?) R {
+        fn f4(a0: P[0].?, a1: P[1].?, a2: P[2].?, a3: P[3].?) callconv(cc) R {
             return call(.{ a0, a1, a2, a3 });
         }
-        fn f5(a0: P[0].?, a1: P[1].?, a2: P[2].?, a3: P[3].?, a4: P[4].?) R {
+        fn f5(a0: P[0].?, a1: P[1].?, a2: P[2].?, a3: P[3].?, a4: P[4].?) callconv(cc) R {
             return call(.{ a0, a1, a2, a3, a4 });
         }
     };

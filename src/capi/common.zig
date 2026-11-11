@@ -216,6 +216,12 @@ pub fn ext(db: *Handle) *Ext {
     return @ptrCast(@alignCast(db.capi.?));
 }
 
+/// Whether sqlite3_close_v2() closed `db` while statements were left
+/// (eOpenState SQLITE_STATE_ZOMBIE).
+pub fn isZombie(db: *Handle) bool {
+    return if (extOf(db)) |e| e.zombie else false;
+}
+
 /// Note that a value of `db` (if any) is being converted to UTF-16.
 pub fn noteUtf16(db: ?*Handle) void {
     if (extOf(db)) |e| e.utf16 = true;
@@ -401,6 +407,7 @@ pub fn ensureInit() ?c_int {
     @import("vfs.zig").initDefault();
     @import("loadext.zig").initHook();
     @import("xqlite_storage").corrupt.hook = logCorrupt;
+    @import("xqlite_storage").random.hook = storageRandomness;
     // No mutexes for shared cache in single-thread mode (bCoreMutex).
     @import("xqlite_storage").btree.mutex_hooks = if (have_threads and state.core_mutex) shared_cache_mutexes else null;
     vfs.log_fn = logVfs;
@@ -426,6 +433,12 @@ pub fn shutdown() void {
 fn logVfs(code: i32, msg: [:0]const u8) void {
     const f = state.log.f orelse return;
     f(state.log.arg, code, msg.ptr);
+}
+
+/// The storage layer's random bytes come from the engine's PRNG
+/// (storage random.hook).
+fn storageRandomness(v: @import("xqlite_vfs").vfs.Vfs, buf: []u8) void {
+    @import("../sql/func/func.zig").randomnessFrom(v, buf);
 }
 
 /// Logs where the storage layer found the file corrupt through the

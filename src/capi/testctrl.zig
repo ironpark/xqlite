@@ -95,6 +95,7 @@ pub fn xq_test_control(op: c_int, a: *const Args) callconv(.c) c_int {
             tc.prng_seed = x;
             @import("../sql/func/func.zig").randomness(null, &.{});
         },
+        EXTRA_SCHEMA_CHECKS => tc.extra_schema_checks = a.i[0] != 0,
         FK_NO_ACTION => {
             const db = dbArg(a.p[0]) orelse return 0;
             db.flags.FkNoAction = a.i[0] != 0;
@@ -189,7 +190,7 @@ pub fn xq_test_control(op: c_int, a: *const Args) callconv(.c) c_int {
         // Accepted without effect: what a release build ignores
         // (JSON_SELFCHECK, VDBE_COVERAGE, PARSER_COVERAGE, TUNE), and the hooks the engine
         // has no counterpart for (BITVEC_TEST,
-        // BENIGN_MALLOC_HOOKS, SORTER_MMAP, EXTRA_SCHEMA_CHECKS).
+        // BENIGN_MALLOC_HOOKS, SORTER_MMAP).
         else => {},
     }
     return 0;

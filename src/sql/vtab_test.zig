@@ -674,7 +674,7 @@ const epo_module: vtab.Module = .{
 
 var destroyed_aux: usize = 0;
 
-fn destroyAux(p: ?*anyopaque) void {
+fn destroyAux(p: ?*anyopaque) callconv(.c) void {
     _ = p;
     destroyed_aux += 1;
 }

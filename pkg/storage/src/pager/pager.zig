@@ -51,6 +51,7 @@
 
 const std = @import("std");
 const corrupt = @import("../corrupt.zig").corrupt;
+const random = @import("../random.zig");
 const vfs = @import("xqlite_vfs").vfs;
 const pcache_mod = @import("pcache.zig");
 const journal = @import("journal.zig");
@@ -78,6 +79,9 @@ pub const Error = wal_mod.Error || error{
     /// longer be trusted (SQLITE_ABORT).
     Abort,
 };
+
+/// SQLITE_MAX_DEFAULT_PAGE_SIZE.
+pub const max_default_page_size: u32 = 8192;
 
 /// SQLITE_MAX_PAGE_COUNT.
 pub const max_page_count: Pgno = 0xfffffffe;
@@ -158,6 +162,9 @@ pub const Options = struct {
     temp_kind: vfs.FileKind = .temp_db,
     page_size: u32 = 4096,
     read_only: bool = false,
+    /// SQLITE_OPEN_NOFOLLOW: refuse a name that goes through a symbolic
+    /// link.
+    nofollow: bool = false,
     /// Create the database file if it does not exist.
     create: bool = true,
     journal_mode: JournalMode = .delete,
@@ -394,8 +401,15 @@ pub const Pager = struct {
         errdefer gpa.destroy(p);
 
         // The database is known by its full name (sqlite3OsFullPathname()).
-        const full = if (path_arg) |a| try v.fullPathname(gpa, a) else try gpa.dupe(u8, "");
+        var symlink = false;
+        const full = if (path_arg) |a| try v.fullPathname(gpa, a, &symlink) else try gpa.dupe(u8, "");
         defer gpa.free(full);
+        if (symlink and opts.nofollow) return error.CantOpen;
+        // The journal's name (the database's and "-journal") must fit the
+        // VFS, or no hot journal could be checked for before reading.
+        if (path_arg != null) if (v.maxPathname()) |mx| {
+            if (full.len + 8 > mx) return error.CantOpen;
+        };
         const names = try makeNames(gpa, full, if (path_arg != null) opts.uri_params else "");
         errdefer gpa.free(names.buf);
 
@@ -459,7 +473,13 @@ pub const Pager = struct {
         p.cache.setCacheSize(opts.cache_size);
         p.setFlags(.{ .level = opts.synchronous, .full_fsync = opts.full_fsync });
         p.setSectorSize();
-        try p.setPageSize(opts.page_size, null);
+        // The page size of a new file written read-write: at least the
+        // sector size, up to SQLITE_MAX_DEFAULT_PAGE_SIZE.
+        var page_size = opts.page_size;
+        if (has_file and !immutable and !p.read_only and page_size < p.sector_size) {
+            page_size = @min(p.sector_size, max_default_page_size);
+        }
+        try p.setPageSize(page_size, null);
         return p;
     }
 
@@ -1016,7 +1036,14 @@ pub const Pager = struct {
             try p.lockDb(.exclusive);
             if (p.jfd == null and p.journal_mode != .off and !p.temp_file) {
                 if (try p.vfs.access(p.journal_path, .exists)) {
-                    p.jfd = try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .sqlite_filename = true });
+                    const jfd = try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .sqlite_filename = true });
+                    // A journal that can only be read cannot be rolled
+                    // back, nor the database read without it.
+                    if (jfd.isReadOnly()) {
+                        jfd.close();
+                        return error.CantOpen;
+                    }
+                    p.jfd = jfd;
                 }
             }
             if (p.jfd != null) {
@@ -1759,7 +1786,7 @@ pub const Pager = struct {
         // to tell apart.
         if (p.journal_mode != .memory) {
             var rand: [4]u8 = undefined;
-            p.vfs.randomness(&rand);
+            random.fill(p.vfs, &rand);
             p.cksum_init = std.mem.readInt(u32, &rand, .little);
         }
         const final_nrec = p.no_sync or p.journal_mode == .memory or p.fd.deviceCharacteristics().safe_append;

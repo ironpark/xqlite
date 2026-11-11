@@ -395,9 +395,10 @@ pub export fn sqlite3_randomness(n: c_int, p: ?*anyopaque) callconv(.c) void {
 }
 
 pub export fn sqlite3_sleep(ms: c_int) callconv(.c) c_int {
-    if (c.ensureInit() != null) return 0;
-    const us: u32 = @intCast(@as(i64, @max(ms, 0)) * 1000);
-    return @intCast(@import("vfs.zig").defaultEngine().sleep(us) / 1000);
+    // The default VFS's xSleep; nothing without one (all unregistered).
+    const v = @import("vfs.zig").sqlite3_vfs_find(null) orelse return 0;
+    const f = v.xSleep orelse return 0;
+    return @divTrunc(f(v, @max(ms, 0) *% 1000), 1000);
 }
 
 pub export fn sqlite3_complete(sql: ?[*:0]const u8) callconv(.c) c_int {

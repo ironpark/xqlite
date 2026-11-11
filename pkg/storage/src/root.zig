@@ -23,6 +23,8 @@ pub const record = @import("record.zig");
 pub const varint = @import("varint.zig");
 /// Where corruption was found: `corrupt.hook`.
 pub const corrupt = @import("corrupt.zig");
+/// Where the pager and the WAL take random bytes: `random.hook`.
+pub const random = @import("random.zig");
 /// The b-tree fuzzers (`model`, `corrupt`).
 pub const btree_fuzz = @import("btree/btree_fuzz.zig");
 
@@ -33,7 +35,7 @@ pub const sqlite_version_number = 3054001;
 
 test {
     @import("std").testing.refAllDecls(@This());
-    inline for (.{ pager, pcache, journal, btree, record, varint, btree_fuzz, corrupt }) |file| {
+    inline for (.{ pager, pcache, journal, btree, record, varint, btree_fuzz, corrupt, random }) |file| {
         @import("std").testing.refAllDecls(file);
     }
 }

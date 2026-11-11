@@ -24,6 +24,7 @@ const OPEN_NOMUTEX = 0x8000;
 const OPEN_FULLMUTEX = 0x10000;
 const OPEN_SHAREDCACHE = 0x20000;
 const OPEN_PRIVATECACHE = 0x40000;
+const OPEN_NOFOLLOW = 0x01000000;
 const OPEN_EXRESCODE = 0x02000000;
 
 // ================================================================== open
@@ -43,6 +44,7 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
         .vfs_resolved = true,
         .shared_cache = flags & OPEN_SHAREDCACHE != 0,
         .private_cache = flags & OPEN_PRIVATECACHE != 0,
+        .nofollow = flags & OPEN_NOFOLLOW != 0,
     };
 
     // The URI parameters the C ABI reads itself: vfs= (the registry is
@@ -231,7 +233,10 @@ pub export fn sqlite3_extended_errcode(db: ?*Handle) callconv(.c) c_int {
 pub export fn sqlite3_errmsg(db: ?*Handle) callconv(.c) [*:0]const u8 {
     const lk = c.lock(db);
     defer lk.unlock();
-    return c.main.errmsg(db orelse return c.util.errStr(RC.NOMEM).ptr).ptr;
+    const d = db orelse return c.util.errStr(RC.NOMEM).ptr;
+    // sqlite3SafetyCheckSickOrOk(): a zombie has no message of its own.
+    if (c.isZombie(d)) return c.util.errStr(RC.MISUSE).ptr;
+    return c.main.errmsg(d).ptr;
 }
 
 pub export fn sqlite3_errmsg16(db_arg: ?*Handle) callconv(.c) ?*const anyopaque {
@@ -273,8 +278,8 @@ pub export fn sqlite3_set_errmsg(db_arg: ?*Handle, code: c_int, msg: ?[*:0]const
     return RC.OK;
 }
 
-pub export fn sqlite3_system_errno(_: ?*Handle) callconv(.c) c_int {
-    return 0;
+pub export fn sqlite3_system_errno(db: ?*Handle) callconv(.c) c_int {
+    return if (db) |d| d.sys_errno else 0;
 }
 
 // ================================================================== exec
@@ -619,7 +624,9 @@ pub export fn sqlite3_table_column_metadata(
             break :blk;
         }
         const col_name = c.span(z_column_name) orelse break :blk;
-        const i_col = build.columnIndex(tab, col_name);
+        var i_col = build.columnIndex(tab, col_name);
+        // "rowid" names the INTEGER PRIMARY KEY, if the table has one.
+        if (i_col < 0 and tab.hasRowid() and isRowidName(col_name)) i_col = tab.i_pkey;
         if (i_col >= 0) {
             const col = &tab.cols[@intCast(i_col)];
             data_type = build.columnType(col, "");

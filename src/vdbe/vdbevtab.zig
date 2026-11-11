@@ -180,9 +180,8 @@ fn bytecodevtabColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i_arg: i32) i32 {
                 const db = t.db;
                 const schema = db.dbs.items[i_db].schema;
                 c.z_schema = db.dbs.items[i_db].name;
-                var it = schema.tbl_hash.valueIterator();
-                while (it.next()) |tp| {
-                    const tab = tp.*;
+                var it = schema.tbl_order.iterator();
+                while (it.next()) |tab| {
                     if (!tab.isVirtual() and tab.tnum == root) {
                         c.z_name = tab.name;
                         c.z_type = "table";

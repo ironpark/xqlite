@@ -70,7 +70,7 @@ pub fn opNewRowid(e: *Exec, op: *Op) Error!Flow {
         var found = true;
         while (found and cnt < 100) : (cnt += 1) {
             var buf: [8]u8 = undefined;
-            e.db.vfs.?.vtable.randomness(e.db.vfs.?.ptr, &buf);
+            @import("../../sql/func/func.zig").randomness(e.db, &buf);
             rowid = @bitCast(std.mem.readInt(u64, &buf, .little) & @as(u64, @intCast(max_rowid >> 1)));
             rowid += 1;
             const order = try cur.tableMoveto(rowid, false);
@@ -220,7 +220,8 @@ pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
     // (sqlite3VdbeFindIndexKey()).
     if (order != .eq and try serial.findIndexKey(cur, op.p4.index, &r, false) != 0) {
         if (!e.db.flags.WriteSchema or e.db.flags.Defensive) {
-            aux.vdbeError(e.v, "index corruption", .{});
+            // sqlite3ReportError(): logged, no message of its own.
+            @import("xqlite_storage").corrupt.corrupt(@src()) catch {};
             return e.abort(RC.CORRUPT_INDEX);
         }
         c.cache_status = vi.cache_stale;

@@ -900,7 +900,7 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
                     _ = walker.walkExprList(w, list);
                     if (p.n_err == n_err) typing.noFunction(nc, e);
                     return WRC.Prune;
-                } else if (no_such_func != 0 and (!p.db.init.busy or (no_such_func == 2 and false))) {
+                } else if (no_such_func != 0 and (!p.db.init.busy or (no_such_func == 2 and p.db.init.alter))) {
                     // Unknown functions are tolerated while reading the
                     // schema.
                     errorAtExpr(p, e, "no such function: {s}", .{id});

@@ -545,6 +545,11 @@ fn chachaBlock(out: *[16]u32, in: *const [16]u32) void {
 /// pseudo-random bytes. The generator is seeded on first use from the
 /// connection's VFS (C uses the default VFS); an empty `buf` resets it.
 pub fn randomness(db: ?*const Sqlite3, buf: []u8) void {
+    randomnessFrom(if (db) |d| d.vfs else null, buf);
+}
+
+/// randomness() seeding the generator from `seed_vfs` (zeros without).
+pub fn randomnessFrom(seed_vfs: ?@import("xqlite_vfs").vfs.Vfs, buf: []u8) void {
     const prng = &@import("../global.zig").prng;
     while (prng.lock.swap(true, .acquire)) std.atomic.spinLoopHint();
     defer prng.lock.store(false, .release);
@@ -560,8 +565,8 @@ pub fn randomness(db: ?*const Sqlite3, buf: []u8) void {
             // sqlite3OsRandomness() with SQLITE_TESTCTRL_PRNG_SEED.
             @memset(seed, 0);
             @memcpy(seed[0..4], std.mem.asBytes(&fixed));
-        } else if (db != null and db.?.vfs != null) {
-            db.?.vfs.?.randomness(seed);
+        } else if (seed_vfs) |v| {
+            v.randomness(seed);
         } else {
             @memset(seed, 0);
         }
@@ -2600,7 +2605,7 @@ test "func: registration and lookup" {
     // SQLITE_ANY adds all three encodings, sharing one destructor.
     const destroyed = struct {
         var n: u32 = 0;
-        fn f(p: ?*anyopaque) void {
+        fn f(p: ?*anyopaque) callconv(.c) void {
             _ = p;
             n += 1;
         }

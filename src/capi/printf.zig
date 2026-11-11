@@ -28,6 +28,8 @@ const ARG_DOUBLE = 1;
 const ARG_STR = 2;
 /// %z: a string to sqlite3_free() once formatted.
 const ARG_STR_FREE = 3;
+/// %n: an int* for the count of characters so far.
+const ARG_COUNT = 4;
 
 /// The engine's arguments for `args`, in `buf` if they fit.
 fn toArgs(args: ?[*]const XqArg, n: c_int, buf: []Arg) ?[]Arg {
@@ -38,6 +40,7 @@ fn toArgs(args: ?[*]const XqArg, n: c_int, buf: []Arg) ?[]Arg {
         o.* = switch (a.kind) {
             ARG_DOUBLE => .{ .double = a.v.d },
             ARG_STR, ARG_STR_FREE => .{ .str = c.span(a.v.s) },
+            ARG_COUNT => if (a.v.p) |p| .{ .count = @ptrCast(@alignCast(p)) } else .{ .int = 0 },
             else => .{ .int = a.v.i },
         };
     }

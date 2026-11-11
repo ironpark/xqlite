@@ -161,12 +161,14 @@ fn codeErr(rc: c_int) Error {
         RC.IOERR_SHMMAP => error.ShmMap,
         RC.IOERR_SHMLOCK => error.ShmLock,
         RC.IOERR_NOMEM => error.OutOfMemory,
+        RC.IOERR_DELETE_NOENT => error.DeleteNoEnt,
         else => switch (rc & 0xff) {
             RC.BUSY, RC.LOCKED => error.Busy,
             RC.CANTOPEN => error.CantOpen,
             RC.FULL => error.DiskFull,
             RC.READONLY => error.ReadOnly,
             RC.NOMEM => error.OutOfMemory,
+            RC.CORRUPT => error.Corrupt,
             else => error.IoErr,
         },
     };
@@ -191,18 +193,14 @@ pub const Entry = struct {
 var unix_vfs: c.OsVfs = undefined;
 var unix_c: sqlite3_vfs = undefined;
 var unix_entry: Entry = undefined;
-/// "unix-excl" (not on WebAssembly): the default VFS with exclusive
-/// process locks (UnixVfs.excl).
-var unix_excl_vfs: c.OsVfs = undefined;
-var unix_excl_c: sqlite3_vfs = undefined;
-var unix_excl_entry: Entry = undefined;
-/// "unix-none": the default VFS without locks or shared memory
-/// (UnixVfs.none).
-var unix_none_vfs: c.OsVfs = undefined;
-var unix_none_c: sqlite3_vfs = undefined;
-var unix_none_entry: Entry = undefined;
 /// The default VFS is the POSIX one (unix.zig), not WebAssembly's.
 const is_unix = @hasField(c.OsVfs, "excl");
+/// The variants of the default VFS (not on WebAssembly): "unix-excl"
+/// takes exclusive process locks, the others lock in another style
+/// (UnixVfs.style). The `pAppData` of each sqlite3_vfs is its OsVfs.
+const Variant = struct { vfs: c.OsVfs, cvfs: sqlite3_vfs, entry: Entry };
+const variant_names = if (is_unix) [_][*:0]const u8{ "unix-excl", "unix-none", "unix-dotfile", "unix-flock" } else [_][*:0]const u8{};
+var variants: [variant_names.len]Variant = undefined;
 var memdb_c: sqlite3_vfs = undefined;
 var memdb_entry: Entry = undefined;
 /// The first VFS of the list is the default.
@@ -263,19 +261,21 @@ pub fn initDefault() void {
     };
     memdb_entry = .{ .cvfs = &memdb_c, .engine = memdb.interface() };
     unix_entry.next = &memdb_entry;
-    if (is_unix) {
-        unix_excl_vfs = c.OsVfs.init(c.gpa, c.io());
-        unix_excl_vfs.excl = true;
-        unix_excl_c = unix_c;
-        unix_excl_c.zName = "unix-excl";
-        unix_excl_entry = .{ .cvfs = &unix_excl_c, .engine = unix_excl_vfs.interface() };
-        memdb_entry.next = &unix_excl_entry;
-        unix_none_vfs = c.OsVfs.init(c.gpa, c.io());
-        unix_none_vfs.none = true;
-        unix_none_c = unix_c;
-        unix_none_c.zName = "unix-none";
-        unix_none_entry = .{ .cvfs = &unix_none_c, .engine = unix_none_vfs.interface() };
-        unix_excl_entry.next = &unix_none_entry;
+    var last = &memdb_entry;
+    inline for (variant_names, &variants, 0..) |name, *v, i| {
+        v.vfs = c.OsVfs.init(c.gpa, c.io());
+        switch (i) {
+            0 => v.vfs.excl = true,
+            1 => v.vfs.style = .none,
+            2 => v.vfs.style = .dotfile,
+            else => v.vfs.style = .flock,
+        }
+        v.cvfs = unix_c;
+        v.cvfs.zName = name;
+        v.cvfs.pAppData = &v.vfs;
+        v.entry = .{ .cvfs = &v.cvfs, .engine = v.vfs.interface() };
+        last.next = &v.entry;
+        last = &v.entry;
     }
     relink();
     @import("../sql/global.zig").find_vfs = findEngine;
@@ -288,8 +288,9 @@ pub fn cVfsOf(v: Vfs) ?*sqlite3_vfs {
     c.state.lock.lock();
     defer c.state.lock.unlock();
     if (v.vtable == unix_entry.engine.vtable and v.ptr == unix_entry.engine.ptr) return &unix_c;
-    if (is_unix and v.vtable == unix_excl_entry.engine.vtable and v.ptr == unix_excl_entry.engine.ptr) return &unix_excl_c;
-    if (is_unix and v.vtable == unix_none_entry.engine.vtable and v.ptr == unix_none_entry.engine.ptr) return &unix_none_c;
+    for (&variants) |*x| {
+        if (v.vtable == x.entry.engine.vtable and v.ptr == x.entry.engine.ptr) return &x.cvfs;
+    }
     if (memdb.isMemdb(v)) return &memdb_c;
     var all = all_entries;
     while (all) |x| : (all = x.all_next) {
@@ -345,8 +346,9 @@ pub export fn sqlite3_vfs_register(p: ?*sqlite3_vfs, make_dflt: c_int) callconv(
     }
     if (v == &unix_c) found = &unix_entry;
     if (v == &memdb_c) found = &memdb_entry;
-    if (is_unix and v == &unix_excl_c) found = &unix_excl_entry;
-    if (is_unix and v == &unix_none_c) found = &unix_none_entry;
+    for (&variants) |*x| {
+        if (v == &x.cvfs) found = &x.entry;
+    }
     const e = found orelse blk: {
         const a = c.gpa.create(CVfsEntry) catch return RC.NOMEM;
         a.* = .{ .entry = .{ .cvfs = v, .engine = .{ .ptr = undefined, .vtable = &c_vfs_vtable } }, .all_next = all_entries };
@@ -423,7 +425,7 @@ const ZigFile = extern struct {
 
 fn zOpen(v: *sqlite3_vfs, z_name: ?[*:0]const u8, p: *sqlite3_file, flags: c_int, out_flags: ?*c_int) callconv(.c) c_int {
     p.pMethods = null;
-    const os_vfs = if (is_unix and v == &unix_excl_c) &unix_excl_vfs else if (is_unix and v == &unix_none_c) &unix_none_vfs else &unix_vfs;
+    const os_vfs: *c.OsVfs = if (v.pAppData) |a| @ptrCast(@alignCast(a)) else &unix_vfs;
     const f = os_vfs.interface().open(c.span(z_name), fromCFlags(flags)) catch |err| return errCode(err);
     const z = ZigFile.of(p);
     z.ptr = f.ptr;
@@ -459,11 +461,12 @@ fn zFullPathname(_: *sqlite3_vfs, z_name: ?[*:0]const u8, n_out: c_int, z_out: [
     const name = c.span(z_name) orelse "";
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const vt = unix_vfs.interface();
-    const full = if (vt.vtable.fullPathname) |fp| fp(vt.ptr, name, &buf) catch |err| return errCode(err) else name;
+    var symlink = false;
+    const full = if (vt.vtable.fullPathname) |fp| fp(vt.ptr, name, &buf, &symlink) catch |err| return errCode(err) else name;
     if (full.len + 1 > out.len) return RC.CANTOPEN;
     @memcpy(out[0..full.len], full);
     out[full.len] = 0;
-    return RC.OK;
+    return if (symlink) RC.OK_SYMLINK else RC.OK;
 }
 
 // The dynamic loader (unixDlOpen() ...: dlopen(), none on WebAssembly)
@@ -507,7 +510,7 @@ fn zCurrentTimeInt64(_: *sqlite3_vfs, out: *i64) callconv(.c) c_int {
 }
 
 fn zGetLastError(_: *sqlite3_vfs, _: c_int, _: ?[*]u8) callconv(.c) c_int {
-    return 0;
+    return unix_vfs.interface().lastError();
 }
 
 /// The system calls of the default VFS (os_unix.c's aSyscall[],
@@ -828,6 +831,8 @@ const c_vfs_vtable: Vfs.VTable = .{
     .randomness = cRandomness,
     .sleep = cSleep,
     .fullPathname = cFullPathname,
+    .maxPathname = cMaxPathname,
+    .lastError = cLastError,
 };
 
 fn cvfsOf(ptr: *anyopaque) *sqlite3_vfs {
@@ -911,7 +916,6 @@ fn cDelete(ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void {
     const S = struct {
         fn f(z: [*:0]const u8, vv: *sqlite3_vfs, s: bool) Error!void {
             const rc = (vv.xDelete orelse return error.IoErr)(vv, z, @intFromBool(s));
-            if (rc == RC.IOERR_DELETE_NOENT) return;
             try check(rc);
         }
     };
@@ -948,17 +952,30 @@ fn cSleep(ptr: *anyopaque, us: u32) u32 {
     return @intCast(@max(f(v, @intCast(@min(us, std.math.maxInt(c_int)))), 0));
 }
 
-fn cFullPathname(ptr: *anyopaque, path: []const u8, out: []u8) Error![]u8 {
+fn cLastError(ptr: *anyopaque) i32 {
+    const v = cvfsOf(ptr);
+    const f = v.xGetLastError orelse return 0;
+    return f(v, 0, null);
+}
+
+fn cMaxPathname(ptr: *anyopaque) usize {
+    return @intCast(@max(cvfsOf(ptr).mxPathname, 0));
+}
+
+fn cFullPathname(ptr: *anyopaque, path: []const u8, out: []u8, symlink: *bool) Error![]u8 {
     const v = cvfsOf(ptr);
     const S = struct {
-        fn f(z: [*:0]const u8, vv: *sqlite3_vfs, o: []u8) Error![]u8 {
+        fn f(z: [*:0]const u8, vv: *sqlite3_vfs, o: []u8, link: *bool) Error![]u8 {
             const fp = vv.xFullPathname orelse return o[0..0];
             const n: c_int = @intCast(@min(o.len, @as(usize, @intCast(@max(vv.mxPathname, 1))) + 1));
-            try check(fp(vv, z, n, o.ptr));
+            const rc = fp(vv, z, n, o.ptr);
+            if (rc == RC.OK_SYMLINK) {
+                link.* = true;
+            } else try check(rc);
             return std.mem.sliceTo(o[0..@intCast(n)], 0);
         }
     };
-    const r = try withZ(path, S.f, .{ v, out });
+    const r = try withZ(path, S.f, .{ v, out, symlink });
     if (r.len == 0) {
         if (path.len > out.len) return error.CantOpen;
         @memcpy(out[0..path.len], path);
@@ -981,6 +998,9 @@ const c_file_vtable: File.VTable = .{
     .deviceCharacteristics = cfDeviceCharacteristics,
     .isReadOnly = cfIsReadOnly,
     .fileControl = cfFileControl,
+    // PRAGMA mmap_size asks any file (SQLITE_FCNTL_MMAP_SIZE); the pager
+    // uses maps only with xFetch (File.hasFetch()).
+    .mmapSize = cfMmapSize,
 };
 
 const c_file_vtable_shm: File.VTable = blk: {
@@ -992,13 +1012,11 @@ const c_file_vtable_shm: File.VTable = blk: {
     break :blk t;
 };
 
-/// A file of an iVersion 3 C VFS: memory maps too (xFetch, xUnfetch,
-/// SQLITE_FCNTL_MMAP_SIZE).
+/// A file of an iVersion 3 C VFS: memory maps too (xFetch, xUnfetch).
 const c_file_vtable_fetch: File.VTable = blk: {
     var t = c_file_vtable_shm;
     t.fetch = cfFetch;
     t.unfetch = cfUnfetch;
-    t.mmapSize = cfMmapSize;
     break :blk t;
 };
 

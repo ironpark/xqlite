@@ -344,6 +344,13 @@ pub const Error = error{
     /// A shared-memory lock was used without shared memory
     /// (SQLITE_IOERR_SHMLOCK).
     ShmLock,
+    /// The file to delete does not exist (SQLITE_IOERR_DELETE_NOENT):
+    /// an error only where the caller expects the file, as the pager
+    /// deleting a journal it wrote.
+    DeleteNoEnt,
+    /// The file is not what the caller says it is (SQLITE_CORRUPT), as
+    /// memdb asked to grow by a truncate (a corrupt WAL database).
+    Corrupt,
     OutOfMemory,
 };
 
@@ -599,8 +606,15 @@ pub const Vfs = struct {
         sleep: *const fn (ptr: *anyopaque, microseconds: u32) u32,
         /// Writes the canonical, absolute name of `path` into `out` and
         /// returns it (xFullPathname). Null for a backend whose names are
-        /// already canonical: the name is used as given.
-        fullPathname: ?*const fn (ptr: *anyopaque, path: []const u8, out: []u8) Error![]u8 = null,
+        /// already canonical: the name is used as given. Sets `symlink`
+        /// if a symbolic link was resolved (SQLITE_OK_SYMLINK).
+        fullPathname: ?*const fn (ptr: *anyopaque, path: []const u8, out: []u8, symlink: *bool) Error![]u8 = null,
+        /// The longest name the backend takes (mxPathname). Null for no
+        /// limit of its own.
+        maxPathname: ?*const fn (ptr: *anyopaque) usize = null,
+        /// The OS error code of the last failure (xGetLastError: errno).
+        /// Null for none.
+        lastError: ?*const fn (ptr: *anyopaque) i32 = null,
     };
 
     /// Opens `path`. A null path asks for an anonymous temporary file; the
@@ -620,7 +634,7 @@ pub const Vfs = struct {
         return v.vtable.open(v.ptr, path, fl);
     }
 
-    /// Deletes `path`. Deleting a file that does not exist is not an error.
+    /// Deletes `path`; error.DeleteNoEnt if it does not exist.
     /// With `sync_dir`, the containing directory is synced afterwards so the
     /// deletion survives a power loss.
     pub fn delete(v: Vfs, path: []const u8, sync_dir: bool) Error!void {
@@ -641,14 +655,29 @@ pub const Vfs = struct {
         return v.vtable.sleep(v.ptr, microseconds);
     }
 
+    /// Port of sqlite3OsGetLastError(): 0 if the backend tells none.
+    pub fn lastError(v: Vfs) i32 {
+        const f = v.vtable.lastError orelse return 0;
+        return f(v.ptr);
+    }
+
+    /// mxPathname, null if the backend sets none.
+    pub fn maxPathname(v: Vfs) ?usize {
+        const f = v.vtable.maxPathname orelse return null;
+        return f(v.ptr);
+    }
+
     /// Port of sqlite3OsFullPathname(): the canonical name of `path`,
     /// allocated with `gpa`. The pager names a database by it, and its
     /// journal and WAL after it, as SQLite does: a super-journal records
     /// the journals by these names.
-    pub fn fullPathname(v: Vfs, gpa: std.mem.Allocator, path: []const u8) Error![]u8 {
+    pub fn fullPathname(v: Vfs, gpa: std.mem.Allocator, path: []const u8, symlink: ?*bool) Error![]u8 {
         const f = v.vtable.fullPathname orelse return gpa.dupe(u8, path);
         var buf: [max_path_bytes]u8 = undefined;
-        return gpa.dupe(u8, try f(v.ptr, path, &buf));
+        var link = false;
+        const full = try gpa.dupe(u8, try f(v.ptr, path, &buf, &link));
+        if (symlink) |out| out.* = link;
+        return full;
     }
 };
 

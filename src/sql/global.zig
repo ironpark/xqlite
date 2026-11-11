@@ -56,6 +56,10 @@ pub const TestCtrl = struct {
     saved_s: [16]u32 = @splat(0),
     saved_out: [64]u8 = @splat(0),
     saved_n: u8 = 0,
+    /// SQLITE_TESTCTRL_EXTRA_SCHEMA_CHECKS (bExtraSchemaChecks): check the
+    /// names and root pages of the rows of sqlite_schema. Always on
+    /// outside tests.
+    extra_schema_checks: bool = true,
 };
 /// sqlite3_enable_shared_cache() (sqlite3GlobalConfig.sharedCacheEnabled):
 /// connections opened from now on share their cache unless asked not to

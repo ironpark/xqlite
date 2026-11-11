@@ -100,6 +100,8 @@ fn createFunction(
         (x_func == null and x_final == null and x_step != null) or
         ((x_value == null) != (x_inverse == null)))
     {
+        // As in SQLite, the destructor runs even then.
+        if (x_destroy) |d| d(p_app);
         return RC.MISUSE;
     }
     const deleting = x_func == null and x_step == null;
@@ -172,9 +174,11 @@ pub export fn sqlite3_aggregate_context(ctx: ?*Context, n: c_int) callconv(.c) ?
     return b.ptr;
 }
 
-pub export fn sqlite3_aggregate_count(_: ?*Context) callconv(.c) c_int {
-    // Deprecated; no count is kept.
-    return 0;
+/// Deprecated: the number of rows the aggregate stepped over (the
+/// accumulator's Mem.n, which OP_AggStep counts).
+pub export fn sqlite3_aggregate_count(ctx: ?*Context) callconv(.c) c_int {
+    const m = (ctx orelse return 0).mem orelse return 0;
+    return m.n;
 }
 
 /// Auxiliary data with a C destructor, which the engine's destructor
@@ -225,7 +229,7 @@ pub fn pointerDestructor(p: ?*anyopaque, del: ?*const anyopaque) ?c.int.Destruct
     return runPointerDestructor;
 }
 
-fn runPointerDestructor(p: ?*anyopaque) void {
+fn runPointerDestructor(p: ?*anyopaque) callconv(.c) void {
     const f = blk: {
         c.state.ptr_lock.lock();
         defer c.state.ptr_lock.unlock();
@@ -365,8 +369,10 @@ fn resultText(ctx_arg: ?*Context, z: ?*const anyopaque, n: i64, del_arg: ?*const
         },
         else => {
             const s = c.cSlice(@ptrCast(p), n);
+            // The result keeps the text and calls the application's
+            // destructor when it is done with it, as in SQLite.
+            if (del.call_after) |f| return c.api.resultText64(ctx, s, .{ .func = f });
             c.api.resultText64(ctx, s, del.engine);
-            del.after(p);
         },
     }
 }

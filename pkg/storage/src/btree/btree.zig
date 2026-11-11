@@ -70,6 +70,10 @@ pub const Error = pager_mod.Error || error{
     /// Another connection of the shared cache holds a conflicting lock
     /// (SQLITE_LOCKED_SHAREDCACHE).
     LockedSharedCache,
+    /// The cursor's transaction, or the savepoint it was opened in, was
+    /// rolled back (SQLITE_ABORT_ROLLBACK): the code its cursors are
+    /// tripped with.
+    AbortRollback,
 };
 
 /// Errors a key comparison may report.
@@ -149,6 +153,8 @@ pub const Options = struct {
     /// Page size for a new database. Existing files use their own.
     page_size: u32 = header.default_page_size,
     read_only: bool = false,
+    /// Pager.Options.nofollow.
+    nofollow: bool = false,
     create: bool = true,
     journal_mode: pager_mod.JournalMode = .delete,
     synchronous: pager_mod.Synchronous = .full,
@@ -167,6 +173,8 @@ pub const Options = struct {
     /// a database of a connection; see Btree.n_vdbe_read. Null for a
     /// b-tree used on its own.
     n_vdbe_read: ?*const i32 = null,
+    /// The connection's flags the b-tree reads (C: pBt->db->flags).
+    db_flags: ?DbFlagsFn = null,
     /// The connection's autovacuum-pages callback (see AutovacPages).
     autovac_pages: ?AutovacPages = null,
     /// The URI parameters of the database, for the VFS (Pager.Options).
@@ -181,6 +189,21 @@ pub const Options = struct {
     /// Opened with a URI (SQLITE_OPEN_URI), for the VFS.
     uri: bool = false,
 };
+
+/// What the b-tree reads of the flags of the connection using it (C:
+/// pBt->db->flags).
+pub const DbFlags = struct {
+    /// SQLITE_DBCONFIG_RESET_DATABASE: a transaction that reads page 1
+    /// takes the file for an empty database, and a header that makes it
+    /// read-only does not stop writing it.
+    reset_database: bool = false,
+    /// sqlite3WritableSchema(): a size in the header past the end of the
+    /// file is that of the file, not corruption.
+    writable_schema: bool = false,
+};
+
+/// Reads the DbFlags of the connection as a transaction begins.
+pub const DbFlagsFn = thunk.Closure(*const fn (ctx: *const anyopaque) DbFlags);
 
 /// How many of its `n_free` free pages a full auto-vacuum commit of `bt`
 /// gives back (xAutovacPages, sqlite3_autovacuum_pages()): null for all
@@ -264,6 +287,8 @@ pub const Btree = struct {
     /// bs.pager, for callers.
     pager: *Pager,
     in_trans: TransState = .none,
+    /// The flags of the connection (Options.db_flags).
+    db_flags: ?DbFlagsFn = null,
     /// Opened with Options.shared_key (sharable).
     sharable: bool = false,
     /// The connection's count of reading statements (p->db->nVdbeRead),
@@ -301,6 +326,7 @@ pub const Btree = struct {
             .bs = undefined,
             .pager = undefined,
             .n_vdbe_read = opts.n_vdbe_read,
+            .db_flags = opts.db_flags,
             .busy_handler = opts.busy_handler,
             .autovac_pages = opts.autovac_pages,
         };
@@ -310,7 +336,7 @@ pub const Btree = struct {
         var found: ?*BtShared = null;
         if (opts.shared_key) |name| {
             p.sharable = true;
-            key = if (opts.memory) try gpa.dupe(u8, name) else try v.fullPathname(gpa, name);
+            key = if (opts.memory) try gpa.dupe(u8, name) else try v.fullPathname(gpa, name, null);
             // STATIC_OPEN keeps two handles opening the same database at
             // once from making a BtShared each (ticket #3537).
             staticMutex(true, true);
@@ -616,6 +642,8 @@ pub const Btree = struct {
             if (wrflag) try bs.pager.openSavepoint(n_savepoint);
             return;
         }
+        const db_flags: DbFlags = if (p.db_flags) |f| f.call(.{}) else .{};
+        if (db_flags.reset_database and !bs.pager.isReadOnly()) bs.read_only = false;
         if (bs.read_only and wrflag) return error.ReadOnly;
 
         // Another handle writes, or waits to: no other may begin writing,
@@ -634,7 +662,7 @@ pub const Btree = struct {
 
         bs.initially_empty = bs.n_page == 0;
         while (true) {
-            bs.tryBegin(mode) catch |err_arg| {
+            bs.tryBegin(mode, db_flags) catch |err_arg| {
                 var err = err_arg;
                 // A stale WAL snapshot outside a transaction is plain
                 // contention: a new read transaction gets a fresh one.
@@ -1039,6 +1067,7 @@ pub const BtShared = struct {
             .temp_kind = opts.temp_kind,
             .page_size = opts.page_size,
             .read_only = opts.read_only,
+            .nofollow = opts.nofollow,
             .create = opts.create,
             .journal_mode = opts.journal_mode,
             .synchronous = opts.synchronous,
@@ -1061,8 +1090,10 @@ pub const BtShared = struct {
             .read_only = p.isReadOnly(),
             .secure_delete = opts.secure_delete,
             .cell_size_check = opts.cell_size_check,
-            .page_size = opts.page_size,
-            .usable_size = opts.page_size,
+            // The pager's default: Options.page_size, or more for a
+            // device with larger sectors.
+            .page_size = p.page_size,
+            .usable_size = p.page_size,
             .auto_vacuum = opts.auto_vacuum,
             .single = opts.single,
             .autovac_pages = opts.autovac_pages,
@@ -1232,7 +1263,7 @@ pub const BtShared = struct {
     /// Port of lockBtree(): take a read lock and load page 1. Leaves
     /// `page1` null after adopting a page size read from the file; the
     /// caller retries.
-    fn lockBtree(bt: *BtShared) Error!void {
+    fn lockBtree(bt: *BtShared, db_flags: DbFlags) Error!void {
         std.debug.assert(bt.page1 == null);
         try bt.pager.sharedLock();
         const p1 = try bt.getPage(1, .{});
@@ -1246,6 +1277,7 @@ pub const BtShared = struct {
         // The in-header size is only trustworthy if a 3.7.0+ writer kept
         // the version-valid-for field in sync.
         if (n_page == 0 or header.get(data, .file_change_counter) != header.get(data, .version_valid_for)) n_page = n_page_file;
+        if (db_flags.reset_database) n_page = 0;
         if (n_page > 0) {
             const h = try header.Header.parse(data[0..header.size]);
             // Unknown write versions make the file read-only; parse()
@@ -1269,7 +1301,10 @@ pub const BtShared = struct {
                 try bt.pager.setPageSize(h.page_size, h.reserved_space);
                 return;
             }
-            if (n_page > n_page_file) return corrupt(@src());
+            if (n_page > n_page_file) {
+                if (!db_flags.writable_schema) return corrupt(@src());
+                n_page = n_page_file;
+            }
             bt.page_size_fixed = true;
             bt.usable_size = h.usableSize();
             bt.auto_vacuum = .fromHeader(h.largest_root_page, h.incremental_vacuum);
@@ -1331,9 +1366,9 @@ pub const BtShared = struct {
 
     // ======================================================= transactions
 
-    fn tryBegin(bt: *BtShared, mode: TransMode) Error!void {
+    fn tryBegin(bt: *BtShared, mode: TransMode, db_flags: DbFlags) Error!void {
         errdefer bt.unlockIfUnused();
-        while (bt.page1 == null) try bt.lockBtree();
+        while (bt.page1 == null) try bt.lockBtree(db_flags);
         if (mode != .read) {
             if (bt.read_only) return error.ReadOnly;
             try bt.pager.begin(mode == .exclusive);

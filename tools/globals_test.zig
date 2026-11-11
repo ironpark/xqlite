@@ -42,6 +42,9 @@ const allowed = [_]struct { []const u8, []const u8 }{
     // to sqlite3_log()), and sqlite3GlobalConfig.neverCorrupt.
     .{ "pkg/storage/src/corrupt.zig", "hook" },
     .{ "pkg/storage/src/corrupt.zig", "never_corrupt" },
+    // Where the pager and the WAL take random bytes: the engine's PRNG
+    // (sqlite3_randomness()), which the C ABI sets.
+    .{ "pkg/storage/src/random.zig", "hook" },
     // How load_extension() loads a library, which the C ABI sets.
     .{ "src/sql/global.zig", "load_extension" },
     // The POSIX lock table, which every connection has to share.
@@ -55,12 +58,7 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/capi/vfs.zig", "unix_vfs" },
     .{ "src/capi/vfs.zig", "unix_c" },
     .{ "src/capi/vfs.zig", "unix_entry" },
-    .{ "src/capi/vfs.zig", "unix_excl_vfs" },
-    .{ "src/capi/vfs.zig", "unix_excl_c" },
-    .{ "src/capi/vfs.zig", "unix_excl_entry" },
-    .{ "src/capi/vfs.zig", "unix_none_vfs" },
-    .{ "src/capi/vfs.zig", "unix_none_c" },
-    .{ "src/capi/vfs.zig", "unix_none_entry" },
+    .{ "src/capi/vfs.zig", "variants" },
     .{ "src/capi/vfs.zig", "memdb_c" },
     .{ "src/capi/vfs.zig", "memdb_entry" },
     .{ "src/capi/vfs.zig", "head" },

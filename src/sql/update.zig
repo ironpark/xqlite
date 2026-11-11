@@ -762,7 +762,11 @@ const OP = vi.OP;
 pub fn valueFromExpr(v: *vi.Vdbe, e_arg: ?*const Expr, aff: u8) mem.Error!?*Mem {
     const e = e_arg orelse return null;
     const m = (try valueFromExprImpl(v, e, aff)) orelse return null;
-    if (aff == Aff.real and m.flags.intersects(.{ .Int = true, .IntReal = true })) {
+    // Only an integer too big for 6 bytes becomes a real here: OP_Column
+    // reads a default into an index key without OP_RealAffinity, and
+    // smaller ones are stored as integers then, as a REAL column stores
+    // them.
+    if (aff == Aff.real and m.flags.Int and (m.u.i < -140737488355328 or m.u.i > 140737488355327)) {
         mem.realify(m);
     }
     return m;

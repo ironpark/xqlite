@@ -1105,8 +1105,10 @@ pub fn setColName(v: *Vdbe, idx: usize, var_: usize, name: [:0]const u8) void {
         &v.col_names[idx + var_ * v.n_res_alloc]
     else
         &v.col_meta[idx + (var_ - vi.COLNAME_N) * v.n_res_alloc];
-    mem.setTextZ(m, name, .transient) catch {
-        v.db.oomFault();
+    mem.setTextZ(m, name, .transient) catch |err| switch (err) {
+        // Reported to the statement being compiled.
+        error.TooBig => {},
+        else => v.db.oomFault(),
     };
 }
 
@@ -1405,7 +1407,7 @@ pub fn halt(v: *Vdbe) error{Busy}!void {
                 if ((mrc == RC.NOMEM or mrc == RC.FULL) and v.uses_stmt_journal) {
                     e_statement_op = .ROLLBACK;
                 } else {
-                    main_mod.rollbackAll(db, error.Abort);
+                    main_mod.rollbackAll(db, error.AbortRollback);
                     main_mod.closeSavepoints(db);
                     db.auto_commit = true;
                     v.n_change = 0;
@@ -1459,7 +1461,7 @@ pub fn halt(v: *Vdbe) error{Busy}!void {
             } else if (v.error_action == OE.Abort) {
                 e_statement_op = .ROLLBACK;
             } else {
-                main_mod.rollbackAll(db, error.Abort);
+                main_mod.rollbackAll(db, error.AbortRollback);
                 main_mod.closeSavepoints(db);
                 db.auto_commit = true;
                 v.n_change = 0;
@@ -1473,7 +1475,7 @@ pub fn halt(v: *Vdbe) error{Busy}!void {
                     v.rc = rc;
                     setErrMsg(v, null);
                 }
-                main_mod.rollbackAll(db, error.Abort);
+                main_mod.rollbackAll(db, error.AbortRollback);
                 main_mod.closeSavepoints(db);
                 db.auto_commit = true;
                 v.n_change = 0;

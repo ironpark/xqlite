@@ -31,7 +31,7 @@ pub fn btreeLeaveAll(db: *Sqlite3) void {
 
 /// Port of sqlite3RollbackAll(): roll back every open transaction.
 /// Cursors are tripped with `trip` unless it is null (C: tripCode
-/// SQLITE_OK); the callers trip with error.Abort (SQLITE_ABORT_ROLLBACK).
+/// SQLITE_OK); the callers trip with error.AbortRollback.
 pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
     btreeEnterAll(db);
     const schema_change = db.m_db_flags.SchemaChange and !db.init.busy;
@@ -107,6 +107,7 @@ pub fn setErrorMessage(db: *Sqlite3, msg: ?[:0]const u8) void {
 /// Port of sqlite3Error(): set the error code; the message is cleared.
 pub fn setError(db: *Sqlite3, code: i32) void {
     db.err_code = code;
+    systemError(db, code);
     db.err_state = null;
     if (db.err) |e| mem.setNull(e);
     db.err_byte_offset = -1;
@@ -115,9 +116,19 @@ pub fn setError(db: *Sqlite3, code: i32) void {
 /// Port of sqlite3ErrorWithMsg().
 pub fn errorWithMsg(db: *Sqlite3, code: i32, comptime fmt: []const u8, args: anytype) void {
     db.err_code = code;
+    systemError(db, code);
     const msg = std.fmt.allocPrintSentinel(db.gpa, fmt, args, 0) catch return;
     defer db.gpa.free(msg);
     setErrorMessage(db, msg);
+}
+
+/// Port of sqlite3SystemError(): keep the OS's error of a CANTOPEN or
+/// IOERR.
+pub fn systemError(db: *Sqlite3, rc: i32) void {
+    if (rc == RC.IOERR_NOMEM) return;
+    if (rc & 0xff == RC.CANTOPEN or rc & 0xff == RC.IOERR) {
+        if (db.vfs) |v| db.sys_errno = v.lastError();
+    }
 }
 
 /// Port of sqlite3ErrorClear().
@@ -131,7 +142,7 @@ pub fn errorClear(db: *Sqlite3) void {
 /// Port of sqlite3ApiExit(): the result of an API call, as seen by the
 /// application. Running out of memory is reported (and cleared) here.
 pub fn apiExit(db: *Sqlite3, rc: i32) i32 {
-    if (db.malloc_failed or rc == RC.NOMEM) {
+    if (db.malloc_failed or rc == RC.IOERR_NOMEM) {
         malloc.oomClear(db);
         setError(db, RC.NOMEM);
         return RC.NOMEM;
@@ -187,6 +198,9 @@ pub const OpenFlags = struct {
     /// global.shared_cache_enabled.
     shared_cache: bool = false,
     private_cache: bool = false,
+    /// SQLITE_OPEN_NOFOLLOW: a database name may not go through a
+    /// symbolic link (here and in ATTACH).
+    nofollow: bool = false,
 };
 
 /// Port of openDatabase() (sqlite3_open_v2()): open a connection to the
@@ -241,8 +255,10 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
         .memory = is_memdb,
         .mmap_size = db.sz_mmap,
         .read_only = of.read_only,
+        .nofollow = of.nofollow,
         .create = of.create and !of.read_only,
         .n_vdbe_read = &db.n_vdbe_read,
+        .db_flags = btreeDbFlags(db),
         .autovac_pages = btreeAutovacPages(db),
         .busy_handler = btreeBusyHandler(db),
         .uri_params = parsed.params(),
@@ -565,6 +581,18 @@ pub fn sharedKey(flags: OpenFlags, is_memdb: bool, name: []const u8) ?[]const u8
     if (!flags.shared_cache or flags.private_cache) return null;
     if (name.len == 0 or (is_memdb and !flags.uri)) return null;
     return name;
+}
+
+/// What the b-trees of the connection read of its flags.
+pub fn btreeDbFlags(db: *Sqlite3) btree.DbFlagsFn {
+    return .init(db, dbFlagsOfBtree);
+}
+
+fn dbFlagsOfBtree(db: *const Sqlite3) btree.DbFlags {
+    return .{
+        .reset_database = db.flags.ResetDatabase,
+        .writable_schema = @import("build.zig").writableSchema(db),
+    };
 }
 
 /// The autovacuum-pages callback of the b-trees of the connection.

@@ -101,14 +101,14 @@ pub const CrashVfs = struct {
         return self.inner.sleep(microseconds);
     }
 
-    pub fn fullPathname(self: *CrashVfs, path: []const u8, out: []u8) Error![]u8 {
+    pub fn fullPathname(self: *CrashVfs, path: []const u8, out: []u8, symlink: *bool) Error![]u8 {
         const inner = self.inner;
         const f = inner.vtable.fullPathname orelse {
             if (path.len > out.len) return error.CantOpen;
             @memcpy(out[0..path.len], path);
             return out[0..path.len];
         };
-        return f(inner.ptr, path, out);
+        return f(inner.ptr, path, out, symlink);
     }
 };
 

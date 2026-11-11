@@ -282,7 +282,8 @@ pub fn Memdb(comptime heap: type) type {
             const p = f.store;
             p.enter();
             defer p.leave();
-            if (@as(i64, @intCast(size)) > p.sz) return error.IoErr;
+            // Only a corrupt WAL database asks for this (memdbTruncate()).
+            if (@as(i64, @intCast(size)) > p.sz) return error.Corrupt;
             p.sz = @intCast(size);
         }
 

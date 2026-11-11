@@ -1498,7 +1498,9 @@ pub const FuncDestructor = struct {
 /// sqlite3_result_text() and the like, of sqlite3_set_auxdata() and
 /// sqlite3_result_pointer(), and the xDestroy of
 /// sqlite3_create_function_v2() and sqlite3_create_module_v2().
-pub const DestructorFn = *const fn (?*anyopaque) void;
+/// C's calling convention, so that the destructor an application passes
+/// (sqlite3_result_text()) is kept as it is.
+pub const DestructorFn = *const fn (?*anyopaque) callconv(.c) void;
 
 /// What an error is, beyond its result code, for clients that tell SQL
 /// errors apart by code (the wire protocols, ORMs): its SQLSTATE, in
@@ -1728,6 +1730,8 @@ pub const RC = struct {
     pub const CONSTRAINT_FUNCTION: i32 = CONSTRAINT | (4 << 8);
     pub const CONSTRAINT_VTAB: i32 = CONSTRAINT | (9 << 8);
     pub const CONSTRAINT_PINNED: i32 = CONSTRAINT | (11 << 8);
+    /// xFullPathname resolved a symbolic link (internal, as in C).
+    pub const OK_SYMLINK: i32 = OK | (2 << 8);
 };
 
 /// The errors of the SQL and VDBE layers. Those of the storage layers
@@ -1781,6 +1785,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.Internal, RC.INTERNAL },
     .{ error.Perm, RC.PERM },
     .{ error.Abort, RC.ABORT },
+    .{ error.AbortRollback, RC.ABORT_ROLLBACK },
     .{ error.Busy, RC.BUSY },
     .{ error.BusyRecovery, RC.BUSY_RECOVERY },
     .{ error.BusySnapshot, RC.BUSY_SNAPSHOT },
@@ -1800,6 +1805,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.ShmSize, RC.IOERR_SHMSIZE },
     .{ error.ShmLock, RC.IOERR_SHMLOCK },
     .{ error.ShmMap, RC.IOERR_SHMMAP },
+    .{ error.DeleteNoEnt, RC.IOERR_DELETE_NOENT },
     .{ error.Corrupt, RC.CORRUPT },
     .{ error.NotFound, RC.NOTFOUND },
     .{ error.DiskFull, RC.FULL },
@@ -2326,6 +2332,10 @@ pub const InitState = struct {
     i_db: u8 = 0,
     /// Reading the schema (sqlite_schema rows are parsed).
     busy: bool = false,
+    /// C: init.busy==2, the schema is read again by an ALTER TABLE
+    /// (sqlite3InitOne() with INITFLAG_AlterAdd's bits), which reports
+    /// unknown internal functions.
+    alter: bool = false,
     orphan_trigger: bool = false,
     imposter_table: u2 = 0,
     reopen_memdb: bool = false,
@@ -2482,6 +2492,9 @@ pub const Sqlite3 = struct {
     /// Offset in the statement of the token an error is about, or -1
     /// (sqlite3_error_offset). -2 while an error message is formatted.
     err_byte_offset: i32 = -1,
+    /// The OS error of the last CANTOPEN or IOERR (iSysErrno,
+    /// sqlite3_system_errno()).
+    sys_errno: i32 = 0,
     /// Errors are not recorded while this is nonzero.
     suppress_err: u8 = 0,
     is_interrupted: std.atomic.Value(bool) = .init(false),

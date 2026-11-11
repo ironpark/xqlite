@@ -91,17 +91,17 @@ fn toBits(f: OpenFlags) u32 {
     return b;
 }
 
-fn fromBits(b: u32, uri: bool) OpenFlags {
-    return .{
-        // mode=memory clears both READONLY and READWRITE: an in-memory
-        // database can be written.
-        .read_only = b & READONLY != 0,
-        .create = b & CREATE != 0,
-        .memory = b & MEMORY != 0,
-        .shared_cache = b & SHAREDCACHE != 0,
-        .private_cache = b & PRIVATECACHE != 0,
-        .uri = uri,
-    };
+/// Sets the flags the URI governs; the others stay as the caller gave
+/// them.
+fn setBits(f: *OpenFlags, b: u32, uri: bool) void {
+    // mode=memory clears both READONLY and READWRITE: an in-memory
+    // database can be written.
+    f.read_only = b & READONLY != 0;
+    f.create = b & CREATE != 0;
+    f.memory = b & MEMORY != 0;
+    f.shared_cache = b & SHAREDCACHE != 0;
+    f.private_cache = b & PRIVATECACHE != 0;
+    f.uri = uri;
 }
 
 const OpenMode = struct { z: []const u8, mode: u32 };
@@ -267,9 +267,7 @@ fn parseInto(gpa: Allocator, uri: []const u8, res: *Result) Allocator.Error!void
         res.file = z;
         is_uri = false;
     }
-    const resolved = res.flags.vfs_resolved;
-    res.flags = fromBits(bits, is_uri);
-    res.flags.vfs_resolved = resolved;
+    setBits(&res.flags, bits, is_uri);
 }
 
 fn hexToInt(c: u8) u8 {

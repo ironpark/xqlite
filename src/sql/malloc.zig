@@ -249,7 +249,7 @@ pub fn malloc(n: u64) ?[*]u8 {
 
 /// Port of sqlite3_free(): free memory from malloc() or `allocator`.
 /// A null pointer is a no-op. Usable as a destructor.
-pub fn free(p: ?*anyopaque) void {
+pub fn free(p: ?*anyopaque) callconv(.c) void {
     const z = p orelse return;
     memFree(@ptrCast(z), @returnAddress());
 }

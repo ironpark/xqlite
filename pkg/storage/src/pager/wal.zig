@@ -39,6 +39,7 @@
 
 const std = @import("std");
 const corrupt = @import("../corrupt.zig").corrupt;
+const random = @import("../random.zig");
 const builtin = @import("builtin");
 const vfs = @import("xqlite_vfs").vfs;
 const pcache = @import("pcache.zig");
@@ -964,7 +965,7 @@ pub const Wal = struct {
             if (info[ci_backfill] < w.hdr.mx_frame) return error.Busy;
             if (mode.atLeast(.restart)) {
                 var salt1: [4]u8 = undefined;
-                w.vfs.randomness(&salt1);
+                random.fill(w.vfs, &salt1);
                 std.debug.assert(info[ci_backfill] == w.hdr.mx_frame);
                 try w.busyLock(busy, readLock(1), n_reader - 1);
                 defer w.unlockExclusive(readLock(1), n_reader - 1);
@@ -1603,7 +1604,7 @@ pub const Wal = struct {
         std.debug.assert(info[ci_backfill] == w.hdr.mx_frame);
         if (info[ci_backfill] > 0) {
             var salt1: [4]u8 = undefined;
-            w.vfs.randomness(&salt1);
+            random.fill(w.vfs, &salt1);
             if (w.lockExclusive(readLock(1), n_reader - 1)) |_| {
                 // Updating the wal-index header too means a rollback of
                 // this transaction needs no special case.
@@ -1713,7 +1714,7 @@ pub const Wal = struct {
             put4(whdr[4..8], max_version);
             put4(whdr[8..12], sz_page);
             put4(whdr[12..16], w.n_ckpt);
-            if (w.n_ckpt == 0) w.vfs.randomness(std.mem.asBytes(&w.hdr.salt));
+            if (w.n_ckpt == 0) random.fill(w.vfs, std.mem.asBytes(&w.hdr.salt));
             @memcpy(whdr[16..24], std.mem.asBytes(&w.hdr.salt));
             const ck = checksumBytes(native_endian, whdr[0..24], .{ 0, 0 });
             put4(whdr[24..28], ck[0]);

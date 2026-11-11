@@ -18,6 +18,7 @@ const catalog = @import("catalog.zig");
 const Dialect = @import("../dialect/dialect.zig").Dialect;
 
 const Sqlite3 = int.Sqlite3;
+const schema_gpa = build.schema_gpa;
 const Key = catalog.Key;
 const Entry = catalog.Entry;
 
@@ -88,7 +89,9 @@ pub const TableMeta = struct {
     }
 };
 
-/// The catalog of one database in memory.
+/// The catalog of one database in memory. It belongs to the schema,
+/// which a shared cache frees from any connection, so it comes from the
+/// library's memory, not a connection's lookaside.
 pub const Cache = struct {
     arena: std.heap.ArenaAllocator,
     /// By table name, as stored (`tbl`, compared as xq_catalog's key is).
@@ -147,21 +150,21 @@ fn current(s: *const int.Schema) ?*Cache {
 
 fn cacheOf(db: *Sqlite3, i_db: usize, schema: []const u8) Error!*Cache {
     if (current(db.dbs.items[i_db].schema)) |c| return c;
-    drop(db, db.dbs.items[i_db].schema);
+    drop(db.dbs.items[i_db].schema);
     const c = try load(db, schema);
     // The query may have read the schema again (another connection
     // changed it): the catalog read is that of the schema now in memory.
     const s = db.dbs.items[i_db].schema;
-    drop(db, s);
+    drop(s);
     c.cookie = s.schema_cookie;
     s.xq_meta = c;
     return c;
 }
 
 fn load(db: *Sqlite3, schema: []const u8) Error!*Cache {
-    const c = db.gpa.create(Cache) catch return oom(db);
-    c.* = .{ .arena = .init(db.gpa) };
-    errdefer free(db, c);
+    const c = schema_gpa.create(Cache) catch return oom(db);
+    c.* = .{ .arena = .init(schema_gpa) };
+    errdefer free(c);
     const a = c.arena.allocator();
     var tbls: std.ArrayList([]const u8) = .empty;
     var all: std.ArrayList(Entry) = .empty;
@@ -235,24 +238,24 @@ fn oom(db: *Sqlite3) error{OutOfMemory} {
     return error.OutOfMemory;
 }
 
-fn free(db: *Sqlite3, c: *Cache) void {
+fn free(c: *Cache) void {
     c.arena.deinit();
-    db.gpa.destroy(c);
+    schema_gpa.destroy(c);
 }
 
 // ======================================================== invalidation
 
 /// Forget the catalog of schema `s` read into memory (with the rest of
 /// the schema: build.schemaClear()).
-pub fn drop(db: *Sqlite3, s: *int.Schema) void {
+pub fn drop(s: *int.Schema) void {
     const p = s.xq_meta orelse return;
     s.xq_meta = null;
-    free(db, @ptrCast(@alignCast(p)));
+    free(@ptrCast(@alignCast(p)));
 }
 
 /// Forget the catalog of every database read into memory.
 pub fn dropAll(db: *Sqlite3) void {
-    for (db.dbs.items) |d| drop(db, d.schema);
+    for (db.dbs.items) |d| drop(d.schema);
 }
 
 /// The connection writes xq_catalog (OP_SqlExec, catalog.set() ...):

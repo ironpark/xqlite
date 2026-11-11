@@ -681,6 +681,31 @@ pub fn displayP4(a: std.mem.Allocator, op: *const Op) error{OutOfMemory}![:0]u8 
 /// Port of sqlite3VdbeUsesBtree(): the program uses database `i`.
 pub fn usesBtree(v: *Vdbe, i: u5) void {
     v.btree_mask |= @as(u32, 1) << i;
+    if (i != 1 and v.db.n_shared != 0) if (v.db.dbs.items[i].bt) |bt| if (bt.sharable) {
+        v.lock_mask |= @as(u32, 1) << i;
+    };
+}
+
+/// Port of sqlite3VdbeEnter(): take the mutexes of the shared caches
+/// the statement uses (lock_mask), and make this connection the one
+/// they call back, for a run or a halt.
+pub inline fn vdbeEnter(v: *Vdbe) void {
+    if (v.lock_mask != 0) lockMasked(v, true);
+}
+
+/// Port of sqlite3VdbeLeave(): undo vdbeEnter().
+pub inline fn vdbeLeave(v: *Vdbe) void {
+    if (v.lock_mask != 0) lockMasked(v, false);
+}
+
+noinline fn lockMasked(v: *Vdbe, comptime enter: bool) void {
+    var m = v.lock_mask;
+    while (m != 0) : (m &= m - 1) {
+        const i = @ctz(m);
+        if (i >= v.db.dbs.items.len) break;
+        const bt = v.db.dbs.items[i].bt orelse continue;
+        if (enter) bt.lockMutex() else bt.unlockMutex();
+    }
 }
 
 /// Port of initMemArray().
@@ -1358,6 +1383,11 @@ pub fn halt(v: *Vdbe) error{Busy}!void {
     const db = v.db;
     std.debug.assert(v.e_vdbe_state == .run);
     if (db.malloc_failed) v.rc = RC.NOMEM;
+    // The cursors close and the transactions end with the mutexes of
+    // the shared caches held (C: sqlite3VdbeEnter(), and the b-tree
+    // calls closing the cursors).
+    vdbeEnter(v);
+    defer vdbeLeave(v);
     closeAllCursors(v);
 
     if (v.is_reader) {

@@ -9,6 +9,11 @@ const ctype = @import("xqlite_base").ctype;
 const config = @import("xqlite_config");
 
 const Allocator = std.mem.Allocator;
+/// The memory of schema objects (the arenas of tables, view columns and
+/// triggers): the library's, as C's schema objects never use lookaside.
+/// Whichever connection frees a shared schema, the memory does not
+/// belong to the one that read it, which may be closed by then.
+pub const schema_gpa = @import("malloc.zig").allocator;
 const Parse = int.Parse;
 const Expr = int.Expr;
 const ExprList = int.ExprList;
@@ -671,7 +676,7 @@ pub fn unlinkAndDeleteIndex(db: *Sqlite3, i_db: usize, name: [:0]const u8) void 
 /// schema.
 pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
     var trig_it = s.trig_hash.valueIterator();
-    while (trig_it.next()) |trig| trigger_mod.deleteTrigger(db, trig.*);
+    while (trig_it.next()) |trig| trigger_mod.deleteTrigger(trig.*);
     s.trig_hash.clearRetainingCapacity();
     var it = s.tbl_hash.valueIterator();
     while (it.next()) |t| {
@@ -680,12 +685,12 @@ pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
         deleteTable(db, t.*);
     }
     s.tbl_hash.clearRetainingCapacity();
-    s.tbl_order.clear(db.gpa);
+    s.tbl_order.clear(schema_gpa);
     s.idx_hash.clearRetainingCapacity();
     s.fkey_hash.clearRetainingCapacity();
     s.seq_tab = null;
     // xqlite: the dialect catalog read with this schema.
-    @import("../catalog/meta.zig").drop(db, s);
+    @import("../catalog/meta.zig").drop(s);
     if (s.schema_flags.SchemaLoaded) {
         s.i_generation +%= 1;
     }
@@ -695,15 +700,15 @@ pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
 
 /// Port of sqlite3SchemaGet() for a b-tree opened with shared cache: the
 /// schema its BtShared keeps for every connection, made by the first.
-/// Null on OOM. Its objects must not come from a connection's lookaside
-/// (see prepare.initOne()): another connection may free them.
+/// Null on OOM. Like every schema, it and its objects are in schema_gpa,
+/// so any connection may free it.
 pub fn sharedSchema(bt: *btree.Btree) ?*Schema {
     const p = bt.schema(makeSharedSchema, freeSharedSchema) orelse return null;
     return @ptrCast(@alignCast(p));
 }
 
 fn makeSharedSchema() ?*anyopaque {
-    const s = @import("malloc.zig").allocator.create(Schema) catch return null;
+    const s = schema_gpa.create(Schema) catch return null;
     s.* = .{ .enc = 1 };
     return s;
 }
@@ -717,7 +722,7 @@ fn freeSharedSchema(p: ?*anyopaque) void {
     var xdb: Sqlite3 = .{ .gpa = undefined };
     xdb.gpa = malloc.dbAllocator(&xdb);
     schemaFree(&xdb, s);
-    malloc.allocator.destroy(s);
+    schema_gpa.destroy(s);
 }
 
 /// Free the schema of entry `d` of db.dbs, unless the shared cache owns
@@ -725,16 +730,16 @@ fn freeSharedSchema(p: ?*anyopaque) void {
 pub fn dbSchemaFree(db: *Sqlite3, d: *const int.Db) void {
     if (d.shared) return;
     schemaFree(db, d.schema);
-    db.gpa.destroy(d.schema);
+    schema_gpa.destroy(d.schema);
 }
 
 /// Free the maps of a schema whose objects are cleared.
 pub fn schemaFree(db: *Sqlite3, s: *Schema) void {
     schemaClear(db, s);
-    s.tbl_hash.deinit(db.gpa);
-    s.idx_hash.deinit(db.gpa);
-    s.trig_hash.deinit(db.gpa);
-    s.fkey_hash.deinit(db.gpa);
+    s.tbl_hash.deinit(schema_gpa);
+    s.idx_hash.deinit(schema_gpa);
+    s.trig_hash.deinit(schema_gpa);
+    s.fkey_hash.deinit(schema_gpa);
 }
 
 /// Port of sqlite3ResetOneSchema(): forget the schema of database `i_db`
@@ -759,7 +764,12 @@ pub fn resetOneSchema(db: *Sqlite3, i_db: ?usize) void {
 /// Port of sqlite3ResetAllSchemasOfConnection(): forget every schema so
 /// it is read again.
 pub fn resetAllSchemasOfConnection(db: *Sqlite3) void {
+    main_mod.btreeEnterAll(db);
+    defer main_mod.btreeLeaveAll(db);
     for (db.dbs.items) |*d| {
+        // A shared schema whose b-tree is closed may be freed already
+        // (C: pSchema is 0).
+        if (d.shared and d.bt == null) continue;
         if (db.n_schema_lock == 0) {
             schemaClear(db, d.schema);
         } else {
@@ -884,16 +894,16 @@ pub fn deleteTable(db: *Sqlite3, t: *Table) void {
     }
     if (t.isOrdinary()) fkey_mod.fkDelete(db, t);
     if (t.isVirtual()) vtab_mod.clear(db, t);
-    if (t.isView()) freeViewColumns(db, t);
+    if (t.isView()) freeViewColumns(t);
     m.deinit();
-    db.gpa.destroy(m);
+    schema_gpa.destroy(m);
 }
 
 /// Port of sqlite3UnlinkAndDeleteTable(): remove a dropped table from
 /// the schema.
 pub fn unlinkAndDeleteTable(db: *Sqlite3, i_db: usize, name: [:0]const u8) void {
     const kv = db.dbs.items[i_db].schema.tbl_hash.fetchRemove(name) orelse return;
-    db.dbs.items[i_db].schema.tbl_order.remove(db.gpa, name);
+    db.dbs.items[i_db].schema.tbl_order.remove(schema_gpa, name);
     deleteTable(db, kv.value);
     db.m_db_flags.SchemaChange = true;
 }
@@ -1076,12 +1086,12 @@ fn forceNotReadOnly(p: *Parse) void {
 }
 
 /// Allocate a new schema table named `name` with its own arena.
-pub fn newSchemaTable(db: *Sqlite3, name: []const u8) Oom!*Table {
-    const m = try db.gpa.create(std.heap.ArenaAllocator);
-    m.* = .init(db.gpa);
+pub fn newSchemaTable(name: []const u8) Oom!*Table {
+    const m = try schema_gpa.create(std.heap.ArenaAllocator);
+    m.* = .init(schema_gpa);
     errdefer {
         m.deinit();
-        db.gpa.destroy(m);
+        schema_gpa.destroy(m);
     }
     const a = m.allocator();
     const t = try a.create(Table);
@@ -1155,7 +1165,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         }
     }
 
-    const t = newSchemaTable(db, name) catch return oomFault(p);
+    const t = newSchemaTable(name) catch return oomFault(p);
     if (p.inRenameObject()) alter.renameTokenMap(p, t.name, name_tok.*);
     t.schema = db.dbs.items[i_db].schema;
     t.n_row_log_est = 200;
@@ -1950,10 +1960,10 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: TF, sel:
     // While reading the schema, add the table to it.
     if (db.init.busy) {
         const s = t.schema.?;
-        const gop = try s.tbl_hash.getOrPut(db.gpa, t.name);
+        const gop = try s.tbl_hash.getOrPut(schema_gpa, t.name);
         std.debug.assert(!gop.found_existing);
         gop.value_ptr.* = t;
-        s.tbl_order.insert(db.gpa, t.name, t) catch |err| {
+        s.tbl_order.insert(schema_gpa, t.name, t) catch |err| {
             s.tbl_hash.removeByPtr(gop.key_ptr);
             return err;
         };
@@ -2078,7 +2088,7 @@ fn createForeignKeyImpl(p: *Parse, from_col: ?*ExprList, to: Token, to_col: ?*Ex
     fk.a_action = .{ .fromInt(flags & 0xff), .fromInt((flags >> 8) & 0xff) };
 
     const s = t.schema.?;
-    const gop = try s.fkey_hash.getOrPut(p.db.gpa, fk.to);
+    const gop = try s.fkey_hash.getOrPut(schema_gpa, fk.to);
     if (gop.found_existing) {
         const next_to = gop.value_ptr.*;
         fk.next_to = next_to;
@@ -2448,7 +2458,7 @@ fn createIndexImpl(
                     return;
                 }
             }
-            const gop = try idx.schema.?.idx_hash.getOrPut(db.gpa, idx.name);
+            const gop = try idx.schema.?.idx_hash.getOrPut(schema_gpa, idx.name);
             std.debug.assert(!gop.found_existing);
             gop.value_ptr.* = idx;
             db.m_db_flags.SchemaChange = true;
@@ -2565,9 +2575,6 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) (Oom || int.ParseError)!void {
     // the view's SELECT.
     var failed = false;
     if (try expr_mod.selectDup(p.arena, t.u.view.select)) |sel| {
-        // The columns live with the view: not in lookaside.
-        @import("malloc.zig").disableLookaside(db);
-        defer @import("malloc.zig").enableLookaside(db);
         const parse_mode = p.e_parse_mode;
         const n_tab = p.n_tab;
         const n_select = p.n_select;
@@ -2593,7 +2600,7 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) (Oom || int.ParseError)!void {
             // The columns live with the view: named by the list of
             // CREATE VIEW name(list) (kept in t.check), or as the result
             // set names them.
-            const a = if (t.mem != null) try newViewColumnsMem(db, t) else p.arena;
+            const a = if (t.mem != null) try newViewColumnsMem(t) else p.arena;
             if (t.check) |check| {
                 t.cols = try select_mod.columnsFromExprList(p, a, check);
                 if (p.n_err == 0 and t.cols.len == sel.e_list.?.len()) {
@@ -2620,20 +2627,20 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) (Oom || int.ParseError)!void {
 }
 
 /// Fresh memory for the columns of schema view `t`, replacing the old.
-fn newViewColumnsMem(db: *Sqlite3, t: *Table) Oom!Allocator {
-    freeViewColumns(db, t);
-    const m = try db.gpa.create(std.heap.ArenaAllocator);
-    m.* = .init(db.gpa);
+fn newViewColumnsMem(t: *Table) Oom!Allocator {
+    freeViewColumns(t);
+    const m = try schema_gpa.create(std.heap.ArenaAllocator);
+    m.* = .init(schema_gpa);
     t.u.view.cols_mem = m;
     return m.allocator();
 }
 
 /// Port of sqlite3DeleteColumnNames() for a view: forget its columns.
-fn freeViewColumns(db: *Sqlite3, t: *Table) void {
+fn freeViewColumns(t: *Table) void {
     t.cols = &.{};
     const m = t.u.view.cols_mem orelse return;
     m.deinit();
-    db.gpa.destroy(m);
+    schema_gpa.destroy(m);
     t.u.view.cols_mem = null;
 }
 
@@ -2643,7 +2650,7 @@ fn viewResetAll(db: *Sqlite3, idx: usize) void {
     if (!db.dbs.items[idx].schema.schema_flags.UnresetViews) return;
     var it = db.dbs.items[idx].schema.tbl_hash.valueIterator();
     while (it.next()) |t| {
-        if (t.*.isView()) freeViewColumns(db, t.*);
+        if (t.*.isView()) freeViewColumns(t.*);
     }
     db.dbs.items[idx].schema.schema_flags.UnresetViews = false;
 }
@@ -3248,7 +3255,7 @@ fn addReturningImpl(p: *Parse, list: ?*ExprList) Oom!void {
     ret.ret_tstep.trig = &ret.ret_trig;
     p.u1 = .{ .d = .{ .returning = ret } };
     std.debug.assert(!tmp_schema.trig_hash.contains(ret.ret_trig.name) or p.n_err != 0 or p.if_not_exists);
-    try tmp_schema.trig_hash.put(db.gpa, ret.ret_trig.name, &ret.ret_trig);
+    try tmp_schema.trig_hash.put(schema_gpa, ret.ret_trig.name, &ret.ret_trig);
 }
 
 /// Port of sqlite3RootPageMoved(): an auto-vacuum DROP moved b-tree `from`

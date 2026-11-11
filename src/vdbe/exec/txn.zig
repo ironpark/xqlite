@@ -409,9 +409,7 @@ pub fn opParseSchema(e: *Exec, op: *Op) Error!Flow {
         v.expired = 0;
     } else {
         db.init.busy = true;
-        const no_lookaside = prepare.sharedSchemaInit(db, i_db);
         rc = prepare.parseSchemaWhere(db, i_db, std.mem.span(op.p4.z), &err_msg);
-        if (no_lookaside) @import("../../sql/malloc.zig").enableLookaside(db);
         db.init.busy = false;
     }
     if (err_msg) |m| aux.setErrMsg(v, m);

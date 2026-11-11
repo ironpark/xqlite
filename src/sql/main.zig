@@ -14,10 +14,26 @@ const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
 const RC = int.RC;
 
+/// Port of sqlite3BtreeEnterAll() (btmutex.c): take the mutexes of
+/// every shared cache of the connection (in the order of Btree.next),
+/// as before parsing a statement: schemas are compared against and must
+/// not be reset by another connection meanwhile.
+pub fn btreeEnterAll(db: *Sqlite3) void {
+    if (db.n_shared == 0) return;
+    for (db.dbs.items) |d| if (d.bt) |bt| bt.lockMutex();
+}
+
+/// Port of sqlite3BtreeLeaveAll(): undo btreeEnterAll().
+pub fn btreeLeaveAll(db: *Sqlite3) void {
+    if (db.n_shared == 0) return;
+    for (db.dbs.items) |d| if (d.bt) |bt| bt.unlockMutex();
+}
+
 /// Port of sqlite3RollbackAll(): roll back every open transaction.
 /// Cursors are tripped with `trip` unless it is null (C: tripCode
 /// SQLITE_OK); the callers trip with error.Abort (SQLITE_ABORT_ROLLBACK).
 pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
+    btreeEnterAll(db);
     const schema_change = db.m_db_flags.SchemaChange and !db.init.busy;
     var in_trans = false;
     for (db.dbs.items) |d| {
@@ -30,6 +46,7 @@ pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
         @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
         @import("build.zig").resetAllSchemasOfConnection(db);
     }
+    btreeLeaveAll(db);
     // xqlite: likewise the dialect catalog read into memory.
     @import("../catalog/meta.zig").ended(db, false);
     @import("../dialect/dialect.zig").transactionEnded(db, false);
@@ -186,16 +203,16 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
     db.* = .{ .gpa = malloc.dbAllocator(db), .vfs = v };
     const gpa = db.gpa;
     out.* = db;
-    const s_main = gpa.create(int.Schema) catch return oomOnOpen(db);
+    const s_main = @import("build.zig").schema_gpa.create(int.Schema) catch return oomOnOpen(db);
     s_main.* = .{};
     db.dbs.append(gpa, .{ .name = "main", .schema = s_main }) catch {
-        gpa.destroy(s_main);
+        @import("build.zig").schema_gpa.destroy(s_main);
         return oomOnOpen(db);
     };
-    const s_temp = gpa.create(int.Schema) catch return oomOnOpen(db);
+    const s_temp = @import("build.zig").schema_gpa.create(int.Schema) catch return oomOnOpen(db);
     s_temp.* = .{};
     db.dbs.append(gpa, .{ .name = "temp", .schema = s_temp, .safety_level = 1 }) catch {
-        gpa.destroy(s_temp);
+        @import("build.zig").schema_gpa.destroy(s_temp);
         return oomOnOpen(db);
     };
     db.enc = 1;
@@ -241,7 +258,7 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
         // The schema of the shared cache, and its text encoding if it was
         // read (sqlite3SetTextEncoding(db, SCHEMA_ENC(db))).
         const s = @import("build.zig").sharedSchema(bt) orelse return oomOnOpen(db);
-        gpa.destroy(db.dbs.items[0].schema);
+        @import("build.zig").schema_gpa.destroy(db.dbs.items[0].schema);
         db.dbs.items[0].schema = s;
         db.dbs.items[0].shared = true;
         db.n_shared = 1;
@@ -344,6 +361,8 @@ pub fn close(db: *Sqlite3) i32 {
 /// Port of disconnectAllVtab(): disconnect every virtual table of the
 /// connection, as it closes.
 fn disconnectAllVtab(db: *Sqlite3) void {
+    btreeEnterAll(db);
+    defer btreeLeaveAll(db);
     for (db.dbs.items) |d| {
         var it = d.schema.tbl_hash.valueIterator();
         while (it.next()) |t| {

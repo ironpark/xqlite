@@ -15,7 +15,6 @@ const dialect = @import("../dialect/dialect.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
-const malloc = @import("malloc.zig");
 const Schema = int.Schema;
 const Vdbe = vi.Vdbe;
 const RC = int.RC;
@@ -164,17 +163,6 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
     return false;
 }
 
-/// xqlite: before reading into the schema of database `i_db`, keep its
-/// objects out of the connection's lookaside if the shared cache owns
-/// the schema (Db.shared): another connection may free them (C frees a
-/// schema with no connection, sqlite3SchemaClear()). True if lookaside
-/// was disabled, for malloc.enableLookaside() once done.
-pub fn sharedSchemaInit(db: *Sqlite3, i_db: usize) bool {
-    if (!db.dbs.items[i_db].shared) return false;
-    malloc.disableLookaside(db);
-    return true;
-}
-
 /// Port of sqlite3InitOne(): read the schema of database `i_db`. On error
 /// returns the code and sets `err_msg` (owned by the caller, from gpa).
 pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
@@ -183,8 +171,6 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
     const encoding_was_fixed = db.m_db_flags.EncodingFixed;
     db.init.busy = true;
     defer db.init.busy = false;
-    const no_lookaside = sharedSchemaInit(db, i_db);
-    defer if (no_lookaside) malloc.enableLookaside(db);
     var rc: i32 = RC.OK;
 
     // The schema table itself, made by the parser from its definition.
@@ -211,6 +197,8 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
         pdb.schema.schema_flags.SchemaLoaded = true;
         return RC.OK;
     };
+    bt.lockMutex();
+    defer bt.unlockMutex();
 
     var opened_transaction = false;
     if (bt.txnState() == .none) {
@@ -487,6 +475,8 @@ fn lockAndPrepare(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, 
     var rc: i32 = RC.OK;
     var cnt: u32 = 0;
     stmt.* = null;
+    main_mod.btreeEnterAll(db);
+    defer main_mod.btreeLeaveAll(db);
     while (true) {
         prepareInternal(db, sql, prep_flags, old, stmt, tail) catch |err| {
             rc = int.resultCode(err, db.err_code);

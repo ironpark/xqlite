@@ -348,10 +348,10 @@ fn finishTriggerImpl(p: *Parse, step_list: ?*TriggerStep, all: Token) Oom!void {
 
     // Reading the schema: the trigger moves to memory of its own and
     // joins the schema and its table.
-    const link = try copyTrigger(db, trig);
+    const link = try copyTrigger(trig);
     const s = db.dbs.items[i_db].schema;
-    s.trig_hash.put(db.gpa, link.name, link) catch {
-        deleteTrigger(db, link);
+    s.trig_hash.put(build.schema_gpa, link.name, link) catch {
+        deleteTrigger(link);
         return error.OutOfMemory;
     };
     if (link.schema == link.tab_schema) {
@@ -362,12 +362,12 @@ fn finishTriggerImpl(p: *Parse, step_list: ?*TriggerStep, all: Token) Oom!void {
 }
 
 /// A copy of `src` (built in a statement's arena) in memory of its own.
-fn copyTrigger(db: *int.Sqlite3, src: *const Trigger) Oom!*Trigger {
-    const m = try db.gpa.create(std.heap.ArenaAllocator);
-    m.* = .init(db.gpa);
+fn copyTrigger(src: *const Trigger) Oom!*Trigger {
+    const m = try build.schema_gpa.create(std.heap.ArenaAllocator);
+    m.* = .init(build.schema_gpa);
     errdefer {
         m.deinit();
-        db.gpa.destroy(m);
+        build.schema_gpa.destroy(m);
     }
     const a = m.allocator();
     const t = try a.create(Trigger);
@@ -406,11 +406,11 @@ fn copyTrigger(db: *int.Sqlite3, src: *const Trigger) Oom!*Trigger {
 }
 
 /// Port of sqlite3DeleteTrigger(): free a schema trigger.
-pub fn deleteTrigger(db: *int.Sqlite3, t: *Trigger) void {
+pub fn deleteTrigger(t: *Trigger) void {
     if (t.returning) return;
     const m = t.mem orelse return;
     m.deinit();
-    db.gpa.destroy(m);
+    build.schema_gpa.destroy(m);
 }
 
 /// Port of sqlite3DropTrigger(): DROP TRIGGER, the trigger found by name
@@ -483,7 +483,7 @@ pub fn unlinkAndDeleteTrigger(db: *int.Sqlite3, i_db: usize, name: [:0]const u8)
             }
         }
     }
-    deleteTrigger(db, trig);
+    deleteTrigger(trig);
     db.m_db_flags.SchemaChange = true;
 }
 

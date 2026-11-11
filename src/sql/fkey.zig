@@ -24,7 +24,6 @@ const coll_mod = @import("coll.zig");
 const ctype = @import("xqlite_base").ctype;
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
-const malloc = @import("malloc.zig");
 const dconstraint = @import("../dialect/constraint.zig");
 const dialect = @import("../dialect/dialect.zig");
 
@@ -614,10 +613,7 @@ fn fkActionTrigger(p: *Parse, t: *Table, fk: *FKey, changes: ?*ExprList) Oom!?*T
         where = null;
     }
 
-    // The trigger lives with the foreign key, in the memory of its table:
-    // not in lookaside.
-    malloc.disableLookaside(db);
-    defer malloc.enableLookaside(db);
+    // The trigger lives with the foreign key, in the memory of its table.
     const m = build.tableAlloc(p, fk.from);
     const trig = try m.create(Trigger);
     const step = try m.create(TriggerStep);

@@ -81,6 +81,8 @@ pub fn exec(v: *Vdbe) i32 {
         .pc = v.pc,
         .encoding = v.db.enc,
     };
+    aux.vdbeEnter(v);
+    defer aux.vdbeLeave(v);
     // A statement compiled for sqlite3_stmt_scanstatus() counts the runs
     // and cycles of its instructions, in its own copy of the loop, so
     // that other statements do not test for it.

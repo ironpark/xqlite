@@ -27,9 +27,11 @@
 //! (balance.zig), page relocation for auto-vacuum (vacuum.zig), the
 //! pointer map (ptrmap.zig) and the integrity check (integrity.zig).
 //!
-//! The connection side of shared cache (the BtShared mutex taken around
-//! API calls, OP_TableLock) is the caller's; `mutex_hooks` is how it
-//! gives this layer SQLite's mutexes.
+//! Shared cache: the methods of a handle take the BtShared mutex
+//! themselves (Btree.lockMutex(), btmutex.c's sqlite3BtreeEnter()); the
+//! caller takes it around cursor work and the other uses of `pager`
+//! (a statement's run, sqlite3VdbeEnter()) and issues OP_TableLock.
+//! `mutex_hooks` is how it gives this layer SQLite's mutexes.
 
 const std = @import("std");
 const corrupt = @import("../corrupt.zig").corrupt;
@@ -173,6 +175,9 @@ pub const Options = struct {
     /// on the same database: the file `path` (named by its full path), or
     /// the in-memory database of this name. Null for a private cache.
     shared_key: ?[]const u8 = null,
+    /// A sharable b-tree of the connection, if any: a sharable handle joins
+    /// the list of the connection's sharable handles (Btree.next).
+    sibling: ?*Btree = null,
     /// Opened with a URI (SQLITE_OPEN_URI), for the VFS.
     uri: bool = false,
 };
@@ -218,10 +223,12 @@ pub const Payload = struct {
 /// SQLite's mutexes, as shared cache uses them: set by the C ABI of a
 /// threadsafe build (sqlite3MutexAlloc()), null for none.
 pub const MutexHooks = struct {
-    /// A new recursive mutex (for BtShared.mutex), or null.
+    /// A new mutex (for BtShared.mutex; SQLITE_MUTEX_FAST), or null.
     alloc: *const fn () ?*anyopaque,
     free: *const fn (m: *anyopaque) void,
     enter: *const fn (m: *anyopaque) void,
+    /// sqlite3_mutex_try(): enter without blocking, if free.
+    try_enter: *const fn (m: *anyopaque) bool,
     leave: *const fn (m: *anyopaque) void,
     /// Enter or leave SQLITE_MUTEX_STATIC_OPEN (`open`) or
     /// SQLITE_MUTEX_STATIC_MAIN.
@@ -274,9 +281,15 @@ pub const Btree = struct {
     /// The read lock on the schema table every transaction of a sharable
     /// handle holds (lock).
     lock: BtLock = undefined,
-    /// How many times the caller entered BtShared.mutex for this handle
-    /// (lockMutex(); C's wantToLock).
-    n_locked: u32 = 0,
+    /// How many lockMutex() calls are not yet undone (wantToLock).
+    want_to_lock: u32 = 0,
+    /// Holds BtShared.mutex (locked).
+    locked: bool = false,
+    /// The connection's other sharable handles, in the order of their
+    /// BtShared's address (pNext, pPrev): the order mutexes are taken
+    /// in, so that two connections never wait on each other.
+    next: ?*Btree = null,
+    prev: ?*Btree = null,
 
     /// Port of sqlite3BtreeOpen(). A null path opens an anonymous
     /// temporary database. With Options.shared_key, a BtShared of the
@@ -331,19 +344,45 @@ pub const Btree = struct {
             p.bs = b;
         }
         p.pager = p.bs.pager;
+        if (p.sharable) if (opts.sibling) |sib| p.joinConnection(sib);
         return p;
+    }
+
+    /// The part of sqlite3BtreeOpen() that puts a sharable handle in the
+    /// list of its connection's (`sib` is any b-tree of the connection).
+    fn joinConnection(p: *Btree, sib_arg: *Btree) void {
+        std.debug.assert(sib_arg.sharable);
+        var sib = sib_arg;
+        while (sib.prev) |q| sib = q;
+        if (@intFromPtr(p.bs) < @intFromPtr(sib.bs)) {
+            p.next = sib;
+            p.prev = null;
+            sib.prev = p;
+        } else {
+            while (sib.next) |q| {
+                if (@intFromPtr(q.bs) >= @intFromPtr(p.bs)) break;
+                sib = q;
+            }
+            p.next = sib.next;
+            p.prev = sib;
+            if (p.next) |q| q.prev = p;
+            sib.next = p;
+        }
     }
 
     /// Port of sqlite3BtreeClose(). The handle's cursors must be closed.
     /// Rolls back its transaction; the last handle closes the database.
     /// `db` is the connection's part in closing a WAL (see Pager.close).
     pub fn close(p: *Btree, db: pager_mod.Conn) void {
-        const bs = p.enter();
+        const bs = p.acquire();
         std.debug.assert(p.sharable or bs.cursors == null);
         p.rollback(null, false) catch {};
         const gpa = bs.gpa;
-        while (p.n_locked > 0) p.unlockMutex();
+        p.unlockMutex();
+        std.debug.assert(p.want_to_lock == 0 and !p.locked);
         if (!p.sharable or removeFromSharingList(bs)) bs.destroy(db);
+        if (p.prev) |q| q.next = p.next;
+        if (p.next) |q| q.prev = p.prev;
         gpa.destroy(p);
     }
 
@@ -365,21 +404,67 @@ pub const Btree = struct {
         return true;
     }
 
-    /// sqlite3BtreeEnter() of the caller: take the mutex of a sharable
-    /// BtShared, which keeps out the handles of other threads until
-    /// unlockMutex(). Recursive. A no-op without mutex_hooks.
+    /// Port of sqlite3BtreeEnter() (btmutex.c): take the mutex of a
+    /// sharable BtShared, which keeps out the handles of other threads
+    /// until the matching unlockMutex() (counted, so recursive), and make
+    /// the handle the one whose connection the BtShared calls back
+    /// (enter()), so that whatever reaches the pager meanwhile, through
+    /// `pager` too, calls this connection's busy handler. Without
+    /// mutex_hooks only the latter.
     pub fn lockMutex(p: *Btree) void {
         if (!p.sharable) return;
-        const m = p.bs.mutex orelse return;
-        mutex_hooks.?.enter(m);
-        p.n_locked += 1;
+        p.want_to_lock += 1;
+        if (p.locked) return;
+        if (p.bs.mutex) |m| lockCarefully(p, m) else _ = p.enter();
     }
 
-    /// sqlite3BtreeLeave(): undo one lockMutex(), if it took the mutex.
-    pub fn unlockMutex(p: *Btree) void {
-        if (p.n_locked == 0) return;
-        p.n_locked -= 1;
+    /// Port of btreeLockCarefully(): if the mutex is taken, wait for it
+    /// only after leaving those of the connection's handles that come
+    /// later in the order (`next`), then take those again.
+    noinline fn lockCarefully(p: *Btree, m: *anyopaque) void {
+        if (mutex_hooks.?.try_enter(m)) return p.markLocked();
+        var it = p.next;
+        while (it) |q| : (it = q.next) {
+            if (q.locked) q.leaveMutex();
+        }
+        p.enterMutex();
+        it = p.next;
+        while (it) |q| : (it = q.next) {
+            if (q.want_to_lock > 0) q.enterMutex();
+        }
+    }
+
+    /// Port of lockBtreeMutex().
+    fn enterMutex(p: *Btree) void {
+        mutex_hooks.?.enter(p.bs.mutex.?);
+        p.markLocked();
+    }
+
+    fn markLocked(p: *Btree) void {
+        p.locked = true;
+        _ = p.enter();
+    }
+
+    /// lockMutex(), and the BtShared: what each method of the handle
+    /// starts with (sqlite3BtreeEnter(p); pBt = p->pBt), before a
+    /// `defer p.unlockMutex()`.
+    fn acquire(p: *Btree) *BtShared {
+        p.lockMutex();
+        return p.enter();
+    }
+
+    /// Port of unlockBtreeMutex().
+    fn leaveMutex(p: *Btree) void {
         mutex_hooks.?.leave(p.bs.mutex.?);
+        p.locked = false;
+    }
+
+    /// Port of sqlite3BtreeLeave(): undo one lockMutex().
+    pub fn unlockMutex(p: *Btree) void {
+        if (!p.sharable) return;
+        std.debug.assert(p.want_to_lock > 0);
+        p.want_to_lock -= 1;
+        if (p.want_to_lock == 0 and p.locked) p.leaveMutex();
     }
 
     /// The BtShared, with what of the connection it calls back made the
@@ -404,7 +489,8 @@ pub const Btree = struct {
     /// made with `make` (and later freed with `free`) by the first handle
     /// to ask.
     pub fn schema(p: *Btree, make: *const fn () ?*anyopaque, free: *const fn (?*anyopaque) void) ?*anyopaque {
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         if (bs.schema == null) {
             bs.schema = make();
             bs.free_schema = free;
@@ -488,7 +574,8 @@ pub const Btree = struct {
     /// for reading or writing, or fail with LockedSharedCache.
     pub fn lockTable(p: *Btree, table: Pgno, write: bool) Error!void {
         if (!p.sharable) return;
-        _ = p.enter();
+        p.lockMutex();
+        defer p.unlockMutex();
         try p.queryLock(table, write);
         try p.setLock(table, write);
     }
@@ -496,7 +583,8 @@ pub const Btree = struct {
     /// Port of sqlite3BtreeSchemaLocked(): another handle's lock keeps
     /// this one from reading the schema.
     pub fn schemaLocked(p: *Btree) bool {
-        _ = p.enter();
+        p.lockMutex();
+        defer p.unlockMutex();
         p.queryLock(schema_root, false) catch return true;
         return false;
     }
@@ -521,7 +609,8 @@ pub const Btree = struct {
     /// With shared cache, another handle's write transaction or locks
     /// fail it with LockedSharedCache.
     pub fn beginTrans(p: *Btree, mode: TransMode, n_savepoint: u32) Error!void {
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         const wrflag = mode != .read;
         if (p.in_trans == .write or (p.in_trans == .read and !wrflag)) {
             if (wrflag) try bs.pager.openSavepoint(n_savepoint);
@@ -587,7 +676,8 @@ pub const Btree = struct {
     /// `i_statement`, a savepoint numbered after every SAVEPOINT the
     /// connection has open. Requires a write transaction.
     pub fn beginStmt(p: *Btree, i_statement: u32) Error!void {
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         std.debug.assert(p.in_trans == .write and !bs.read_only and i_statement > 0);
         try bs.pager.openSavepoint(i_statement);
     }
@@ -599,7 +689,8 @@ pub const Btree = struct {
     /// exist afterwards.
     pub fn savepoint(p: *Btree, op: pager_mod.SavepointOp, i: i32) Error!void {
         if (p.in_trans != .write) return;
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         std.debug.assert(i >= 0 or (i == -1 and op == .rollback));
         if (op == .rollback) try bs.saveAllCursors(0, null);
         try bs.pager.savepoint(op, i);
@@ -614,7 +705,8 @@ pub const Btree = struct {
     /// meanwhile, even if the header still says 2.
     pub fn setVersion(p: *Btree, version: u8) Error!void {
         std.debug.assert(version == 1 or version == 2);
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         bs.no_wal = version == 1;
         defer bs.no_wal = false;
         try p.beginTrans(.read, 0);
@@ -631,7 +723,8 @@ pub const Btree = struct {
     /// Pager.checkpoint). Fails with Locked inside a transaction (of any
     /// handle).
     pub fn checkpoint(p: *Btree, db: pager_mod.Conn, mode: pager_mod.CheckpointMode, n_log: ?*i32, n_ckpt: ?*i32) (Error || error{Locked})!void {
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         if (bs.in_trans != .none) return error.Locked;
         // An empty database switched to WAL mode has not opened its WAL
         // yet; a read transaction does that (C runs PRAGMA table_list).
@@ -653,7 +746,8 @@ pub const Btree = struct {
     /// journal names the super-journal `super` (see Pager).
     pub fn commitPhaseOneSuper(p: *Btree, super: ?[]const u8) Error!void {
         if (p.in_trans != .write) return;
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         if (bs.isAutoVacuum()) try bs.autoVacuumCommit();
         if (bs.do_truncate) bs.pager.truncateImage(bs.n_page);
         try bs.pager.commitPhaseOneSuper(super, false);
@@ -664,7 +758,8 @@ pub const Btree = struct {
     /// transaction (the caller committed by other means).
     pub fn commitPhaseTwo(p: *Btree, cleanup: bool) Error!void {
         if (p.in_trans == .none) return;
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         if (p.in_trans == .write) {
             bs.pager.commitPhaseTwo() catch |err| if (!cleanup) return err;
             p.data_version_bias -%= 1;
@@ -704,7 +799,8 @@ pub const Btree = struct {
     /// their positions are saved so they survive the rollback. The
     /// transaction always ends, even if an error is returned.
     pub fn rollback(p: *Btree, trip_arg: ?Error, write_only_arg: bool) Error!void {
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         var first_err: ?Error = null;
         var trip = trip_arg;
         var write_only = write_only_arg;
@@ -738,7 +834,8 @@ pub const Btree = struct {
     /// Port of sqlite3BtreeGetMeta().
     pub fn getMeta(p: *Btree, idx: Meta) u32 {
         std.debug.assert(p.in_trans != .none);
-        const bs = p.enter();
+        const bs = p.acquire();
+        defer p.unlockMutex();
         if (idx == .data_version) return bs.pager.dataVersion() +% p.data_version_bias;
         return bs.getMeta(idx);
     }
@@ -748,51 +845,81 @@ pub const Btree = struct {
     pub fn cursor(p: *Btree, cur: *Cursor, root: Pgno, opts: Cursor.Options) Error!void {
         std.debug.assert(p.in_trans != .none);
         std.debug.assert(!opts.write or p.in_trans == .write);
-        try p.enter().cursor(cur, root, opts);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        try bs.cursor(cur, root, opts);
         cur.owner = p;
     }
     pub fn updateMeta(p: *Btree, idx: Meta, value: u32) Error!void {
         std.debug.assert(p.in_trans == .write);
-        return p.enter().updateMeta(idx, value);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.updateMeta(idx, value);
     }
     pub fn createTable(p: *Btree, kind: TableKind) Error!Pgno {
-        return p.enter().createTable(kind);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.createTable(kind);
     }
     pub fn clearTable(p: *Btree, root: Pgno) Error!i64 {
-        return p.enter().clearTable(root);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.clearTable(root);
     }
     pub fn dropTable(p: *Btree, root: Pgno) Error!Pgno {
-        return p.enter().dropTable(root);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.dropTable(root);
     }
     pub fn incrVacuum(p: *Btree) Error!bool {
-        return p.enter().incrVacuum();
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.incrVacuum();
     }
     pub fn newDb(p: *Btree) Error!void {
-        return p.enter().newDb();
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.newDb();
     }
     pub fn tripAllCursors(p: *Btree, err: Error, write_only: bool) Error!void {
-        return p.enter().tripAllCursors(err, write_only);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.tripAllCursors(err, write_only);
     }
     pub fn integrityCheck(p: *Btree, gpa: Allocator, roots: []const Pgno, max_err: u32) Error!@import("integrity.zig").Report {
-        return p.enter().integrityCheck(gpa, roots, max_err);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.integrityCheck(gpa, roots, max_err);
     }
     pub fn setCacheSize(p: *Btree, n: i32) void {
-        p.bs.setCacheSize(n);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        bs.setCacheSize(n);
     }
     pub fn setPagerFlags(p: *Btree, f: pager_mod.Flags) void {
-        p.bs.setPagerFlags(f);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        bs.setPagerFlags(f);
     }
     pub fn setSpillSize(p: *Btree, n: i32) u32 {
-        return p.bs.setSpillSize(n);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.setSpillSize(n);
     }
     pub fn maxPageCount(p: *Btree, mx: Pgno) Pgno {
-        return p.bs.maxPageCount(mx);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.maxPageCount(mx);
     }
     pub fn secureDelete(p: *Btree, mode: ?SecureDelete) SecureDelete {
-        return p.bs.secureDelete(mode);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.secureDelete(mode);
     }
     pub fn setPageSize(p: *Btree, page_size: u32, reserve: u8, fix: bool) Error!void {
-        return p.bs.setPageSize(page_size, reserve, fix);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.setPageSize(page_size, reserve, fix);
     }
     pub fn getPageSize(p: *const Btree) u32 {
         return p.bs.getPageSize();
@@ -807,7 +934,9 @@ pub const Btree = struct {
         return p.bs.lastPage();
     }
     pub fn setAutoVacuum(p: *Btree, mode: AutoVacuum) Error!void {
-        return p.bs.setAutoVacuum(mode);
+        const bs = p.acquire();
+        defer p.unlockMutex();
+        return bs.setAutoVacuum(mode);
     }
     pub fn getAutoVacuum(p: *const Btree) AutoVacuum {
         return p.bs.getAutoVacuum();

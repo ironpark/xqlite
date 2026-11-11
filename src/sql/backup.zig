@@ -181,6 +181,8 @@ fn attachBackupObject(b: *Backup) void {
 pub fn step(b: *Backup, n_page: i32) i32 {
     var rc = b.rc;
     if (isFatalError(rc)) return rc;
+    b.src.lockMutex();
+    defer b.src.unlockMutex();
     const src_pager = b.src.pager;
     var dest: ?*Btree = null;
     var n_src_page: i64 = -1;
@@ -372,6 +374,8 @@ pub fn finish(b_arg: ?*Backup) i32 {
 /// The part of finish() a copyFile() backup, which lives on the stack,
 /// needs too.
 fn release(b: *Backup) i32 {
+    b.src.lockMutex();
+    defer b.src.unlockMutex();
     // Unregister from the source pager.
     if (b.dest_db != null) b.src.n_backup -= 1;
     if (b.is_attached) {
@@ -419,6 +423,10 @@ fn hookRestart(h: *pager_mod.Backup) void {
 /// page size may change afterwards (VACUUM gives it that of `from`).
 /// Returns a result code.
 pub fn copyFile(to: *Btree, from: *Btree, db: *Sqlite3) i32 {
+    to.lockMutex();
+    defer to.unlockMutex();
+    from.lockMutex();
+    defer from.unlockMutex();
     std.debug.assert(to.txnState() == .write);
     // (SQLITE_FCNTL_OVERWRITE, which C sends here, is for VFSes the port
     // does not have.)

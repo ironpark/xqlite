@@ -611,11 +611,11 @@ pub fn finishParse(p: *Parse, end: ?Token) void {
         // Rereading sqlite_schema: add the table to the schema.
         const s = t.schema.?;
         build.markAllShadowTablesOf(db, t);
-        s.tbl_hash.put(db.gpa, t.name, t) catch {
+        s.tbl_hash.put(build.schema_gpa, t.name, t) catch {
             db.oomFault();
             return;
         };
-        s.tbl_order.insert(db.gpa, t.name, t) catch {
+        s.tbl_order.insert(build.schema_gpa, t.name, t) catch {
             _ = s.tbl_hash.remove(t.name);
             db.oomFault();
             return;
@@ -1100,7 +1100,7 @@ pub fn epoTableInit(p: *Parse, m: *int.Module) bool {
     const db = p.db;
     if (m.epo_tab != null) return true;
     if (module.x_create != null and module.x_create != module.x_connect) return false;
-    const t = build.newSchemaTable(db, m.name) catch return false;
+    const t = build.newSchemaTable(m.name) catch return false;
     m.epo_tab = t;
     t.n_tab_ref = 1;
     t.e_tab_type = .vtab;

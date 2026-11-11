@@ -251,6 +251,7 @@ pub extern fn sqlite3_mutex_alloc(id: c_int) ?*Mutex;
 pub extern fn sqlite3_mutex_free(m: ?*Mutex) void;
 pub extern fn sqlite3_mutex_enter(m: ?*Mutex) void;
 pub extern fn sqlite3_mutex_leave(m: ?*Mutex) void;
+pub extern fn sqlite3_mutex_try(m: ?*Mutex) c_int;
 /// sqlite3MutexInit() and sqlite3MutexEnd() of the mutex methods in use.
 extern fn xq_mutex_init() c_int;
 extern fn xq_mutex_end() void;
@@ -260,7 +261,7 @@ pub const MUTEX_RECURSIVE = 1;
 const shared_cache_mutexes: @import("xqlite_storage").btree.MutexHooks = .{
     .alloc = struct {
         fn f() ?*anyopaque {
-            return sqlite3_mutex_alloc(MUTEX_RECURSIVE);
+            return sqlite3_mutex_alloc(0); // SQLITE_MUTEX_FAST
         }
     }.f,
     .free = struct {
@@ -276,6 +277,11 @@ const shared_cache_mutexes: @import("xqlite_storage").btree.MutexHooks = .{
     .leave = struct {
         fn f(m: *anyopaque) void {
             sqlite3_mutex_leave(@ptrCast(m));
+        }
+    }.f,
+    .try_enter = struct {
+        fn f(m: *anyopaque) bool {
+            return sqlite3_mutex_try(@ptrCast(m)) == 0;
         }
     }.f,
     .static = struct {
@@ -294,43 +300,22 @@ pub const have_threads = !builtin.cpu.arch.isWasm();
 /// What sqlite3_mutex_enter(db->mutex) took, for leaving it.
 pub const Lock = struct {
     m: ?*Mutex,
-    /// The connection whose shared caches were entered too.
-    shared: ?*Handle = null,
 
     pub fn unlock(l: Lock) void {
-        if (l.shared) |db| {
-            var i = db.dbs.items.len;
-            while (i > 0) {
-                i -= 1;
-                if (db.dbs.items[i].bt) |bt| bt.unlockMutex();
-            }
-        }
         if (l.m) |m| sqlite3_mutex_leave(m);
-    }
-
-    /// The lock of a connection just closed: closing its b-trees left
-    /// their mutexes (Btree.close()).
-    pub fn closed(l: Lock) Lock {
-        return .{ .m = l.m };
     }
 };
 
 /// sqlite3_mutex_enter(db->mutex): in serialized mode, take the mutex
 /// of `db` (none for a null `db` or in multi-thread mode). The mutex is
-/// recursive: callbacks may call the interfaces again. Then, as
-/// sqlite3BtreeEnterAll() does, the mutexes of its databases in shared
-/// cache, which other connections use too, in any threading mode.
+/// recursive: callbacks may call the interfaces again. The mutexes of
+/// shared caches are taken where SQLite takes them: the b-tree's
+/// methods, a run (sqlite3VdbeEnter()), prepare and the interfaces that
+/// reach the b-trees (blob, backup, file_control ...) take their own.
 pub inline fn lock(db: ?*Handle) Lock {
     const e = extOf(db) orelse return .{ .m = null };
     if (e.mutex) |m| sqlite3_mutex_enter(m);
-    if (db.?.n_shared == 0) return .{ .m = e.mutex };
-    return enterShared(db.?, e.mutex);
-}
-
-/// lock(): sqlite3BtreeEnterAll() for a connection with shared caches.
-noinline fn enterShared(db: *Handle, m: ?*Mutex) Lock {
-    for (db.dbs.items) |d| if (d.bt) |bt| bt.lockMutex();
-    return .{ .m = m, .shared = db };
+    return .{ .m = e.mutex };
 }
 
 /// lock() for the connection of statement `v`.

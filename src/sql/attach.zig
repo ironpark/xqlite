@@ -135,6 +135,9 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         .busy_handler = main_mod.btreeBusyHandler(db),
         .uri_params = parsed.params(),
         .shared_key = main_mod.sharedKey(flags, is_memdb, path_name),
+        .sibling = for (db.dbs.items) |d| {
+            if (d.bt) |b| if (b.sharable) break b;
+        } else null,
         .uri = parsed.flags.uri,
     }) catch |err| blk: {
         rc = int.errorCode(err);
@@ -151,13 +154,13 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     const schema = if (shared) build.sharedSchema(bt.?) orelse {
         bt.?.close(main_mod.pagerConn(db));
         return db.oomFault();
-    } else gpa.create(Schema) catch {
+    } else build.schema_gpa.create(Schema) catch {
         if (bt) |b| b.close(main_mod.pagerConn(db));
         return db.oomFault();
     };
     if (!shared) schema.* = .{ .enc = 1 };
     const db_name = gpa.dupeSentinel(u8, name, 0) catch {
-        if (!shared) gpa.destroy(schema);
+        if (!shared) build.schema_gpa.destroy(schema);
         if (bt) |b| b.close(main_mod.pagerConn(db));
         return db.oomFault();
     };
@@ -193,8 +196,7 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
             db.dbs.items[i_db].bt = null;
         }
         build.resetAllSchemasOfConnection(db);
-        // The entry is gone unless schema resets are deferred.
-        if (db.dbs.items.len > i_db) dropEntry(db, i_db);
+        dropEntry(db, i_db);
         if (rc == RC.NOMEM or rc == RC.IOERR_NOMEM) {
             db.oomFault();
             if (err_dyn) |m| gpa.free(m);
@@ -211,7 +213,6 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
 /// db.init.i_db and reopen it, with a new schema, on a separate store of
 /// the memdb VFS (serialize.zig fills it).
 fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
-    const gpa = db.gpa;
     const i_db = db.init.i_db;
     const d = &db.dbs.items[i_db];
     const old = d.bt.?;
@@ -221,7 +222,7 @@ fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
         .n_vdbe_read = &db.n_vdbe_read,
         .busy_handler = main_mod.btreeBusyHandler(db),
     }) catch |err| return api.resultErrorCode(ctx, int.errorCode(err));
-    const schema = gpa.create(Schema) catch {
+    const schema = build.schema_gpa.create(Schema) catch {
         bt.close(main_mod.pagerConn(db));
         return api.resultErrorCode(ctx, RC.NOMEM);
     };
@@ -230,7 +231,7 @@ fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
     detachTempTriggers(db, d.schema);
     old.close(main_mod.pagerConn(db));
     build.schemaFree(db, d.schema);
-    gpa.destroy(d.schema);
+    build.schema_gpa.destroy(d.schema);
     d.bt = bt;
     d.schema = schema;
     // The eponymous virtual tables hold pointers into the old schema.

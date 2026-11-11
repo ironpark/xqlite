@@ -209,8 +209,14 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - 파일은 전체 경로로, 메모리 데이터베이스는 URI의 이름으로 찾습니다(`file:memdb1?mode=memory&cache=shared`). 임시 데이터베이스와 URI가 아닌 `:memory:`는 공유하지 않습니다. 한 연결이 같은 공유 캐시를 두 번 ATTACH하면 "database is already attached"입니다.
 - 연결 사이는 테이블 잠금으로 막습니다. 문장이 여는 테이블마다 `OP_TableLock`이 들어가고(공유 캐시의 데이터베이스일 때만, SQLite와 같은 바이트코드), 다른 연결의 잠금에 걸리면 `SQLITE_LOCKED_SHAREDCACHE`와 "database table is locked: t1"입니다. 다른 연결이 스키마를 쓰는 중이면 문장 준비가 "database schema is locked: main"으로 실패합니다. `PRAGMA read_uncommitted`는 읽기 잠금을 건너뜁니다.
 - 한 번에 한 연결만 쓰기 트랜잭션을 엽니다. 다른 연결의 쓰기나 `BEGIN EXCLUSIVE`가 있으면 트랜잭션 시작이 `SQLITE_LOCKED_SHAREDCACHE`입니다. 바쁨 처리기는 그때 일하는 연결의 것이 불립니다.
-- 공유 캐시를 쓰는 연결은 API 호출마다 그 캐시의 재귀 뮤텍스를 잡습니다(SQLite의 `sqlite3BtreeEnterAll()`). 그래서 서로 다른 스레드의 연결이 한 캐시를 함께 써도 됩니다. 캐시 목록과 여는 순서는 `SQLITE_MUTEX_STATIC_MAIN`·`STATIC_OPEN`으로 지킵니다.
-- 함께 쓰는 스키마의 객체는 연결의 룩어사이드 메모리에 두지 않습니다(다른 연결이 해제할 수 있음). 스키마는 마지막 연결이 그 데이터베이스를 닫을 때 해제됩니다.
+- 캐시마다 뮤텍스(`SQLITE_MUTEX_FAST`)가 있고, SQLite와 같은 곳에서 잡습니다(`btmutex.c`). 그래서 서로 다른 스레드의 연결이 한 캐시를 함께 써도 됩니다.
+  - 문장의 실행과 정지(`step`, `reset`, `finalize`)는 그 문장이 쓰는 데이터베이스의 캐시만 잡습니다(`sqlite3VdbeEnter()`의 `lockMask`).
+  - prepare, 롤백, 연결 닫기의 가상 테이블 정리, ALTER의 이름 바꾸기 함수는 연결의 캐시를 모두 잡습니다(`sqlite3BtreeEnterAll()`).
+  - b-tree의 메서드(트랜잭션 시작·커밋·롤백, 메타 값, 테이블 만들기·지우기, 페이저 설정 ...)는 스스로 자기 캐시를 잡습니다.
+  - b-tree를 직접 쓰는 API(blob, backup, `file_control`, 체크포인트, 직렬화, 스냅숏, `txn_state`, `table_column_metadata`, `db_status`, `db_cacheflush` ...)도 모두 잡습니다. `column_*`, `bind_*` 같은 문장 접근 함수는 캐시 뮤텍스를 잡지 않습니다.
+  - 여러 캐시는 연결마다 `BtShared` 주소 순서로 잡고, 이미 잡힌 캐시를 기다려야 하면 뒤 순서의 것을 놓았다가 다시 잡아 두 연결이 서로를 기다리지 않게 합니다(`btreeLockCarefully()`).
+  - 캐시 목록과 여는 순서는 `SQLITE_MUTEX_STATIC_MAIN`·`STATIC_OPEN`으로 지킵니다.
+- 스키마의 객체(테이블, 뷰의 열, 트리거와 해시 표, 방언 카탈로그 캐시)는 공유 여부와 상관없이 라이브러리 메모리(`sqlite3_malloc()`)에 둡니다. 연결의 룩어사이드나 연결 객체에 묶이지 않으므로, 읽은 연결이 먼저 닫혀도 다른 연결이 해제할 수 있습니다. 함께 쓰는 스키마는 마지막 연결이 그 데이터베이스를 닫을 때 해제됩니다.
 
 ## 기본 VFS
 

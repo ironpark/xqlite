@@ -418,7 +418,7 @@ fn beginAddColumnImpl(p: *Parse, src: *SrcList) Oom!void {
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
 
     const name = try std.fmt.allocPrint(p.arena, "sqlite_altertab_{s}", .{t.name});
-    const new = try build.newSchemaTable(db, name);
+    const new = try build.newSchemaTable(name);
     p.new_table = new;
     const a = new.mem.?.allocator();
     new.cols = try a.alloc(Column, t.cols.len);
@@ -999,6 +999,9 @@ fn renameFuncError(ctx: *Context, rc: i32, argv: []*Mem, i_sql: usize, p: *Parse
 /// by ALTER TABLE RENAME COLUMN.
 fn renameColumnFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The schemas are parsed: no other connection may reset them.
+    main_mod.btreeEnterAll(db);
+    defer main_mod.btreeLeaveAll(db);
     // The statements parsed here are not authorized.
     const x_auth = db.auth;
     db.auth = null;
@@ -1131,6 +1134,9 @@ fn renameTableSelectCb(w: *Walker, s: *Select) WRC {
 /// RENAME TO.
 fn renameTableFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The schemas are parsed: no other connection may reset them.
+    main_mod.btreeEnterAll(db);
+    defer main_mod.btreeLeaveAll(db);
     // The statements parsed here are not authorized.
     const x_auth = db.auth;
     db.auth = null;
@@ -1237,6 +1243,9 @@ fn renameQuotefixExprCb(w: *Walker, e: *Expr) WRC {
 /// writable_schema=ON, else the error.
 fn renameQuotefixFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The schemas are parsed: no other connection may reset them.
+    main_mod.btreeEnterAll(db);
+    defer main_mod.btreeLeaveAll(db);
     // The statements parsed here are not authorized.
     const x_auth = db.auth;
     db.auth = null;

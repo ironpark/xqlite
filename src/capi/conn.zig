@@ -191,7 +191,7 @@ fn close(db_arg: ?*Handle, zombie: bool) c_int {
         return RC.BUSY;
     }
     // The mutex goes with the connection (sqlite3LeaveMutexAndCloseZombie()).
-    lk.closed().unlock();
+    lk.unlock();
     freeExt(e);
     return rc;
 }
@@ -202,7 +202,7 @@ fn close(db_arg: ?*Handle, zombie: bool) c_int {
 pub fn leaveAndCloseZombie(db: *Handle, lk: c.Lock) void {
     const e = c.extOf(db) orelse return lk.unlock();
     if (!e.zombie or db.vdbe != null or c.main.close(db) != RC.OK) return lk.unlock();
-    lk.closed().unlock();
+    lk.unlock();
     freeExt(e);
 }
 
@@ -600,6 +600,8 @@ pub export fn sqlite3_table_column_metadata(
     defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const table_name = c.span(z_table_name) orelse return RC.MISUSE;
+    c.main.btreeEnterAll(db);
+    defer c.main.btreeLeaveAll(db);
     var err: ?[:0]u8 = null;
     var rc = @import("../sql/prepare.zig").init(db, &err);
     var data_type: ?[:0]const u8 = null;
@@ -731,6 +733,8 @@ pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, 
     defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const bt = c.main.dbNameToBtree(db, c.span(z_db_name)) orelse return RC.ERROR;
+    bt.lockMutex();
+    defer bt.unlockMutex();
     const fd = bt.pager.fd;
     switch (op) {
         27 => {
@@ -830,6 +834,8 @@ pub export fn sqlite3_db_cacheflush(db_arg: ?*Handle) callconv(.c) c_int {
     const lk = c.lock(db_arg);
     defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
+    c.main.btreeEnterAll(db);
+    defer c.main.btreeLeaveAll(db);
     var seen_busy = false;
     for (db.dbs.items) |d| {
         const bt = d.bt orelse continue;
@@ -881,6 +887,8 @@ pub export fn sqlite3_db_status64(db_arg: ?*Handle, op: c_int, p_cur: ?*i64, p_h
         // CACHE_USED, and CACHE_USED_SHARED, which divides a shared
         // cache among its connections.
         1, 11 => {
+            c.main.btreeEnterAll(db);
+            defer c.main.btreeLeaveAll(db);
             for (db.dbs.items) |d| if (d.bt) |bt| {
                 var n: i64 = @intCast(bt.pager.memUsed());
                 if (op == 11) n = @divTrunc(n, bt.connectionCount());

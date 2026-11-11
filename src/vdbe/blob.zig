@@ -153,6 +153,9 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
     var p: Parse = .{ .db = db, .arena = arena_state.allocator() };
     defer build.releaseTableRefs(&p);
     defer prepare.parseObjectResetLookaside(&p);
+    // The schemas are read: no other connection may reset them.
+    main_mod.btreeEnterAll(db);
+    defer main_mod.btreeLeaveAll(db);
 
     var tab_opt = build.locateTable(&p, 0, table, database);
     if (tab_opt) |t| if (t.isVirtual()) {
@@ -291,6 +294,10 @@ fn readWrite(p: *Incrblob, buf: []u8, offset: i32, comptime access: Access) i32 
         rc = RC.ERROR;
     } else if (p.stmt) |v| {
         const csr = p.csr.?;
+        // sqlite3BtreeEnterCursor().
+        const owner = csr.owner.?;
+        owner.lockMutex();
+        defer owner.unlockMutex();
         const at: u32 = @intCast(offset + p.i_offset);
         const r = switch (access) {
             .read => csr.payloadChecked(at, buf),

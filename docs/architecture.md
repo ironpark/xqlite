@@ -20,6 +20,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 - [값 표시](#값-표시)
 - [엄격한 타입](#엄격한-타입)
 - [카탈로그와 시퀀스](#카탈로그와-시퀀스)
+- [코드 생성과 VDBE 피연산자](#코드-생성과-vdbe-피연산자)
 - [VFS](#vfs)
 - [스토리지 패키지](#스토리지-패키지)
 - [공용 패키지](#공용-패키지)
@@ -503,6 +504,25 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 | `resolve(db, a, schemas, cfg, schema, name)` | 한정한 이름 → SQLite (db, name). `Config{default_schema, temp_schema}`가 방언의 이름. SQLite 데이터베이스 이름이 먼저, 그다음 목록의 스키마(main과 바꾼 이름), 둘 다 아니면 `error.NoSuchSchema` |
 
 카탈로그 뷰(`information_schema`, `pg_namespace` ...)는 개체 이름을 목록과 조인해 스키마와 이름으로 나누고, 기본 스키마에서는 감춥니다.
+
+## 코드 생성과 VDBE 피연산자
+
+코드 생성기(`src/sql`)는 SQLite의 C를 옮긴 것이라 레지스터, 커서, 라벨, 주소를 모두 `i32`로 다뤘습니다. 지금은 타입을 나눕니다(`src/vdbe/operand.zig`).
+
+| 타입 | 뜻 |
+| --- | --- |
+| `Reg` | 레지스터. `.none`(0)은 레지스터 없음. 이어진 레지스터는 `reg.at(i)` |
+| `Cursor` | 커서 번호. 테이블 뒤의 인덱스 커서는 `cur.at(i)` |
+| `Label` | 아직 주소가 정해지지 않은 자리(`aux.newLabel()`, `aux.place()`) |
+| `Addr` | 명령의 주소. `addr.plus(n)` |
+| `Jump` | `Label`이거나 `Addr`인 점프 대상. 둘 다 받는 매개변수와, 아직 `i32`인 코드에서 온 값에 씀(`Jump.of()`, `Jump.from()`) |
+
+- **피연산자 표**: `operand.kinds(op)`가 opcode마다 P1·P2·P3가 무엇인지(`int`, `reg`, `cursor`, `jump`, `addr`) 정합니다. 컴파일 시점에 opcode 속성(`OPFLG_JUMP`, `IN1`~`OUT3`)과 맞춰 봅니다. `addr`은 P2가 아닌 자리의 주소(`OP_Jump`의 P1·P3 등)로, 라벨을 넣으면 풀리지 않으므로 `Addr`만 받습니다. 어떤 쓰임에서만 레지스터인 피연산자(`OP_Clear`의 P3, `P2ISREG`의 P2)는 `int`입니다.
+- **명령 내기**: `aux.emit(v, .Column, .{ cur, col, reg })`가 인자의 타입을 표와 대조합니다. 레지스터 자리에 커서를 넘기면 컴파일 오류입니다. 뒤의 피연산자는 생략하면 0이고, 리터럴 0은 어느 종류에나 "쓰지 않음"으로 받습니다.
+  - P4가 있으면 `emit4`(P4 값), `emitInt`(정수), `emitStr`(복사한 문자열)입니다.
+  - 컴파일할 때 고르는 opcode(`OP_NotExists`냐 `OP_NotFound`냐)는 `emitAny(v, op, shape, .{...})`입니다. `shape`는 후보 opcode들이 함께 가지는 피연산자 종류이고, 실행 때 `kinds(op)`와 같은지 단언합니다.
+- **아직 `i32`인 곳**: 공개 함수의 시그니처와 여러 파일이 함께 쓰는 구조체 필드(`Parse`, `WhereLevel`, `SelectDest`, `AggInfo` ...)는 아직 `i32`입니다. 그 경계에서 `.from()`과 `.int()`로 바꿉니다. `src/vdbe`의 `aux.zig`·`api.zig` 안의 호출, `pragma.zig`의 정적 opcode 목록(`addOpList`), 이미 낸 명령을 복사하거나 `WhereLevel`에 넣어 둔 opcode를 내는 몇 곳도 예전 `addOp*`입니다.
+- 새 코드는 `emit` 계열을 씁니다. 이 변경은 바이트코드를 바꾸지 않았습니다(`xqt planner`의 기록과 일치).
 
 ## VFS
 

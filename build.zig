@@ -1003,16 +1003,23 @@ fn addTcl(b: *std.Build, target: std.Build.ResolvedTarget, sqlite_ref: ?SqliteRe
             .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libc = true }),
         });
         const m = exe.root_module;
-        const flags = std.mem.concat(b.allocator, []const u8, &.{ &.{
-            "-DSQLITE_TEST=1",
-            "-DSQLITE_CORE",
-            "-DSQLITE_PRIVATE=",
-            "-DBUILD_sqlite",
-            "-DSQLITE_CKSUMVFS_STATIC",
-            "-DSQLITE_STATIC_RANDOMJSON",
-            "-DSQLITE_SERIES_CONSTRAINT_VERIFY=1",
-            "-Wno-everything",
-        }, &features }) catch @panic("OOM");
+        const flags = std.mem.concat(b.allocator, []const u8, &.{
+            &.{
+                "-DSQLITE_TEST=1",
+                "-DSQLITE_CORE",
+                "-DSQLITE_PRIVATE=",
+                "-DBUILD_sqlite",
+                "-DSQLITE_CKSUMVFS_STATIC",
+                "-DSQLITE_STATIC_RANDOMJSON",
+                "-DSQLITE_SERIES_CONSTRAINT_VERIFY=1",
+                // libtcl is built with threads (xqt fetch tcl). Without this
+                // tcl.h makes Tcl_MutexLock() a no-op, and the pointer table
+                // of test1.c is no longer safe in the threads of sqlthread.
+                "-DTCL_THREADS=1",
+                "-Wno-everything",
+            },
+            &features,
+        }) catch @panic("OOM");
         // The engine's sqlite3.h first: include/ or the amalgamation's.
         m.addIncludePath(if (xq) b.path("include") else ref.dep.path("."));
         m.addIncludePath(gen.getDirectory());

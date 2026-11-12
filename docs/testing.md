@@ -379,18 +379,18 @@ zig-out/bin/xqt tcl ref/sqlite/test/where.test
   - 콜백: collation을 더할 때는 문장을 만료하지 않음(`schema-7`), `result_text`의 소멸자를 결과가 끝날 때 부름(`func-12.1`), `sqlite3_aggregate_count()`(`func-23.1`), MISUSE에서도 함수의 소멸자를 부름(`func3-4.2`), `%n`(`printf-14.2`), `expanded_sql`의 NUL(`trace3-8.7`), 뷰의 열 이름을 구할 때 잡은 테이블 참조를 바로 놓음(`view3`)
   - 값과 기타: REAL 기본값의 48비트 정수는 정수로 인덱스에 들어감(`intreal-7.2x`), `table_column_metadata`의 `rowid`(`colmeta-101`), `close_v2` 뒤의 prepare가 MISUSE(`close-1.4.3`), 긴 리터럴이 `string or blob too big`(`sqlite3ErrorToParser()`, `sqllimits1`), `OP_ReopenIdx`가 커서 위치를 지움(`in4-12.1`), iVersion 1 VFS의 `PRAGMA mmap_size`(`sort5-1.0`)
 
-- 그다음 묶음(xqlite만 실패 89개 → 85개. 새로 실패한 것 없음):
+- 그다음 묶음(xqlite만 실패 89개 → 84개. 새로 실패한 것 없음):
   - 오류 로그: 엔진이 `sqlite3_log()`로 남기는 기록을 옮김([C API의 오류 로그](c-api.md#오류-로그): `autoindex1-113`, `wal-23.4`)
   - `SQLITE_CONFIG_COVERING_INDEX_SCAN`(`coveridxscan-3.*`), overflow 페이지를 파일에서 바로 읽기와 `compile_options`의 `DIRECT_OVERFLOW_READ`(`ctime-3.0.1`)
   - 바인딩의 소멸자를 SQLite처럼 값을 다 쓴 뒤 부름, 닫힌 연결 검사를 `exec`·`errcode`·`prepare16`에도 둠
   - 시간 제한에 가려져 있던 `misc7`의 두 가지: 저널을 만들 수 없는 디렉터리는 `SQLITE_READONLY_DIRECTORY`(`misc7-23.4`), 연결 없는 `sqlite3_errmsg16()`은 `out of memory`(`misc7-8`)
   - ATTACH가 스키마를 읽는 동안 모든 b-tree 뮤텍스를 잡음(`attach.c`처럼). 공유 캐시를 쓰는 스레드들이 같은 스키마를 동시에 읽어 `thread002`가 부하에서 가끔 `malformed database schema ... already exists`나 패닉으로 끝나던 것
+  - fixture의 C 소스를 `-DTCL_THREADS=1`로 컴파일함(`build.zig`). libtcl은 스레드로 빌드되는데 이 정의가 없으면 `tcl.h`가 `Tcl_MutexLock()`을 빈 매크로로 만들어, `test1.c`의 포인터 표(`ptr:0x...` 문자열 → 포인터)를 `sqlthread`의 스레드들이 잠금 없이 고쳤음. `thread004-1.2`가 xqlite fixture에서는 가끔 빈 포인터로, SQLite fixture에서는 가끔 SEGV로 끝나던 원인(짧게 줄인 테스트로 32번 중 xqlite 6번 실패·SQLite 8번 SEGV → 두 쪽 모두 0번)
 
-전체 xqlite만 실패는 950개에서 85개가 되었습니다. 지금 xqlite만 실패하는 주된 원인은 다음과 같습니다(`trans`·`avtrans`의 109개는 테스트 이름에 `random()`으로 정해지는 행 수가 들어가 두 쪽이 다른 이름을 돈 것이고, 실패 수는 두 쪽이 같습니다).
+전체 xqlite만 실패는 950개에서 84개가 되었습니다. 지금 xqlite만 실패하는 주된 원인은 다음과 같습니다(`trans`·`avtrans`의 109개는 테스트 이름에 `random()`으로 정해지는 행 수가 들어가 두 쪽이 다른 이름을 돈 것이고, 실패 수는 두 쪽이 같습니다).
 
 | 원인 | 예 |
 | --- | --- |
-| 스레드 테스트가 가끔 실패 | `thread004-1.2`: 공유 캐시 설정을 스레드들이 함께 바꾸는 테스트로, SQLite fixture도 가끔 SEGV로 끝남 |
 | macOS의 프록시 잠금(`SQLITE_ENABLE_LOCKING_STYLE`의 `SQLITE_FCNTL_SET_LOCKPROXYFILE`)을 옮기지 않음 | `filectrl-1.5`(`SQLITE_NOTFOUND`) |
 | 메모리 통계(lookaside, `sqlite3_db_status`의 바이트 수) | `lookaside`(12개), `dbstatus`(38개), `dbstatus2`, `memsubsys1`, `memsubsys2`, `shrink` |
 | 사용자 페이지 캐시·뮤텍스 구현(`SQLITE_CONFIG_PCACHE2`, `MUTEX`)을 SQLite처럼 쓰지 않음 | `pcache2`, `init`, `mutex1`, `mutex2` |

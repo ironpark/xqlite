@@ -44,6 +44,11 @@ const Table = int.Table;
 const FuncDef = int.FuncDef;
 const Context = vi.Context;
 const Mem = vi.Mem;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Label = aux.operand.Label;
+const Addr = aux.operand.Addr;
+const Jump = aux.operand.Jump;
 const Walker = walker.Walker;
 const WRC = walker.WRC;
 
@@ -861,7 +866,7 @@ pub fn windowRewrite(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
         win.reg_accum = p.n_mem;
         p.n_mem += 1;
         win.reg_result = p.n_mem;
-        _ = aux.addOp2(v, OP.Null, 0, win.reg_accum);
+        _ = aux.emit(v, .Null, .{ 0, Reg.from(win.reg_accum) });
     }
 
     // "SELECT row_number() OVER () FROM t1" selects nothing from t1: keep
@@ -897,6 +902,11 @@ pub fn windowRewrite(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
 
 // ======================================================== code generation
 
+/// The operands of the comparisons (OP_Ge and the like) and of the
+/// arithmetic (OP_Add, OP_Subtract), for aux.emitAny().
+const compare_shape: [3]aux.operand.Kind = .{ .reg, .jump, .reg };
+const arith_shape: [3]aux.operand.Kind = .{ .reg, .reg, .reg };
+
 /// Port of sqlite3WindowCodeInit(): before sqlite3WhereBegin() of the
 /// rewritten SELECT, open the ephemeral table and its cursors and set up
 /// the registers sqlite3WindowCodeStep() uses.
@@ -906,23 +916,25 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
     const n_eph_expr: i32 = @intCast(item0.u4.subq.?.select.e_list.?.len());
     const m_win = s.win.?;
     const v = p.vdbe.?;
+    const eph: Cursor = .from(m_win.i_eph_csr);
 
-    _ = aux.addOp2(v, OP.OpenEphemeral, m_win.i_eph_csr, n_eph_expr);
-    _ = aux.addOp2(v, OP.OpenDup, m_win.i_eph_csr + 1, m_win.i_eph_csr);
-    _ = aux.addOp2(v, OP.OpenDup, m_win.i_eph_csr + 2, m_win.i_eph_csr);
-    _ = aux.addOp2(v, OP.OpenDup, m_win.i_eph_csr + 3, m_win.i_eph_csr);
+    _ = aux.emit(v, .OpenEphemeral, .{ eph, n_eph_expr });
+    _ = aux.emit(v, .OpenDup, .{ eph.at(1), eph });
+    _ = aux.emit(v, .OpenDup, .{ eph.at(2), eph });
+    _ = aux.emit(v, .OpenDup, .{ eph.at(3), eph });
 
     // Registers for the PARTITION BY values, set to NULL.
     if (m_win.partition) |part| {
         const n_expr: i32 = @intCast(part.len());
-        m_win.reg_part = p.n_mem + 1;
+        const reg_part: Reg = .from(p.n_mem + 1);
+        m_win.reg_part = reg_part.int();
         p.n_mem += n_expr;
-        _ = aux.addOp3(v, OP.Null, 0, m_win.reg_part, m_win.reg_part + n_expr - 1);
+        _ = aux.emit(v, .Null, .{ 0, reg_part, reg_part.at(n_expr - 1) });
     }
 
     p.n_mem += 1;
     m_win.reg_one = p.n_mem;
-    _ = aux.addOp2(v, OP.Integer, 1, m_win.reg_one);
+    _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_one) });
 
     if (m_win.e_exclude != 0) {
         p.n_mem += 1;
@@ -931,9 +943,9 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
         m_win.reg_end_rowid = p.n_mem;
         m_win.csr_app = p.n_tab;
         p.n_tab += 1;
-        _ = aux.addOp2(v, OP.Integer, 1, m_win.reg_start_rowid);
-        _ = aux.addOp2(v, OP.Integer, 0, m_win.reg_end_rowid);
-        _ = aux.addOp2(v, OP.OpenDup, m_win.csr_app, m_win.i_eph_csr);
+        _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_start_rowid) });
+        _ = aux.emit(v, .Integer, .{ 0, Reg.from(m_win.reg_end_rowid) });
+        _ = aux.emit(v, .OpenDup, .{ Cursor.from(m_win.csr_app), eph });
         return;
     }
 
@@ -954,20 +966,20 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
                 std.debug.assert(ki.sort_flags[0] == 0);
                 ki.sort_flags[0] = int.KeyInfoOrder.desc;
             };
-            _ = aux.addOp2(v, OP.OpenEphemeral, win.csr_app, 2);
+            _ = aux.emit(v, .OpenEphemeral, .{ Cursor.from(win.csr_app), 2 });
             if (key_info) |ki| aux.appendP4(v, .{ .keyinfo = ki });
-            _ = aux.addOp2(v, OP.Integer, 0, win.reg_app + 1);
+            _ = aux.emit(v, .Integer, .{ 0, Reg.from(win.reg_app).at(1) });
         } else if (isFunc(f, nth_value_name) or isFunc(f, first_value_name)) {
             // Two registers for the start and end of the current frame.
             win.reg_app = p.n_mem + 1;
             win.csr_app = p.n_tab;
             p.n_tab += 1;
             p.n_mem += 2;
-            _ = aux.addOp2(v, OP.OpenDup, win.csr_app, m_win.i_eph_csr);
+            _ = aux.emit(v, .OpenDup, .{ Cursor.from(win.csr_app), eph });
         } else if (isFunc(f, lead_name) or isFunc(f, lag_name)) {
             win.csr_app = p.n_tab;
             p.n_tab += 1;
-            _ = aux.addOp2(v, OP.OpenDup, win.csr_app, m_win.i_eph_csr);
+            _ = aux.emit(v, .OpenDup, .{ Cursor.from(win.csr_app), eph });
         }
     }
 }
@@ -981,7 +993,7 @@ const WINDOW_ENDING_NUM = 4;
 /// Port of windowCheckValue(): code a check that the PRECEDING or
 /// FOLLOWING offset (or nth_value() argument) in `reg` is a non-negative
 /// (positive) integer or number, halting with an error otherwise.
-fn windowCheckValue(p: *Parse, reg: i32, e_cond: usize) void {
+fn windowCheckValue(p: *Parse, reg: Reg, e_cond: usize) void {
     const errs = [_][:0]const u8{
         "frame starting offset must be a non-negative integer",
         "frame ending offset must be a non-negative integer",
@@ -991,22 +1003,22 @@ fn windowCheckValue(p: *Parse, reg: i32, e_cond: usize) void {
     };
     const ops = [_]OP{ OP.Ge, OP.Ge, OP.Gt, OP.Ge, OP.Ge };
     const v = p.vdbe.?;
-    const reg_zero = expr_mod.getTempReg(p);
-    _ = aux.addOp2(v, OP.Integer, 0, reg_zero);
+    const reg_zero: Reg = .from(expr_mod.getTempReg(p));
+    _ = aux.emit(v, .Integer, .{ 0, reg_zero });
     if (e_cond >= WINDOW_STARTING_NUM) {
-        const reg_string = expr_mod.getTempReg(p);
-        _ = aux.addOp4(v, OP.String8, 0, reg_string, 0, .{ .z = "" });
-        _ = aux.addOp3(v, OP.Ge, reg_string, aux.currentAddr(v) + 2, reg);
+        const reg_string: Reg = .from(expr_mod.getTempReg(p));
+        _ = aux.emit4(v, .String8, .{ 0, reg_string }, .{ .z = "" });
+        _ = aux.emit(v, .Ge, .{ reg_string, aux.here(v).plus(2), reg });
         aux.changeP5(v, Aff.numeric | vi.SQLITE_JUMPIFNULL);
     } else {
-        _ = aux.addOp2(v, OP.MustBeInt, reg, aux.currentAddr(v) + 2);
+        _ = aux.emit(v, .MustBeInt, .{ reg, aux.here(v).plus(2) });
     }
-    _ = aux.addOp3(v, ops[e_cond], reg_zero, aux.currentAddr(v) + 2, reg);
+    _ = aux.emitAny(v, ops[e_cond], compare_shape, .{ reg_zero, aux.here(v).plus(2), reg });
     aux.changeP5(v, Aff.numeric);
     main_mod.mayAbort(p);
-    _ = aux.addOp2(v, OP.Halt, RC.ERROR, OE.Abort.int());
+    _ = aux.emit(v, .Halt, .{ RC.ERROR, OE.Abort.int() });
     aux.appendP4(v, .{ .z = errs[e_cond] });
-    expr_mod.releaseTempReg(p, reg_zero);
+    expr_mod.releaseTempReg(p, reg_zero.int());
 }
 
 /// Port of windowArgCount().
@@ -1016,10 +1028,10 @@ fn windowArgCount(win: *Window) i32 {
 }
 
 /// A cursor on the ephemeral table and the registers holding the peer
-/// values of its row (struct WindowCsrAndReg).
+/// values of its row, if the frame has peers (struct WindowCsrAndReg).
 const WindowCsrAndReg = struct {
-    csr: i32 = 0,
-    reg: i32 = 0,
+    csr: Cursor,
+    reg: Reg = .none,
 };
 
 /// The state shared by sqlite3WindowCodeStep() and its helpers (struct
@@ -1031,22 +1043,23 @@ const WindowCodeArg = struct {
     parse: *Parse,
     m_win: *Window,
     v: *vi.Vdbe,
-    /// OP_Gosub to this address to return one row.
-    addr_gosub: i32,
+    /// OP_Gosub to here to return one row.
+    addr_gosub: Jump,
     /// Register of that OP_Gosub.
-    reg_gosub: i32,
+    reg_gosub: Reg,
     /// First of the argument registers.
-    reg_arg: i32 = 0,
+    reg_arg: Reg = .none,
     e_delete: i32 = 0,
-    reg_rowid: i32 = 0,
-    start: WindowCsrAndReg = .{},
-    current: WindowCsrAndReg = .{},
-    end: WindowCsrAndReg = .{},
+    /// The rowid of the row just inserted, or none in the flush.
+    reg_rowid: Reg = .none,
+    start: WindowCsrAndReg,
+    current: WindowCsrAndReg,
+    end: WindowCsrAndReg,
 };
 
 /// Port of windowReadPeerValues(): read the ORDER BY values of the row of
 /// `csr` into the registers from `reg`.
-fn windowReadPeerValues(cx: *WindowCodeArg, csr: i32, reg: i32) void {
+fn windowReadPeerValues(cx: *WindowCodeArg, csr: Cursor, reg: Reg) void {
     const m_win = cx.m_win;
     const order_by = m_win.order_by orelse return;
     const v = cx.v;
@@ -1054,7 +1067,7 @@ fn windowReadPeerValues(cx: *WindowCodeArg, csr: i32, reg: i32) void {
     const i_col_off = m_win.n_buffer_col + n_part;
     var i: i32 = 0;
     while (i < order_by.len()) : (i += 1) {
-        _ = aux.addOp3(v, OP.Column, csr, i_col_off + i, reg + i);
+        _ = aux.emit(v, .Column, .{ csr, i_col_off + i, reg.at(i) });
     }
 }
 
@@ -1062,75 +1075,77 @@ fn windowReadPeerValues(cx: *WindowCodeArg, csr: i32, reg: i32) void {
 /// function of the list `m_win`, or code the in-line equivalent of the
 /// built-in ones. The arguments are read from `csr` into the registers
 /// from `reg`.
-fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: i32, b_inverse: bool, reg: i32) void {
+fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: bool, reg: Reg) void {
     const p = cx.parse;
     const v = p.vdbe.?;
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
         const func = win.w_func.?;
         var n_arg: i32 = if (win.expr_args) 0 else windowArgCount(win);
-        var addr_if: i32 = 0;
+        var addr_if: ?Addr = null;
         std.debug.assert(!b_inverse or win.e_start != TK.UNBOUNDED);
 
         var i: i32 = 0;
         while (i < n_arg) : (i += 1) {
             if (i != 1 or !isFunc(func, nth_value_name)) {
-                _ = aux.addOp3(v, OP.Column, csr, win.i_arg_col + i, reg + i);
+                _ = aux.emit(v, .Column, .{ csr, win.i_arg_col + i, reg.at(i) });
             } else {
-                _ = aux.addOp3(v, OP.Column, m_win.i_eph_csr, win.i_arg_col + i, reg + i);
+                _ = aux.emit(v, .Column, .{ Cursor.from(m_win.i_eph_csr), win.i_arg_col + i, reg.at(i) });
             }
         }
         var reg_arg = reg;
 
         if (win.filter != null) {
-            const reg_tmp = expr_mod.getTempReg(p);
-            _ = aux.addOp3(v, OP.Column, csr, win.i_arg_col + n_arg, reg_tmp);
-            addr_if = aux.addOp3(v, OP.IfNot, reg_tmp, 0, 1);
-            expr_mod.releaseTempReg(p, reg_tmp);
+            const reg_tmp: Reg = .from(expr_mod.getTempReg(p));
+            _ = aux.emit(v, .Column, .{ csr, win.i_arg_col + n_arg, reg_tmp });
+            addr_if = aux.emit(v, .IfNot, .{ reg_tmp, 0, 1 });
+            expr_mod.releaseTempReg(p, reg_tmp.int());
         }
 
         if (m_win.reg_start_rowid == 0 and func.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
-            const addr_is_null = aux.addOp1(v, OP.IsNull, reg_arg);
+            const reg_app: Reg = .from(win.reg_app);
+            const csr_app: Cursor = .from(win.csr_app);
+            const addr_is_null = aux.emit(v, .IsNull, .{reg_arg});
             if (!b_inverse) {
-                _ = aux.addOp2(v, OP.AddImm, win.reg_app + 1, 1);
-                _ = aux.addOp2(v, OP.SCopy, reg_arg, win.reg_app);
-                _ = aux.addOp3(v, OP.MakeRecord, win.reg_app, 2, win.reg_app + 2);
-                _ = aux.addOp2(v, OP.IdxInsert, win.csr_app, win.reg_app + 2);
+                _ = aux.emit(v, .AddImm, .{ reg_app.at(1), 1 });
+                _ = aux.emit(v, .SCopy, .{ reg_arg, reg_app });
+                _ = aux.emit(v, .MakeRecord, .{ reg_app, 2, reg_app.at(2) });
+                _ = aux.emit(v, .IdxInsert, .{ csr_app, reg_app.at(2) });
             } else {
-                _ = aux.addOp4Int(v, OP.SeekGE, win.csr_app, 0, reg_arg, 1);
-                _ = aux.addOp1(v, OP.Delete, win.csr_app);
-                aux.jumpHere(v, aux.currentAddr(v) - 2);
+                _ = aux.emitInt(v, .SeekGE, .{ csr_app, 0, reg_arg }, 1);
+                _ = aux.emit(v, .Delete, .{csr_app});
+                aux.landHere(v, aux.here(v).plus(-2));
             }
-            aux.jumpHere(v, addr_is_null);
+            aux.landHere(v, addr_is_null);
         } else if (win.reg_app != 0) {
             std.debug.assert(win.filter == null);
             std.debug.assert(isFunc(func, nth_value_name) or isFunc(func, first_value_name));
-            _ = aux.addOp2(v, OP.AddImm, win.reg_app + 1 - @intFromBool(b_inverse), 1);
+            _ = aux.emit(v, .AddImm, .{ Reg.from(win.reg_app + 1 - @intFromBool(b_inverse)), 1 });
         } else if (func.x_sfunc.? != &noopStepFunc) {
             const list = win.owner.?.x.list;
             if (win.expr_args) {
                 var i_op = aux.currentAddr(v);
                 n_arg = @intCast(list.?.len());
-                reg_arg = expr_mod.getTempRange(p, n_arg);
-                _ = ec.codeExprList(p, list.?, reg_arg, 0, 0);
+                reg_arg = .from(expr_mod.getTempRange(p, n_arg));
+                _ = ec.codeExprList(p, list.?, reg_arg.int(), 0, 0);
                 const i_end = aux.currentAddr(v);
                 while (i_op < i_end) : (i_op += 1) {
                     const op = aux.getOp(v, i_op);
-                    if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr) op.p1 = csr;
+                    if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr) op.p1 = csr.int();
                 }
             }
             if (func.func_flags.NEEDCOLL) {
                 std.debug.assert(n_arg > 0);
                 const coll = expr_mod.nnCollSeq(p, list.?.at(0).expr);
-                _ = aux.addOp4(v, OP.CollSeq, 0, 0, 0, .{ .collseq = coll });
+                _ = aux.emit4(v, .CollSeq, .{}, .{ .collseq = coll });
             }
-            _ = aux.addOp3(v, if (b_inverse) OP.AggInverse else OP.AggStep, @intFromBool(b_inverse), reg_arg, win.reg_accum);
+            _ = aux.emitAny(v, if (b_inverse) OP.AggInverse else OP.AggStep, .{ .int, .reg, .reg }, .{ b_inverse, reg_arg, Reg.from(win.reg_accum) });
             aux.appendP4(v, .{ .funcdef = func });
             aux.changeP5(v, @intCast(n_arg));
-            if (win.expr_args) expr_mod.releaseTempRange(p, reg_arg, n_arg);
+            if (win.expr_args) expr_mod.releaseTempRange(p, reg_arg.int(), n_arg);
         }
 
-        if (addr_if != 0) aux.jumpHere(v, addr_if);
+        if (addr_if) |a| aux.landHere(v, a);
     }
 }
 
@@ -1148,22 +1163,25 @@ fn windowAggFinal(cx: *WindowCodeArg, b_fin: bool) void {
     const v = p.vdbe.?;
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
+        const reg_result: Reg = .from(win.reg_result);
         if (m_win.reg_start_rowid == 0 and win.w_func.?.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
-            _ = aux.addOp2(v, OP.Null, 0, win.reg_result);
-            _ = aux.addOp1(v, OP.Last, win.csr_app);
-            _ = aux.addOp3(v, OP.Column, win.csr_app, 0, win.reg_result);
-            aux.jumpHere(v, aux.currentAddr(v) - 2);
+            const csr_app: Cursor = .from(win.csr_app);
+            _ = aux.emit(v, .Null, .{ 0, reg_result });
+            _ = aux.emit(v, .Last, .{csr_app});
+            _ = aux.emit(v, .Column, .{ csr_app, 0, reg_result });
+            aux.landHere(v, aux.here(v).plus(-2));
         } else if (win.reg_app != 0) {
             std.debug.assert(m_win.reg_start_rowid == 0);
         } else {
             const n_arg = windowArgCount(win);
+            const reg_accum: Reg = .from(win.reg_accum);
             if (b_fin) {
-                _ = aux.addOp2(v, OP.AggFinal, win.reg_accum, n_arg);
+                _ = aux.emit(v, .AggFinal, .{ reg_accum, n_arg });
                 aux.appendP4(v, .{ .funcdef = win.w_func.? });
-                _ = aux.addOp2(v, OP.Copy, win.reg_accum, win.reg_result);
-                _ = aux.addOp2(v, OP.Null, 0, win.reg_accum);
+                _ = aux.emit(v, .Copy, .{ reg_accum, reg_result });
+                _ = aux.emit(v, .Null, .{ 0, reg_accum });
             } else {
-                _ = aux.addOp3(v, OP.AggValue, win.reg_accum, n_arg, win.reg_result);
+                _ = aux.emit(v, .AggValue, .{ reg_accum, n_arg, reg_result });
                 aux.appendP4(v, .{ .funcdef = win.w_func.? });
             }
         }
@@ -1178,66 +1196,68 @@ fn windowFullScan(cx: *WindowCodeArg) void {
     const m_win = cx.m_win;
     const v = cx.v;
 
-    const csr = m_win.csr_app;
+    const csr: Cursor = .from(m_win.csr_app);
+    const eph: Cursor = .from(m_win.i_eph_csr);
     const n_peer: i32 = if (m_win.order_by) |l| @intCast(l.len()) else 0;
 
-    const lbl_next = aux.makeLabel(p);
-    const lbl_brk = aux.makeLabel(p);
+    const lbl_next = aux.newLabel(p);
+    const lbl_brk = aux.newLabel(p);
 
-    const reg_c_rowid = expr_mod.getTempReg(p);
-    const reg_rowid = expr_mod.getTempReg(p);
-    var reg_c_peer: i32 = 0;
-    var reg_peer: i32 = 0;
+    const reg_c_rowid: Reg = .from(expr_mod.getTempReg(p));
+    const reg_rowid: Reg = .from(expr_mod.getTempReg(p));
+    var reg_c_peer: Reg = .none;
+    var reg_peer: Reg = .none;
     if (n_peer != 0) {
-        reg_c_peer = expr_mod.getTempRange(p, n_peer);
-        reg_peer = expr_mod.getTempRange(p, n_peer);
+        reg_c_peer = .from(expr_mod.getTempRange(p, n_peer));
+        reg_peer = .from(expr_mod.getTempRange(p, n_peer));
     }
 
-    _ = aux.addOp2(v, OP.Rowid, m_win.i_eph_csr, reg_c_rowid);
-    windowReadPeerValues(cx, m_win.i_eph_csr, reg_c_peer);
+    _ = aux.emit(v, .Rowid, .{ eph, reg_c_rowid });
+    windowReadPeerValues(cx, eph, reg_c_peer);
 
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
-        _ = aux.addOp2(v, OP.Null, 0, win.reg_accum);
+        _ = aux.emit(v, .Null, .{ 0, Reg.from(win.reg_accum) });
     }
 
-    _ = aux.addOp3(v, OP.SeekGE, csr, lbl_brk, m_win.reg_start_rowid);
-    const addr_next = aux.currentAddr(v);
-    _ = aux.addOp2(v, OP.Rowid, csr, reg_rowid);
-    _ = aux.addOp3(v, OP.Gt, m_win.reg_end_rowid, lbl_brk, reg_rowid);
+    _ = aux.emit(v, .SeekGE, .{ csr, lbl_brk, Reg.from(m_win.reg_start_rowid) });
+    const addr_next = aux.here(v);
+    _ = aux.emit(v, .Rowid, .{ csr, reg_rowid });
+    _ = aux.emit(v, .Gt, .{ Reg.from(m_win.reg_end_rowid), lbl_brk, reg_rowid });
 
     if (m_win.e_exclude == TK.CURRENT) {
-        _ = aux.addOp3(v, OP.Eq, reg_c_rowid, lbl_next, reg_rowid);
+        _ = aux.emit(v, .Eq, .{ reg_c_rowid, lbl_next, reg_rowid });
     } else if (m_win.e_exclude != TK.NO) {
-        var addr_eq: i32 = 0;
+        var addr_eq: ?Addr = null;
         var key_info: ?*vi.KeyInfo = null;
         if (m_win.order_by) |ob| key_info = select_mod.keyInfoFromExprList(p, ob, 0, 0);
         if (m_win.e_exclude == TK.TIES) {
-            addr_eq = aux.addOp3(v, OP.Eq, reg_c_rowid, 0, reg_rowid);
+            addr_eq = aux.emit(v, .Eq, .{ reg_c_rowid, 0, reg_rowid });
         }
         if (key_info) |ki| {
             windowReadPeerValues(cx, csr, reg_peer);
-            _ = aux.addOp3(v, OP.Compare, reg_peer, reg_c_peer, n_peer);
+            _ = aux.emit(v, .Compare, .{ reg_peer, reg_c_peer, n_peer });
             aux.appendP4(v, .{ .keyinfo = ki });
-            const addr = aux.currentAddr(v) + 1;
-            _ = aux.addOp3(v, OP.Jump, addr, lbl_next, addr);
+            // OP_Jump's P1 and P3 are addresses too (not labels).
+            const addr = aux.here(v).plus(1);
+            _ = aux.emit(v, .Jump, .{ addr.int(), lbl_next, addr.int() });
         } else {
-            _ = aux.addOp2(v, OP.Goto, 0, lbl_next);
+            _ = aux.emit(v, .Goto, .{ 0, lbl_next });
         }
-        if (addr_eq != 0) aux.jumpHere(v, addr_eq);
+        if (addr_eq) |a| aux.landHere(v, a);
     }
 
     windowAggStep(cx, m_win, csr, false, cx.reg_arg);
 
-    aux.resolveLabel(v, lbl_next);
-    _ = aux.addOp2(v, OP.Next, csr, addr_next);
-    aux.jumpHere(v, addr_next - 1);
-    aux.jumpHere(v, addr_next + 1);
-    expr_mod.releaseTempReg(p, reg_rowid);
-    expr_mod.releaseTempReg(p, reg_c_rowid);
+    aux.place(v, lbl_next);
+    _ = aux.emit(v, .Next, .{ csr, addr_next });
+    aux.landHere(v, addr_next.plus(-1));
+    aux.landHere(v, addr_next.plus(1));
+    expr_mod.releaseTempReg(p, reg_rowid.int());
+    expr_mod.releaseTempReg(p, reg_c_rowid.int());
     if (n_peer != 0) {
-        expr_mod.releaseTempRange(p, reg_peer, n_peer);
-        expr_mod.releaseTempRange(p, reg_c_peer, n_peer);
+        expr_mod.releaseTempRange(p, reg_peer.int(), n_peer);
+        expr_mod.releaseTempRange(p, reg_c_peer.int(), n_peer);
     }
 
     windowAggFinal(cx, true);
@@ -1255,86 +1275,89 @@ fn windowReturnOneRow(cx: *WindowCodeArg) void {
         windowFullScan(cx);
     } else {
         const p = cx.parse;
+        const eph: Cursor = .from(m_win.i_eph_csr);
         var it: ?*Window = m_win;
         while (it) |win| : (it = win.next_win) {
             const func = win.w_func.?;
+            const reg_result: Reg = .from(win.reg_result);
             if (isFunc(func, nth_value_name) or isFunc(func, first_value_name)) {
-                const csr = win.csr_app;
-                const lbl = aux.makeLabel(p);
-                const tmp_reg = expr_mod.getTempReg(p);
-                _ = aux.addOp2(v, OP.Null, 0, win.reg_result);
+                const csr: Cursor = .from(win.csr_app);
+                const reg_app: Reg = .from(win.reg_app);
+                const lbl = aux.newLabel(p);
+                const tmp_reg: Reg = .from(expr_mod.getTempReg(p));
+                _ = aux.emit(v, .Null, .{ 0, reg_result });
 
                 if (isFunc(func, nth_value_name)) {
-                    _ = aux.addOp3(v, OP.Column, m_win.i_eph_csr, win.i_arg_col + 1, tmp_reg);
+                    _ = aux.emit(v, .Column, .{ eph, win.i_arg_col + 1, tmp_reg });
                     windowCheckValue(p, tmp_reg, WINDOW_NTH_VALUE_INT);
                 } else {
-                    _ = aux.addOp2(v, OP.Integer, 1, tmp_reg);
+                    _ = aux.emit(v, .Integer, .{ 1, tmp_reg });
                 }
-                _ = aux.addOp3(v, OP.Add, tmp_reg, win.reg_app, tmp_reg);
-                _ = aux.addOp3(v, OP.Gt, win.reg_app + 1, lbl, tmp_reg);
-                _ = aux.addOp3(v, OP.SeekRowid, csr, 0, tmp_reg);
-                _ = aux.addOp3(v, OP.Column, csr, win.i_arg_col, win.reg_result);
-                aux.resolveLabel(v, lbl);
-                expr_mod.releaseTempReg(p, tmp_reg);
+                _ = aux.emit(v, .Add, .{ tmp_reg, reg_app, tmp_reg });
+                _ = aux.emit(v, .Gt, .{ reg_app.at(1), lbl, tmp_reg });
+                _ = aux.emit(v, .SeekRowid, .{ csr, 0, tmp_reg });
+                _ = aux.emit(v, .Column, .{ csr, win.i_arg_col, reg_result });
+                aux.place(v, lbl);
+                expr_mod.releaseTempReg(p, tmp_reg.int());
             } else if (isFunc(func, lead_name) or isFunc(func, lag_name)) {
                 const n_arg = windowArgCount(win);
-                const csr = win.csr_app;
-                const lbl = aux.makeLabel(p);
-                const tmp_reg = expr_mod.getTempReg(p);
-                const i_eph = m_win.i_eph_csr;
+                const csr: Cursor = .from(win.csr_app);
+                const lbl = aux.newLabel(p);
+                const tmp_reg: Reg = .from(expr_mod.getTempReg(p));
 
                 if (n_arg < 3) {
-                    _ = aux.addOp2(v, OP.Null, 0, win.reg_result);
+                    _ = aux.emit(v, .Null, .{ 0, reg_result });
                 } else {
-                    _ = aux.addOp3(v, OP.Column, i_eph, win.i_arg_col + 2, win.reg_result);
+                    _ = aux.emit(v, .Column, .{ eph, win.i_arg_col + 2, reg_result });
                 }
-                _ = aux.addOp2(v, OP.Rowid, i_eph, tmp_reg);
+                _ = aux.emit(v, .Rowid, .{ eph, tmp_reg });
                 if (n_arg < 2) {
                     const val: i32 = if (isFunc(func, lead_name)) 1 else -1;
-                    _ = aux.addOp2(v, OP.AddImm, tmp_reg, val);
+                    _ = aux.emit(v, .AddImm, .{ tmp_reg, val });
                 } else {
                     const op = if (isFunc(func, lead_name)) OP.Add else OP.Subtract;
-                    const tmp_reg2 = expr_mod.getTempReg(p);
-                    _ = aux.addOp3(v, OP.Column, i_eph, win.i_arg_col + 1, tmp_reg2);
-                    _ = aux.addOp3(v, op, tmp_reg2, tmp_reg, tmp_reg);
-                    expr_mod.releaseTempReg(p, tmp_reg2);
+                    const tmp_reg2: Reg = .from(expr_mod.getTempReg(p));
+                    _ = aux.emit(v, .Column, .{ eph, win.i_arg_col + 1, tmp_reg2 });
+                    _ = aux.emitAny(v, op, arith_shape, .{ tmp_reg2, tmp_reg, tmp_reg });
+                    expr_mod.releaseTempReg(p, tmp_reg2.int());
                 }
 
-                _ = aux.addOp3(v, OP.SeekRowid, csr, lbl, tmp_reg);
-                _ = aux.addOp3(v, OP.Column, csr, win.i_arg_col, win.reg_result);
-                aux.resolveLabel(v, lbl);
-                expr_mod.releaseTempReg(p, tmp_reg);
+                _ = aux.emit(v, .SeekRowid, .{ csr, lbl, tmp_reg });
+                _ = aux.emit(v, .Column, .{ csr, win.i_arg_col, reg_result });
+                aux.place(v, lbl);
+                expr_mod.releaseTempReg(p, tmp_reg.int());
             }
         }
     }
-    _ = aux.addOp2(v, OP.Gosub, cx.reg_gosub, cx.addr_gosub);
+    _ = aux.emit(v, .Gosub, .{ cx.reg_gosub, cx.addr_gosub });
 }
 
 /// Port of windowInitAccum(): set the accumulator of each window function
 /// to NULL, and initialize the state of the in-line built-ins. Returns
 /// the first of the registers for function arguments.
-fn windowInitAccum(p: *Parse, m_win: *Window) i32 {
+fn windowInitAccum(p: *Parse, m_win: *Window) Reg {
     const v = p.vdbe.?;
     var n_arg: i32 = 0;
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
         const func = win.w_func.?;
         std.debug.assert(win.reg_accum != 0);
-        _ = aux.addOp2(v, OP.Null, 0, win.reg_accum);
+        _ = aux.emit(v, .Null, .{ 0, Reg.from(win.reg_accum) });
         n_arg = @max(n_arg, windowArgCount(win));
         if (m_win.reg_start_rowid == 0) {
+            const reg_app: Reg = .from(win.reg_app);
             if (isFunc(func, nth_value_name) or isFunc(func, first_value_name)) {
-                _ = aux.addOp2(v, OP.Integer, 0, win.reg_app);
-                _ = aux.addOp2(v, OP.Integer, 0, win.reg_app + 1);
+                _ = aux.emit(v, .Integer, .{ 0, reg_app });
+                _ = aux.emit(v, .Integer, .{ 0, reg_app.at(1) });
             }
             if (func.func_flags.MINMAX and win.csr_app != 0) {
                 std.debug.assert(win.e_start != TK.UNBOUNDED);
-                _ = aux.addOp1(v, OP.ResetSorter, win.csr_app);
-                _ = aux.addOp2(v, OP.Integer, 0, win.reg_app + 1);
+                _ = aux.emit(v, .ResetSorter, .{Cursor.from(win.csr_app)});
+                _ = aux.emit(v, .Integer, .{ 0, reg_app.at(1) });
             }
         }
     }
-    const reg_arg = p.n_mem + 1;
+    const reg_arg: Reg = .from(p.n_mem + 1);
     p.n_mem += n_arg;
     return reg_arg;
 }
@@ -1358,18 +1381,20 @@ fn windowCacheFrame(m_win: *Window) bool {
 /// Port of windowIfNewPeer(): compare the ORDER BY values in the
 /// registers from `reg_new` with those from `reg_old`. If they differ,
 /// copy the new ones over the old ones and fall through; else jump to
-/// `addr`.
-fn windowIfNewPeer(p: *Parse, order_by: ?*ExprList, reg_new: i32, reg_old: i32, addr: i32) void {
+/// `dest` (a Label or an Addr).
+fn windowIfNewPeer(p: *Parse, order_by: ?*ExprList, reg_new: Reg, reg_old: Reg, dest: anytype) void {
     const v = p.vdbe.?;
     if (order_by) |ob| {
         const n_val: i32 = @intCast(ob.len());
         const key_info = select_mod.keyInfoFromExprList(p, ob, 0, 0);
-        _ = aux.addOp3(v, OP.Compare, reg_old, reg_new, n_val);
+        _ = aux.emit(v, .Compare, .{ reg_old, reg_new, n_val });
         if (key_info) |ki| aux.appendP4(v, .{ .keyinfo = ki });
-        _ = aux.addOp3(v, OP.Jump, aux.currentAddr(v) + 1, addr, aux.currentAddr(v) + 1);
-        _ = aux.addOp3(v, OP.Copy, reg_new, reg_old, n_val - 1);
+        // OP_Jump's P1 and P3 are addresses too (not labels).
+        const addr = aux.here(v).plus(1);
+        _ = aux.emit(v, .Jump, .{ addr.int(), dest, addr.int() });
+        _ = aux.emit(v, .Copy, .{ reg_new, reg_old, n_val - 1 });
     } else {
-        _ = aux.addOp2(v, OP.Goto, 0, addr);
+        _ = aux.emit(v, .Goto, .{ 0, dest });
     }
 }
 
@@ -1380,16 +1405,16 @@ fn windowIfNewPeer(p: *Parse, order_by: ?*ExprList, reg_new: i32, reg_old: i32, 
 /// with `op` (OP_Ge, OP_Gt or OP_Le) as the comparison. For a DESC ORDER
 /// BY, regVal is subtracted and the comparison reversed. If csr1.peerVal
 /// is not a number, it is compared unchanged.
-fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: i32, reg_val: i32, csr2: i32, lbl: i32) void {
+fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: Cursor, reg_val: Reg, csr2: Cursor, lbl: Label) void {
     const p = cx.parse;
     const v = p.vdbe.?;
     const order_by = cx.m_win.order_by.?;
-    const reg1 = expr_mod.getTempReg(p);
-    const reg2 = expr_mod.getTempReg(p);
+    const reg1: Reg = .from(expr_mod.getTempReg(p));
+    const reg2: Reg = .from(expr_mod.getTempReg(p));
     p.n_mem += 1;
-    const reg_string = p.n_mem;
+    const reg_string: Reg = .from(p.n_mem);
     var arith: OP = OP.Add;
-    const addr_done = aux.makeLabel(p);
+    const lbl_done = aux.newLabel(p);
     var op = op_arg;
 
     // The peer value of each cursor.
@@ -1413,18 +1438,18 @@ fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: i32, reg_val: i32, 
     // is NULL are coded separately.
     if (sort_flags & int.KeyInfoOrder.bignull != 0) {
         // reg1 is NULL.
-        const addr = aux.addOp1(v, OP.NotNull, reg1);
+        const addr = aux.emit(v, .NotNull, .{reg1});
         switch (op) {
-            OP.Ge => _ = aux.addOp2(v, OP.Goto, 0, lbl),
-            OP.Gt => _ = aux.addOp2(v, OP.NotNull, reg2, lbl),
-            OP.Le => _ = aux.addOp2(v, OP.IsNull, reg2, lbl),
+            OP.Ge => _ = aux.emit(v, .Goto, .{ 0, lbl }),
+            OP.Gt => _ = aux.emit(v, .NotNull, .{ reg2, lbl }),
+            OP.Le => _ = aux.emit(v, .IsNull, .{ reg2, lbl }),
             else => {},
         }
-        _ = aux.addOp2(v, OP.Goto, 0, addr_done);
+        _ = aux.emit(v, .Goto, .{ 0, lbl_done });
 
         // reg1 is not NULL but reg2 is.
-        aux.jumpHere(v, addr);
-        _ = aux.addOp2(v, OP.IsNull, reg2, if (op == OP.Gt or op == OP.Ge) addr_done else lbl);
+        aux.landHere(v, addr);
+        _ = aux.emit(v, .IsNull, .{ reg2, if (op == OP.Gt or op == OP.Ge) lbl_done else lbl });
     }
 
     // Add (or subtract) regVal to reg1 unless it is not numeric:
@@ -1434,47 +1459,48 @@ fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: i32, reg_val: i32, 
     //   addrGe:
     //
     // as all strings and blobs are >= ''.
-    _ = aux.addOp4(v, OP.String8, 0, reg_string, 0, .{ .z = "" });
-    const addr_ge = aux.addOp3(v, OP.Ge, reg_string, 0, reg1);
+    _ = aux.emit4(v, .String8, .{ 0, reg_string }, .{ .z = "" });
+    const addr_ge = aux.emit(v, .Ge, .{ reg_string, 0, reg1 });
     if ((op == OP.Ge and arith == OP.Add) or (op == OP.Le and arith == OP.Subtract)) {
-        _ = aux.addOp3(v, op, reg2, lbl, reg1);
+        _ = aux.emitAny(v, op, compare_shape, .{ reg2, lbl, reg1 });
     }
-    _ = aux.addOp3(v, arith, reg_val, reg1, reg1);
-    aux.jumpHere(v, addr_ge);
+    _ = aux.emitAny(v, arith, arith_shape, .{ reg_val, reg1, reg1 });
+    aux.landHere(v, addr_ge);
 
     // Compare reg2 with reg1.
-    _ = aux.addOp3(v, op, reg2, lbl, reg1);
+    _ = aux.emitAny(v, op, compare_shape, .{ reg2, lbl, reg1 });
     const coll = expr_mod.nnCollSeq(p, order_by.at(0).expr);
     aux.appendP4(v, .{ .collseq = coll });
     aux.changeP5(v, vi.SQLITE_NULLEQ);
-    aux.resolveLabel(v, addr_done);
+    aux.place(v, lbl_done);
 
-    expr_mod.releaseTempReg(p, reg1);
-    expr_mod.releaseTempReg(p, reg2);
+    expr_mod.releaseTempReg(p, reg1.int());
+    expr_mod.releaseTempReg(p, reg2.int());
 }
 
 /// Port of windowCodeOp(): code one RETURN_ROW, AGGSTEP or AGGINVERSE
-/// operation (see sqlite3WindowCodeStep()). Returns the address of an
-/// OP_Goto to patch if `jump_on_eof`, else 0.
-fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: i32, jump_on_eof: bool) i32 {
+/// operation (see sqlite3WindowCodeStep()). `reg_countdown` is the
+/// register of the frame offset, or none. Returns the address of an
+/// OP_Goto to patch if `jump_on_eof`, else null.
+fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: Reg, jump_on_eof: bool) ?Addr {
     const p = cx.parse;
     const m_win = cx.m_win;
-    var ret: i32 = 0;
+    var ret: ?Addr = null;
     const v = cx.v;
     const b_peer = m_win.e_frm_type != TK.ROWS;
 
-    const lbl_done = aux.makeLabel(p);
-    var addr_next_range: i32 = 0;
+    const lbl_done = aux.newLabel(p);
+    var addr_next_range: ?Addr = null;
 
     // AGGINVERSE is a no-op if the frame starts with UNBOUNDED PRECEDING.
     if (op == WINDOW_AGGINVERSE and m_win.e_start == TK.UNBOUNDED) {
-        std.debug.assert(reg_countdown == 0 and !jump_on_eof);
-        return 0;
+        std.debug.assert(reg_countdown.isNone() and !jump_on_eof);
+        return null;
     }
 
-    if (reg_countdown > 0) {
+    if (!reg_countdown.isNone()) {
         if (m_win.e_frm_type == TK.RANGE) {
-            addr_next_range = aux.currentAddr(v);
+            addr_next_range = aux.here(v);
             std.debug.assert(op == WINDOW_AGGINVERSE or op == WINDOW_AGGSTEP);
             if (op == WINDOW_AGGINVERSE) {
                 if (m_win.e_start == TK.FOLLOWING) {
@@ -1486,37 +1512,37 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: i32, jump_on_eof: bo
                 windowCodeRangeTest(cx, OP.Gt, cx.end.csr, reg_countdown, cx.current.csr, lbl_done);
             }
         } else {
-            _ = aux.addOp3(v, OP.IfPos, reg_countdown, lbl_done, 1);
+            _ = aux.emit(v, .IfPos, .{ reg_countdown, lbl_done, 1 });
         }
     }
 
     if (op == WINDOW_RETURN_ROW and m_win.reg_start_rowid == 0) {
         windowAggFinal(cx, false);
     }
-    const addr_continue = aux.currentAddr(v);
+    const addr_continue = aux.here(v);
 
     // For (RANGE BETWEEN a FOLLOWING AND b FOLLOWING) or (RANGE BETWEEN b
     // PRECEDING AND a PRECEDING), the start cursor may not pass the end
     // cursor (if a>b), nor the end cursor reach EOF while the input is
     // still finding rows.
-    if (m_win.e_start == m_win.e_end and reg_countdown != 0 and m_win.e_frm_type == TK.RANGE) {
-        const reg_rowid1 = expr_mod.getTempReg(p);
-        const reg_rowid2 = expr_mod.getTempReg(p);
+    if (m_win.e_start == m_win.e_end and !reg_countdown.isNone() and m_win.e_frm_type == TK.RANGE) {
+        const reg_rowid1: Reg = .from(expr_mod.getTempReg(p));
+        const reg_rowid2: Reg = .from(expr_mod.getTempReg(p));
         if (op == WINDOW_AGGINVERSE) {
-            _ = aux.addOp2(v, OP.Rowid, cx.start.csr, reg_rowid1);
-            _ = aux.addOp2(v, OP.Rowid, cx.end.csr, reg_rowid2);
-            _ = aux.addOp3(v, OP.Ge, reg_rowid2, lbl_done, reg_rowid1);
-        } else if (cx.reg_rowid != 0) {
-            _ = aux.addOp2(v, OP.Rowid, cx.end.csr, reg_rowid1);
-            _ = aux.addOp3(v, OP.Ge, cx.reg_rowid, lbl_done, reg_rowid1);
+            _ = aux.emit(v, .Rowid, .{ cx.start.csr, reg_rowid1 });
+            _ = aux.emit(v, .Rowid, .{ cx.end.csr, reg_rowid2 });
+            _ = aux.emit(v, .Ge, .{ reg_rowid2, lbl_done, reg_rowid1 });
+        } else if (!cx.reg_rowid.isNone()) {
+            _ = aux.emit(v, .Rowid, .{ cx.end.csr, reg_rowid1 });
+            _ = aux.emit(v, .Ge, .{ cx.reg_rowid, lbl_done, reg_rowid1 });
         }
-        expr_mod.releaseTempReg(p, reg_rowid1);
-        expr_mod.releaseTempReg(p, reg_rowid2);
+        expr_mod.releaseTempReg(p, reg_rowid1.int());
+        expr_mod.releaseTempReg(p, reg_rowid2.int());
         std.debug.assert(m_win.e_start == TK.PRECEDING or m_win.e_start == TK.FOLLOWING);
     }
 
-    var csr: i32 = undefined;
-    var reg: i32 = undefined;
+    var csr: Cursor = undefined;
+    var reg: Reg = undefined;
     switch (op) {
         WINDOW_RETURN_ROW => {
             csr = cx.current.csr;
@@ -1528,7 +1554,7 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: i32, jump_on_eof: bo
             reg = cx.start.reg;
             if (m_win.reg_start_rowid != 0) {
                 std.debug.assert(m_win.reg_end_rowid != 0);
-                _ = aux.addOp2(v, OP.AddImm, m_win.reg_start_rowid, 1);
+                _ = aux.emit(v, .AddImm, .{ Reg.from(m_win.reg_start_rowid), 1 });
             } else {
                 windowAggStep(cx, m_win, csr, true, cx.reg_arg);
             }
@@ -1539,7 +1565,7 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: i32, jump_on_eof: bo
             reg = cx.end.reg;
             if (m_win.reg_start_rowid != 0) {
                 std.debug.assert(m_win.reg_end_rowid != 0);
-                _ = aux.addOp2(v, OP.AddImm, m_win.reg_end_rowid, 1);
+                _ = aux.emit(v, .AddImm, .{ Reg.from(m_win.reg_end_rowid), 1 });
             } else {
                 windowAggStep(cx, m_win, csr, false, cx.reg_arg);
             }
@@ -1547,28 +1573,28 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: i32, jump_on_eof: bo
     }
 
     if (op == cx.e_delete) {
-        _ = aux.addOp1(v, OP.Delete, csr);
+        _ = aux.emit(v, .Delete, .{csr});
         aux.changeP5(v, vi.OPFLAG.SAVEPOSITION);
     }
 
     if (jump_on_eof) {
-        _ = aux.addOp2(v, OP.Next, csr, aux.currentAddr(v) + 2);
-        ret = aux.addOp0(v, OP.Goto);
+        _ = aux.emit(v, .Next, .{ csr, aux.here(v).plus(2) });
+        ret = aux.emit(v, .Goto, .{});
     } else {
-        _ = aux.addOp2(v, OP.Next, csr, aux.currentAddr(v) + 1 + @as(i32, @intFromBool(b_peer)));
-        if (b_peer) _ = aux.addOp2(v, OP.Goto, 0, lbl_done);
+        _ = aux.emit(v, .Next, .{ csr, aux.here(v).plus(1 + @as(i32, @intFromBool(b_peer))) });
+        if (b_peer) _ = aux.emit(v, .Goto, .{ 0, lbl_done });
     }
 
     if (b_peer) {
         const n_reg: i32 = if (m_win.order_by) |l| @intCast(l.len()) else 0;
-        const reg_tmp = if (n_reg != 0) expr_mod.getTempRange(p, n_reg) else 0;
+        const reg_tmp: Reg = if (n_reg != 0) .from(expr_mod.getTempRange(p, n_reg)) else .none;
         windowReadPeerValues(cx, csr, reg_tmp);
         windowIfNewPeer(p, m_win.order_by, reg_tmp, reg, addr_continue);
-        expr_mod.releaseTempRange(p, reg_tmp, n_reg);
+        expr_mod.releaseTempRange(p, reg_tmp.int(), n_reg);
     }
 
-    if (addr_next_range != 0) _ = aux.addOp2(v, OP.Goto, 0, addr_next_range);
-    aux.resolveLabel(v, lbl_done);
+    if (addr_next_range) |a| _ = aux.emit(v, .Goto, .{ 0, a });
+    aux.place(v, lbl_done);
     return ret;
 }
 
@@ -1631,29 +1657,34 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
     const order_by = m_win.order_by;
     const v = p.vdbe.?;
     const item0 = s.src.?.at(0);
-    const csr_input = item0.i_cursor;
+    const csr_input: Cursor = .from(item0.i_cursor);
     const n_input: i32 = @intCast(item0.s_tab.?.cols.len);
-    var addr_gosub_flush: i32 = 0;
-    var addr_integer: i32 = 0;
-    var reg_new_peer: i32 = 0;
-    var reg_peer: i32 = 0;
-    var reg_flush_part: i32 = 0;
-    var reg_start: i32 = 0;
-    var reg_end: i32 = 0;
+    // With a PARTITION BY: the OP_Gosub to the flush, the OP_Integer that
+    // sets where the flush returns to at the end, and its register.
+    var addr_gosub_flush: Addr = undefined;
+    var addr_integer: Addr = undefined;
+    var reg_flush_part: Reg = .none;
+    var reg_new_peer: Reg = .none;
+    var reg_peer: Reg = .none;
+    var reg_start: Reg = .none;
+    var reg_end: Reg = .none;
 
-    const lbl_where_end = aux.makeLabel(p);
+    const lbl_where_end = aux.newLabel(p);
 
+    // The cursor of the rows to return, the one that inserts, and those of
+    // the start and the end of the frame.
+    const csr_current: Cursor = .from(m_win.i_eph_csr);
+    const csr_write = csr_current.at(1);
     var cx: WindowCodeArg = .{
         .parse = p,
         .m_win = m_win,
         .v = v,
-        .reg_gosub = reg_gosub,
-        .addr_gosub = addr_gosub,
+        .reg_gosub = .from(reg_gosub),
+        .addr_gosub = .from(addr_gosub),
+        .current = .{ .csr = csr_current },
+        .start = .{ .csr = csr_current.at(2) },
+        .end = .{ .csr = csr_current.at(3) },
     };
-    cx.current.csr = m_win.i_eph_csr;
-    const csr_write = cx.current.csr + 1;
-    cx.start.csr = cx.current.csr + 2;
-    cx.end.csr = cx.current.csr + 3;
 
     // When rows may be deleted from the ephemeral table: never (0), once
     // out of the frame (AGGINVERSE), once returned (RETURN_ROW), or once
@@ -1680,123 +1711,125 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
 
     // Registers for the row of the subquery, that row as a record, and its
     // rowid in the ephemeral table.
-    const reg_new = p.n_mem + 1;
+    const reg_new: Reg = .from(p.n_mem + 1);
     p.n_mem += n_input;
     p.n_mem += 1;
-    const reg_record = p.n_mem;
+    const reg_record: Reg = .from(p.n_mem);
     p.n_mem += 1;
-    cx.reg_rowid = p.n_mem;
+    cx.reg_rowid = .from(p.n_mem);
 
     // Registers for the values of "<expr> PRECEDING" and "<expr>
     // FOLLOWING".
     if (m_win.e_start == TK.PRECEDING or m_win.e_start == TK.FOLLOWING) {
         p.n_mem += 1;
-        reg_start = p.n_mem;
+        reg_start = .from(p.n_mem);
     }
     if (m_win.e_end == TK.PRECEDING or m_win.e_end == TK.FOLLOWING) {
         p.n_mem += 1;
-        reg_end = p.n_mem;
+        reg_end = .from(p.n_mem);
     }
 
     // Unless the frame is ROWS, registers for the peer values of the main
     // loop and of each cursor.
     if (m_win.e_frm_type != TK.ROWS) {
         const n_peer: i32 = if (order_by) |l| @intCast(l.len()) else 0;
-        reg_new_peer = reg_new + m_win.n_buffer_col;
-        if (m_win.partition) |part| reg_new_peer += @intCast(part.len());
-        reg_peer = p.n_mem + 1;
+        reg_new_peer = reg_new.at(m_win.n_buffer_col);
+        if (m_win.partition) |part| reg_new_peer = reg_new_peer.at(part.len());
+        reg_peer = .from(p.n_mem + 1);
         p.n_mem += n_peer;
-        cx.start.reg = p.n_mem + 1;
+        cx.start.reg = .from(p.n_mem + 1);
         p.n_mem += n_peer;
-        cx.current.reg = p.n_mem + 1;
+        cx.current.reg = .from(p.n_mem + 1);
         p.n_mem += n_peer;
-        cx.end.reg = p.n_mem + 1;
+        cx.end.reg = .from(p.n_mem + 1);
         p.n_mem += n_peer;
     }
 
     // Read the row of the subquery and make it a record.
     var i_input: i32 = 0;
     while (i_input < n_input) : (i_input += 1) {
-        _ = aux.addOp3(v, OP.Column, csr_input, i_input, reg_new + i_input);
+        _ = aux.emit(v, .Column, .{ csr_input, i_input, reg_new.at(i_input) });
     }
-    _ = aux.addOp3(v, OP.MakeRecord, reg_new, n_input, reg_record);
+    _ = aux.emit(v, .MakeRecord, .{ reg_new, n_input, reg_record });
 
     // With a PARTITION BY, a new partition calls the flush subroutine (its
     // OP_Gosub is patched later).
     if (m_win.partition) |part| {
         const n_part: i32 = @intCast(part.len());
-        const reg_new_part = reg_new + m_win.n_buffer_col;
+        const reg_new_part = reg_new.at(m_win.n_buffer_col);
+        const reg_part: Reg = .from(m_win.reg_part);
         const key_info = select_mod.keyInfoFromExprList(p, part, 0, 0);
 
         p.n_mem += 1;
-        reg_flush_part = p.n_mem;
-        const addr = aux.addOp3(v, OP.Compare, reg_new_part, m_win.reg_part, n_part);
+        reg_flush_part = .from(p.n_mem);
+        const addr = aux.emit(v, .Compare, .{ reg_new_part, reg_part, n_part });
         if (key_info) |ki| aux.appendP4(v, .{ .keyinfo = ki });
-        _ = aux.addOp3(v, OP.Jump, addr + 2, addr + 4, addr + 2);
-        addr_gosub_flush = aux.addOp1(v, OP.Gosub, reg_flush_part);
-        _ = aux.addOp3(v, OP.Copy, reg_new_part, m_win.reg_part, n_part - 1);
+        // OP_Jump's P1 and P3 are addresses too (not labels).
+        _ = aux.emit(v, .Jump, .{ addr.plus(2).int(), addr.plus(4), addr.plus(2).int() });
+        addr_gosub_flush = aux.emit(v, .Gosub, .{reg_flush_part});
+        _ = aux.emit(v, .Copy, .{ reg_new_part, reg_part, n_part - 1 });
     }
 
     // Insert the row into the ephemeral table.
-    _ = aux.addOp2(v, OP.NewRowid, csr_write, cx.reg_rowid);
-    _ = aux.addOp3(v, OP.Insert, csr_write, reg_record, cx.reg_rowid);
-    const addr_ne = aux.addOp3(v, OP.Ne, m_win.reg_one, 0, cx.reg_rowid);
+    _ = aux.emit(v, .NewRowid, .{ csr_write, cx.reg_rowid });
+    _ = aux.emit(v, .Insert, .{ csr_write, reg_record, cx.reg_rowid });
+    const addr_ne = aux.emit(v, .Ne, .{ Reg.from(m_win.reg_one), 0, cx.reg_rowid });
 
     // The first row of each partition.
     cx.reg_arg = windowInitAccum(p, m_win);
 
-    if (reg_start != 0) {
-        ec.exprCode(p, m_win.start, reg_start);
+    if (!reg_start.isNone()) {
+        ec.exprCode(p, m_win.start, reg_start.int());
         windowCheckValue(p, reg_start, WINDOW_STARTING_INT + @as(usize, if (m_win.e_frm_type == TK.RANGE) 3 else 0));
     }
-    if (reg_end != 0) {
-        ec.exprCode(p, m_win.end, reg_end);
+    if (!reg_end.isNone()) {
+        ec.exprCode(p, m_win.end, reg_end.int());
         windowCheckValue(p, reg_end, WINDOW_ENDING_INT + @as(usize, if (m_win.e_frm_type == TK.RANGE) 3 else 0));
     }
 
-    if (m_win.e_frm_type != TK.RANGE and m_win.e_start == m_win.e_end and reg_start != 0) {
+    if (m_win.e_frm_type != TK.RANGE and m_win.e_start == m_win.e_end and !reg_start.isNone()) {
         const op = if (m_win.e_start == TK.FOLLOWING) OP.Ge else OP.Le;
-        const addr_ge = aux.addOp3(v, op, reg_start, 0, reg_end);
+        const addr_ge = aux.emitAny(v, op, compare_shape, .{ reg_start, 0, reg_end });
         windowAggFinal(&cx, false);
-        _ = aux.addOp1(v, OP.Rewind, cx.current.csr);
+        _ = aux.emit(v, .Rewind, .{cx.current.csr});
         windowReturnOneRow(&cx);
-        _ = aux.addOp1(v, OP.ResetSorter, cx.current.csr);
-        _ = aux.addOp2(v, OP.Goto, 0, lbl_where_end);
-        aux.jumpHere(v, addr_ge);
+        _ = aux.emit(v, .ResetSorter, .{cx.current.csr});
+        _ = aux.emit(v, .Goto, .{ 0, lbl_where_end });
+        aux.landHere(v, addr_ge);
     }
-    if (m_win.e_start == TK.FOLLOWING and m_win.e_frm_type != TK.RANGE and reg_end != 0) {
+    if (m_win.e_start == TK.FOLLOWING and m_win.e_frm_type != TK.RANGE and !reg_end.isNone()) {
         std.debug.assert(m_win.e_end == TK.FOLLOWING);
-        _ = aux.addOp3(v, OP.Subtract, reg_start, reg_end, reg_start);
+        _ = aux.emit(v, .Subtract, .{ reg_start, reg_end, reg_start });
     }
 
-    if (m_win.e_start != TK.UNBOUNDED) _ = aux.addOp1(v, OP.Rewind, cx.start.csr);
-    _ = aux.addOp1(v, OP.Rewind, cx.current.csr);
-    _ = aux.addOp1(v, OP.Rewind, cx.end.csr);
-    if (reg_peer != 0) if (order_by) |ob| {
+    if (m_win.e_start != TK.UNBOUNDED) _ = aux.emit(v, .Rewind, .{cx.start.csr});
+    _ = aux.emit(v, .Rewind, .{cx.current.csr});
+    _ = aux.emit(v, .Rewind, .{cx.end.csr});
+    if (!reg_peer.isNone()) if (order_by) |ob| {
         const n: i32 = @intCast(ob.len());
-        _ = aux.addOp3(v, OP.Copy, reg_new_peer, reg_peer, n - 1);
-        _ = aux.addOp3(v, OP.Copy, reg_peer, cx.start.reg, n - 1);
-        _ = aux.addOp3(v, OP.Copy, reg_peer, cx.current.reg, n - 1);
-        _ = aux.addOp3(v, OP.Copy, reg_peer, cx.end.reg, n - 1);
+        _ = aux.emit(v, .Copy, .{ reg_new_peer, reg_peer, n - 1 });
+        _ = aux.emit(v, .Copy, .{ reg_peer, cx.start.reg, n - 1 });
+        _ = aux.emit(v, .Copy, .{ reg_peer, cx.current.reg, n - 1 });
+        _ = aux.emit(v, .Copy, .{ reg_peer, cx.end.reg, n - 1 });
     };
 
-    _ = aux.addOp2(v, OP.Goto, 0, lbl_where_end);
+    _ = aux.emit(v, .Goto, .{ 0, lbl_where_end });
 
-    aux.jumpHere(v, addr_ne);
+    aux.landHere(v, addr_ne);
 
     // The second and later rows.
-    if (reg_peer != 0) windowIfNewPeer(p, order_by, reg_new_peer, reg_peer, lbl_where_end);
+    if (!reg_peer.isNone()) windowIfNewPeer(p, order_by, reg_new_peer, reg_peer, lbl_where_end);
     if (m_win.e_start == TK.FOLLOWING) {
-        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, 0, false);
+        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, .none, false);
         if (m_win.e_end != TK.UNBOUNDED) {
             if (m_win.e_frm_type == TK.RANGE) {
-                const lbl = aux.makeLabel(p);
-                const addr_next = aux.currentAddr(v);
+                const lbl = aux.newLabel(p);
+                const addr_next = aux.here(v);
                 windowCodeRangeTest(&cx, OP.Ge, cx.current.csr, reg_end, cx.end.csr, lbl);
                 _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
-                _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, false);
-                _ = aux.addOp2(v, OP.Goto, 0, addr_next);
-                aux.resolveLabel(v, lbl);
+                _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, false);
+                _ = aux.emit(v, .Goto, .{ 0, addr_next });
+                aux.place(v, lbl);
             } else {
                 _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, reg_end, false);
                 _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
@@ -1806,98 +1839,96 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
         const b_rps = m_win.e_start == TK.PRECEDING and m_win.e_frm_type == TK.RANGE;
         _ = windowCodeOp(&cx, WINDOW_AGGSTEP, reg_end, false);
         if (b_rps) _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
-        _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, false);
+        _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, false);
         if (!b_rps) _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
     } else {
-        var addr: i32 = 0;
-        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, 0, false);
+        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, .none, false);
         if (m_win.e_end != TK.UNBOUNDED) {
             if (m_win.e_frm_type == TK.RANGE) {
-                var lbl: i32 = 0;
-                addr = aux.currentAddr(v);
-                if (reg_end != 0) {
-                    lbl = aux.makeLabel(p);
-                    windowCodeRangeTest(&cx, OP.Ge, cx.current.csr, reg_end, cx.end.csr, lbl);
-                }
-                _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, false);
+                // With "<expr> FOLLOWING" as the end, a loop that leaves at
+                // `lbl`.
+                const addr_next = aux.here(v);
+                const lbl: ?Label = if (!reg_end.isNone()) aux.newLabel(p) else null;
+                if (lbl) |l| windowCodeRangeTest(&cx, OP.Ge, cx.current.csr, reg_end, cx.end.csr, l);
+                _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, false);
                 _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
-                if (reg_end != 0) {
-                    _ = aux.addOp2(v, OP.Goto, 0, addr);
-                    aux.resolveLabel(v, lbl);
+                if (lbl) |l| {
+                    _ = aux.emit(v, .Goto, .{ 0, addr_next });
+                    aux.place(v, l);
                 }
             } else {
-                if (reg_end != 0) addr = aux.addOp3(v, OP.IfPos, reg_end, 0, 1);
-                _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, false);
+                const addr_if: ?Addr = if (!reg_end.isNone()) aux.emit(v, .IfPos, .{ reg_end, 0, 1 }) else null;
+                _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, false);
                 _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
-                if (reg_end != 0) aux.jumpHere(v, addr);
+                if (addr_if) |a| aux.landHere(v, a);
             }
         }
     }
 
     // The end of the main input loop.
-    aux.resolveLabel(v, lbl_where_end);
+    aux.place(v, lbl_where_end);
     where_mod.whereEnd(w_info);
 
     // Fall through to the flush.
     if (m_win.partition != null) {
-        addr_integer = aux.addOp2(v, OP.Integer, 0, reg_flush_part);
-        aux.jumpHere(v, addr_gosub_flush);
+        addr_integer = aux.emit(v, .Integer, .{ 0, reg_flush_part });
+        aux.landHere(v, addr_gosub_flush);
     }
 
-    cx.reg_rowid = 0;
-    const addr_empty = aux.addOp1(v, OP.Rewind, csr_write);
+    cx.reg_rowid = .none;
+    const addr_empty = aux.emit(v, .Rewind, .{csr_write});
     if (m_win.e_end == TK.PRECEDING) {
         const b_rps = m_win.e_start == TK.PRECEDING and m_win.e_frm_type == TK.RANGE;
         _ = windowCodeOp(&cx, WINDOW_AGGSTEP, reg_end, false);
         if (b_rps) _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
-        _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, false);
+        _ = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, false);
     } else if (m_win.e_start == TK.FOLLOWING) {
-        var addr_start: i32 = undefined;
-        var addr_break1: i32 = undefined;
-        var addr_break2: i32 = undefined;
-        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, 0, false);
+        var addr_start: Addr = undefined;
+        var addr_break1: Addr = undefined;
+        var addr_break2: Addr = undefined;
+        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, .none, false);
         if (m_win.e_frm_type == TK.RANGE) {
-            addr_start = aux.currentAddr(v);
-            addr_break2 = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, true);
-            addr_break1 = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, true);
+            addr_start = aux.here(v);
+            addr_break2 = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, true).?;
+            addr_break1 = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, true).?;
         } else if (m_win.e_end == TK.UNBOUNDED) {
-            addr_start = aux.currentAddr(v);
-            addr_break1 = windowCodeOp(&cx, WINDOW_RETURN_ROW, reg_start, true);
-            addr_break2 = windowCodeOp(&cx, WINDOW_AGGINVERSE, 0, true);
+            addr_start = aux.here(v);
+            addr_break1 = windowCodeOp(&cx, WINDOW_RETURN_ROW, reg_start, true).?;
+            addr_break2 = windowCodeOp(&cx, WINDOW_AGGINVERSE, .none, true).?;
         } else {
             std.debug.assert(m_win.e_end == TK.FOLLOWING);
             // regEnd = regEnd - regStart; regStart = 0.
-            _ = aux.addOp3(v, OP.Subtract, reg_start, reg_end, reg_end);
-            _ = aux.addOp2(v, OP.Integer, 0, reg_start);
+            _ = aux.emit(v, .Subtract, .{ reg_start, reg_end, reg_end });
+            _ = aux.emit(v, .Integer, .{ 0, reg_start });
 
-            addr_start = aux.currentAddr(v);
-            addr_break1 = windowCodeOp(&cx, WINDOW_RETURN_ROW, reg_end, true);
-            addr_break2 = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, true);
+            addr_start = aux.here(v);
+            addr_break1 = windowCodeOp(&cx, WINDOW_RETURN_ROW, reg_end, true).?;
+            addr_break2 = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, true).?;
         }
-        _ = aux.addOp2(v, OP.Goto, 0, addr_start);
-        aux.jumpHere(v, addr_break2);
-        addr_start = aux.currentAddr(v);
-        const addr_break3 = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, true);
-        _ = aux.addOp2(v, OP.Goto, 0, addr_start);
-        aux.jumpHere(v, addr_break1);
-        aux.jumpHere(v, addr_break3);
+        _ = aux.emit(v, .Goto, .{ 0, addr_start });
+        aux.landHere(v, addr_break2);
+        addr_start = aux.here(v);
+        const addr_break3 = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, true).?;
+        _ = aux.emit(v, .Goto, .{ 0, addr_start });
+        aux.landHere(v, addr_break1);
+        aux.landHere(v, addr_break3);
     } else {
-        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, 0, false);
-        const addr_start = aux.currentAddr(v);
-        const addr_break = windowCodeOp(&cx, WINDOW_RETURN_ROW, 0, true);
+        _ = windowCodeOp(&cx, WINDOW_AGGSTEP, .none, false);
+        const addr_start = aux.here(v);
+        const addr_break = windowCodeOp(&cx, WINDOW_RETURN_ROW, .none, true).?;
         _ = windowCodeOp(&cx, WINDOW_AGGINVERSE, reg_start, false);
-        _ = aux.addOp2(v, OP.Goto, 0, addr_start);
-        aux.jumpHere(v, addr_break);
+        _ = aux.emit(v, .Goto, .{ 0, addr_start });
+        aux.landHere(v, addr_break);
     }
-    aux.jumpHere(v, addr_empty);
+    aux.landHere(v, addr_empty);
 
-    _ = aux.addOp1(v, OP.ResetSorter, cx.current.csr);
+    _ = aux.emit(v, .ResetSorter, .{cx.current.csr});
     if (m_win.partition != null) {
         if (m_win.reg_start_rowid != 0) {
-            _ = aux.addOp2(v, OP.Integer, 1, m_win.reg_start_rowid);
-            _ = aux.addOp2(v, OP.Integer, 0, m_win.reg_end_rowid);
+            _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_start_rowid) });
+            _ = aux.emit(v, .Integer, .{ 0, Reg.from(m_win.reg_end_rowid) });
         }
-        aux.changeP1(v, addr_integer, aux.currentAddr(v));
-        _ = aux.addOp1(v, OP.Return, reg_flush_part);
+        aux.changeP1(v, addr_integer.int(), aux.currentAddr(v));
+        _ = aux.emit(v, .Return, .{reg_flush_part});
     }
 }

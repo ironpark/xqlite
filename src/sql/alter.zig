@@ -64,6 +64,8 @@ const EP = int.EP;
 const COLFLAG = int.COLFLAG;
 const Aff = int.Aff;
 const OP = vi.OP;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
 const Context = vi.Context;
 const Mem = vi.Mem;
 const Walker = walker.Walker;
@@ -247,9 +249,9 @@ fn renameTableImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
     // shadow tables, say).
     if (vt) |pv| {
         p.n_mem += 1;
-        const i = p.n_mem;
-        _ = aux.loadString(v, i, z_name);
-        _ = aux.addOp4(v, OP.VRename, i, 0, 0, .{ .vtab = pv });
+        const name_reg: Reg = .from(p.n_mem);
+        _ = aux.loadString(v, name_reg.int(), z_name);
+        _ = aux.emit4(v, .VRename, .{ name_reg, 0, 0 }, .{ .vtab = pv });
     }
 
     renameReloadSchema(p, i_db, prepare.INITFLAG_AlterRename);
@@ -356,13 +358,13 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
     const v = build.getVdbe(p) orelse return;
     // The schema format must be at least 3, but one below 3 is not raised
     // to 4, which would corrupt existing DESC indexes.
-    const r1 = expr_mod.getTempReg(p);
-    _ = aux.addOp3(v, OP.ReadCookie, @intCast(i_db), r1, @backingInt(btree.Meta.file_format));
+    const r1: Reg = .from(expr_mod.getTempReg(p));
+    _ = aux.emit(v, .ReadCookie, .{ i_db, r1, @backingInt(btree.Meta.file_format) });
     aux.usesBtree(v, @intCast(i_db));
-    _ = aux.addOp2(v, OP.AddImm, r1, -2);
-    _ = aux.addOp2(v, OP.IfPos, r1, aux.currentAddr(v) + 2);
-    _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.file_format), 3);
-    expr_mod.releaseTempReg(p, r1);
+    _ = aux.emit(v, .AddImm, .{ r1, -2 });
+    _ = aux.emit(v, .IfPos, .{ r1, aux.here(v).plus(2) });
+    _ = aux.emit(v, .SetCookie, .{ i_db, @backingInt(btree.Meta.file_format), 3 });
+    expr_mod.releaseTempReg(p, r1.int());
 
     // Reload the table definition.
     renameReloadSchema(p, i_db, prepare.INITFLAG_AlterAdd);
@@ -1512,44 +1514,44 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         const v = build.getVdbe(p) orelse return;
         var pk: ?*Index = null;
         var n_field: i32 = 0;
-        const i_cur = p.n_tab;
+        const cur: Cursor = .from(p.n_tab);
         p.n_tab += 1;
-        insert_mod.openTable(p, i_cur, i_db, t, OP.OpenWrite);
-        const addr = aux.addOp1(v, OP.Rewind, i_cur);
+        insert_mod.openTable(p, cur.int(), i_db, t, OP.OpenWrite);
+        const addr = aux.emit(v, .Rewind, .{cur});
         p.n_mem += 1;
-        const reg = p.n_mem;
+        const reg: Reg = .from(p.n_mem);
         if (t.hasRowid()) {
-            _ = aux.addOp2(v, OP.Rowid, i_cur, reg);
+            _ = aux.emit(v, .Rowid, .{ cur, reg });
             p.n_mem += @intCast(t.cols.len);
         } else {
             pk = build.primaryKeyIndex(t);
             p.n_mem += pk.?.n_column;
             for (0..pk.?.n_key_col) |i| {
-                _ = aux.addOp3(v, OP.Column, i_cur, @intCast(i), reg + @as(i32, @intCast(i)) + 1);
+                _ = aux.emit(v, .Column, .{ cur, i, reg.at(i + 1) });
             }
             n_field = pk.?.n_key_col;
         }
         p.n_mem += 1;
-        const reg_rec = p.n_mem;
+        const rec: Reg = .from(p.n_mem);
         for (t.cols, 0..) |*c, i| {
             if (i == i_col or c.col_flags.VIRTUAL) continue;
-            var reg_out: i32 = undefined;
+            var out: Reg = undefined;
             if (pk) |k| {
                 const i_pos = build.tableColumnToIndex(k, @intCast(i));
                 const i_col_pos = build.tableColumnToIndex(k, @intCast(i_col));
                 if (i_pos < k.n_key_col) continue;
-                reg_out = reg + 1 + i_pos - @intFromBool(i_pos > i_col_pos);
+                out = reg.at(1 + i_pos - @intFromBool(i_pos > i_col_pos));
             } else {
-                reg_out = reg + 1 + n_field;
+                out = reg.at(1 + n_field);
             }
             if (i == t.i_pkey) {
-                _ = aux.addOp2(v, OP.Null, 0, reg_out);
+                _ = aux.emit(v, .Null, .{ 0, out });
             } else {
                 // The value as stored: a REAL column would be given REAL
                 // affinity.
                 const aff = c.affinity;
                 if (aff == Aff.real) c.affinity = Aff.numeric;
-                ec.codeGetColumnOfTable(v, t, i_cur, @intCast(i), reg_out);
+                ec.codeGetColumnOfTable(v, t, cur.int(), @intCast(i), out.int());
                 c.affinity = aff;
             }
             n_field += 1;
@@ -1557,18 +1559,18 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         if (n_field == 0) {
             // dbsqlfuzz 5f09e7bcc78b4954d06bf9f2400d7715f48d1fef
             p.n_mem += 1;
-            _ = aux.addOp2(v, OP.Null, 0, reg + 1);
+            _ = aux.emit(v, .Null, .{ 0, reg.at(1) });
             n_field = 1;
         }
-        _ = aux.addOp3(v, OP.MakeRecord, reg + 1, n_field, reg_rec);
+        _ = aux.emit(v, .MakeRecord, .{ reg.at(1), n_field, rec });
         if (pk) |k| {
-            _ = aux.addOp4Int(v, OP.IdxInsert, i_cur, reg_rec, reg + 1, k.n_key_col);
+            _ = aux.emitInt(v, .IdxInsert, .{ cur, rec, reg.at(1) }, k.n_key_col);
         } else {
-            _ = aux.addOp3(v, OP.Insert, i_cur, reg_rec, reg);
+            _ = aux.emit(v, .Insert, .{ cur, rec, reg });
         }
         aux.changeP5(v, vi.OPFLAG.SAVEPOSITION);
-        _ = aux.addOp2(v, OP.Next, i_cur, addr + 1);
-        aux.jumpHere(v, addr);
+        _ = aux.emit(v, .Next, .{ cur, addr.plus(1) });
+        aux.landHere(v, addr);
     }
 }
 

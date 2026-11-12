@@ -50,7 +50,6 @@ const Mem = vi.Mem;
 const Context = vi.Context;
 const RC = int.RC;
 const TK = int.TK;
-const OP = vi.OP;
 
 // ================================================================ the API
 
@@ -599,14 +598,14 @@ pub fn finishParse(p: *Parse, end: ?Token) void {
         const v = build.getVdbe(p) orelse return;
         build.changeCookie(p, i_db);
 
-        _ = aux.addOp0(v, OP.Expire);
+        _ = aux.emit(v, .Expire, .{});
         const where = build.mprintf(p, "name=%Q AND sql=%Q", &.{ .{ .str = t.name }, .{ .str = stmt } }) catch return build.oomFault(p);
         aux.addParseSchemaOp(v, @intCast(i_db), where, 0);
 
         p.n_mem += 1;
-        const i_reg = p.n_mem;
-        _ = aux.loadString(v, i_reg, t.name);
-        _ = aux.addOp2(v, OP.VCreate, @intCast(i_db), i_reg);
+        const name_reg: aux.operand.Reg = .from(p.n_mem);
+        _ = aux.loadString(v, name_reg.int(), t.name);
+        _ = aux.emit(v, .VCreate, .{ i_db, name_reg });
     } else {
         // Rereading sqlite_schema: add the table to the schema.
         const s = t.schema.?;

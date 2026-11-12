@@ -29,7 +29,6 @@ const FuncDef = int.FuncDef;
 const Mem = vi.Mem;
 const Context = vi.Context;
 const RC = int.RC;
-const OP = vi.OP;
 
 /// Port of resolveAttachExpr(): a bare identifier at the root of an
 /// ATTACH or DETACH operand is a string, not a column name.
@@ -340,7 +339,7 @@ fn codeAttach(p: *Parse, typ: AuthCode, func: *const FuncDef, auth_arg: ?*Expr, 
     if (v) |vm| {
         _ = aux.addFunctionCall(p, 0, reg_args + 3 - func.n_arg, reg_args + 3, func.n_arg, func, 0);
         // ATTACH expires only this statement, DETACH all of them.
-        _ = aux.addOp1(vm, OP.Expire, @intFromBool(typ == .attach));
+        _ = aux.emit(vm, .Expire, .{typ == .attach});
     }
 }
 

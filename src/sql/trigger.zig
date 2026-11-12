@@ -27,7 +27,10 @@ const Table = int.Table;
 const Trigger = int.Trigger;
 const NameContext = int.NameContext;
 const RC = int.RC;
-const OP = vi.OP;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Label = aux.operand.Label;
+const Jump = aux.operand.Jump;
 const Expr = int.Expr;
 const ExprList = int.ExprList;
 const IdList = int.IdList;
@@ -464,7 +467,7 @@ pub fn dropTriggerPtr(p: *Parse, trig: *Trigger) void {
         .{ .str = trig.name },
     });
     build.changeCookie(p, i_db);
-    _ = aux.addOp4Str(v, OP.DropTrigger, @intCast(i_db), 0, 0, trig.name);
+    _ = aux.emitStr(v, .DropTrigger, .{ i_db, 0, 0 }, trig.name);
 }
 
 /// Port of sqlite3UnlinkAndDeleteTrigger(): remove a dropped trigger
@@ -583,20 +586,20 @@ fn codeTriggerProgram(p: *Parse, step_list: *TriggerStep, orconf: OE) Oom!void {
         std.debug.assert(!p.ok_const_factor);
         if (step.span) |span| {
             const z = try std.fmt.allocPrint(a, "-- {s}", .{span});
-            _ = aux.addOp4Str(v, OP.Trace, 0x7fffffff, 1, 0, z);
+            _ = aux.emitStr(v, .Trace, .{ 0x7fffffff, 1, 0 }, z);
         }
         switch (step.op) {
             TK.UPDATE => {
                 update_mod.update(p, try expr_mod.srcListDup(a, step.src), try expr_mod.listDup(a, step.expr_list), try expr_mod.exprDup(a, step.where), p.e_orconf, null, null, null);
-                _ = aux.addOp0(v, OP.ResetCount);
+                _ = aux.emit(v, .ResetCount, .{});
             },
             TK.INSERT => {
                 insert_mod.insert(p, try expr_mod.srcListDup(a, step.src), try expr_mod.selectDup(a, step.select), try expr_mod.idListDup(a, step.id_list), p.e_orconf, try upsert_mod.upsertDup(a, step.upsert));
-                _ = aux.addOp0(v, OP.ResetCount);
+                _ = aux.emit(v, .ResetCount, .{});
             },
             TK.DELETE => {
                 delete_mod.deleteFrom(p, try expr_mod.srcListDup(a, step.src), try expr_mod.exprDup(a, step.where), null, null);
-                _ = aux.addOp0(v, OP.ResetCount);
+                _ = aux.emit(v, .ResetCount, .{});
             },
             else => {
                 std.debug.assert(step.op == TK.SELECT);
@@ -679,19 +682,20 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) Oom!?*Tr
     if (!trig.is_fk_action) aux.changeP4Str(v, -1, try std.fmt.allocPrint(sub.arena, "-- TRIGGER {s}", .{trig.name}));
 
     // A false (or NULL) WHEN clause jumps to the OP_Halt at the end.
-    var end_trigger: i32 = 0;
+    var end_trigger: ?Label = null;
     if (trig.when) |when| {
         const w = try expr_mod.exprDup(sub.arena, when);
         if (!db.malloc_failed) if (resolve.resolveExprNames(&nc, w)) |_| {
-            end_trigger = aux.makeLabel(&sub);
-            ec.exprIfFalse(&sub, w, end_trigger, vi.SQLITE_JUMPIFNULL);
+            const end = aux.newLabel(&sub);
+            end_trigger = end;
+            ec.exprIfFalse(&sub, w, end.int(), vi.SQLITE_JUMPIFNULL);
         } else |_| {};
     }
 
     try codeTriggerProgram(&sub, trig.step_list.?, orconf);
 
-    if (end_trigger != 0) aux.resolveLabel(v, end_trigger);
-    _ = aux.addOp0(v, OP.Halt);
+    if (end_trigger) |end| aux.place(v, end);
+    _ = aux.emit(v, .Halt, .{});
     transferParseError(p, &sub);
 
     if (p.n_err == 0) {
@@ -725,7 +729,7 @@ pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: i32, orco
     // again (foreign key actions always may).
     const recursive = !trig.is_fk_action and !p.db.flags.RecTriggers;
     p.n_mem += 1;
-    _ = aux.addOp4(v, OP.Program, reg, ignore_jump, p.n_mem, .{ .subprogram = prg.program });
+    _ = aux.emit4(v, .Program, .{ Reg.from(reg), Jump.from(ignore_jump), Reg.from(p.n_mem) }, .{ .subprogram = prg.program });
     aux.changeP5(v, @intFromBool(recursive));
 }
 
@@ -910,19 +914,20 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_
         p.xq_returning_op = 0;
         if (resolved and !db.malloc_failed) {
             const n_col: i32 = @intCast(new.len());
-            const reg = p.n_mem + 1;
+            const reg: Reg = .from(p.n_mem + 1);
+            const ret_cur: Cursor = .from(ret.i_ret_cur);
             processReturningSubqueries(new, t);
             p.n_mem += n_col + 2;
-            ret.i_ret_reg = reg;
+            ret.i_ret_reg = reg.int();
             for (new.slice(), 0..) |*item, i| {
                 const col = item.expr.?;
-                const r = reg + @as(i32, @intCast(i));
-                ec.codeFactorable(p, col, r);
-                if (expr_mod.affinity(col) == Aff.real) _ = aux.addOp1(v, OP.RealAffinity, r);
+                const r = reg.at(i);
+                ec.codeFactorable(p, col, r.int());
+                if (expr_mod.affinity(col) == Aff.real) _ = aux.emit(v, .RealAffinity, .{r});
             }
-            _ = aux.addOp3(v, OP.MakeRecord, reg, n_col, reg + n_col);
-            _ = aux.addOp2(v, OP.NewRowid, ret.i_ret_cur, reg + n_col + 1);
-            _ = aux.addOp3(v, OP.Insert, ret.i_ret_cur, reg + n_col, reg + n_col + 1);
+            _ = aux.emit(v, .MakeRecord, .{ reg, n_col, reg.at(n_col) });
+            _ = aux.emit(v, .NewRowid, .{ ret_cur, reg.at(n_col + 1) });
+            _ = aux.emit(v, .Insert, .{ ret_cur, reg.at(n_col), reg.at(n_col + 1) });
         }
     }
     p.e_trigger_op = 0;

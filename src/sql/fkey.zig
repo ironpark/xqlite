@@ -46,6 +46,10 @@ const Aff = int.Aff;
 const DbFlag = int.DbFlag;
 const COLFLAG = int.COLFLAG;
 const OP = vi.OP;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Label = aux.operand.Label;
+const Addr = aux.operand.Addr;
 
 /// Port of sqlite3FkLocateIndex(): the UNIQUE index of `parent` on the
 /// parent key of `fk`, to `idx` (null for an INTEGER PRIMARY KEY). For a
@@ -139,60 +143,63 @@ fn isDeferred(p: *Parse, fk: *const FKey) bool {
 /// key columns to child columns. `deferred`: isDeferred(p, fk).
 fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: []const i32, reg_data: i32, n_incr: i32, is_ignore: bool, is_update: bool) void {
     const v = build.getVdbe(p) orelse return;
-    const i_cur = p.n_tab - 1;
-    const i_ok = aux.makeLabel(p);
+    const cur: Cursor = .from(p.n_tab - 1);
+    const ok = aux.newLabel(p);
+    // The child row: its rowid, then its columns.
+    const rowid: Reg = .from(reg_data);
+    const cols = rowid.at(1);
 
     // When decrementing, nothing to do if the counter is already zero.
-    if (n_incr < 0) _ = aux.addOp2(v, OP.FkIfZero, @intFromBool(deferred), i_ok);
+    if (n_incr < 0) _ = aux.emit(v, .FkIfZero, .{ deferred, ok });
     // A NULL in the child key never violates the constraint.
     for (0..fk.cols.len) |i| {
-        const reg = build.tableColumnToStorage(fk.from, @intCast(ai_col[i])) + reg_data + 1;
-        _ = aux.addOp2(v, OP.IsNull, reg, i_ok);
+        const reg = cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[i])));
+        _ = aux.emit(v, .IsNull, .{ reg, ok });
     }
 
     if (!is_ignore) {
         if (idx) |ix| {
             const n_col: i32 = @intCast(fk.cols.len);
-            const reg_temp = expr_mod.getTempRange(p, n_col);
-            _ = aux.addOp3(v, OP.OpenRead, i_cur, @intCast(ix.tnum), @intCast(i_db));
+            const temp: Reg = .from(expr_mod.getTempRange(p, n_col));
+            _ = aux.emit(v, .OpenRead, .{ cur, ix.tnum, i_db });
             aux.setP4KeyInfo(p, ix);
             for (0..fk.cols.len) |i| {
-                const reg = build.tableColumnToStorage(fk.from, @intCast(ai_col[i])) + 1 + reg_data;
-                _ = aux.addOp2(v, OP.Copy, reg, reg_temp + @as(i32, @intCast(i)));
+                const reg = cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[i])));
+                _ = aux.emit(v, .Copy, .{ reg, temp.at(i) });
             }
             // A row inserted into its own parent table satisfies itself.
             if (t == fk.from and n_incr == 1) {
-                const i_jump = aux.currentAddr(v) + n_col + 1;
+                const jump = aux.here(v).plus(n_col + 1);
                 for (0..fk.cols.len) |i| {
-                    const i_child = build.tableColumnToStorage(fk.from, @intCast(ai_col[i])) + 1 + reg_data;
-                    var i_parent = 1 + reg_data + build.tableColumnToStorage(ix.table, ix.ai_column[i]);
+                    const child = cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[i])));
+                    var parent = cols.at(build.tableColumnToStorage(ix.table, ix.ai_column[i]));
                     // A composite key that includes the IPK.
-                    if (ix.ai_column[i] == t.i_pkey) i_parent = reg_data;
-                    _ = aux.addOp3(v, OP.Ne, i_child, i_jump, i_parent);
+                    if (ix.ai_column[i] == t.i_pkey) parent = rowid;
+                    _ = aux.emit(v, .Ne, .{ child, jump, parent });
                     aux.changeP5(v, vi.SQLITE_JUMPIFNULL);
                 }
-                _ = aux.goto_(v, i_ok);
+                _ = aux.emit(v, .Goto, .{ 0, ok });
             }
-            _ = aux.addOp4Str(v, OP.Affinity, reg_temp, n_col, 0, insert_mod.indexAffinityPrefix(p, ix, fk.cols.len));
-            _ = aux.addOp4Int(v, OP.Found, i_cur, i_ok, reg_temp, n_col);
-            expr_mod.releaseTempRange(p, reg_temp, n_col);
+            _ = aux.emitStr(v, .Affinity, .{ temp, n_col, 0 }, insert_mod.indexAffinityPrefix(p, ix, fk.cols.len));
+            _ = aux.emitInt(v, .Found, .{ cur, ok, temp }, n_col);
+            expr_mod.releaseTempRange(p, temp.int(), n_col);
         } else {
             // The parent key is the INTEGER PRIMARY KEY: a child key that
             // is not an integer has no parent.
-            const reg_temp = expr_mod.getTempReg(p);
-            _ = aux.addOp2(v, OP.SCopy, build.tableColumnToStorage(fk.from, @intCast(ai_col[0])) + 1 + reg_data, reg_temp);
-            const i_must_be_int = aux.addOp2(v, OP.MustBeInt, reg_temp, 0);
+            const temp: Reg = .from(expr_mod.getTempReg(p));
+            _ = aux.emit(v, .SCopy, .{ cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[0]))), temp });
+            const must_be_int = aux.emit(v, .MustBeInt, .{ temp, 0 });
             // A row inserted into its own parent table satisfies itself.
             if (t == fk.from and n_incr == 1) {
-                _ = aux.addOp3(v, OP.Eq, reg_data, i_ok, reg_temp);
+                _ = aux.emit(v, .Eq, .{ rowid, ok, temp });
                 aux.changeP5(v, vi.SQLITE_NOTNULL);
             }
-            insert_mod.openTable(p, i_cur, i_db, t, OP.OpenRead);
-            _ = aux.addOp3(v, OP.NotExists, i_cur, 0, reg_temp);
-            _ = aux.goto_(v, i_ok);
-            aux.jumpHere(v, aux.currentAddr(v) - 2);
-            aux.jumpHere(v, i_must_be_int);
-            expr_mod.releaseTempReg(p, reg_temp);
+            insert_mod.openTable(p, cur.int(), i_db, t, OP.OpenRead);
+            _ = aux.emit(v, .NotExists, .{ cur, 0, temp });
+            _ = aux.emit(v, .Goto, .{ 0, ok });
+            aux.landHere(v, aux.here(v).plus(-2));
+            aux.landHere(v, must_be_int);
+            expr_mod.releaseTempReg(p, temp.int());
         }
     }
 
@@ -208,11 +215,11 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
     } else {
         if (n_incr > 0 and !deferred) main_mod.mayAbort(p);
         const z = if (n_incr > 0) dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx, reg_data, ai_col) else null;
-        _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(deferred), n_incr, 0, z);
+        _ = aux.emitStr(v, .FkCounter, .{ deferred, n_incr, 0 }, z);
     }
 
-    aux.resolveLabel(v, i_ok);
-    _ = aux.addOp1(v, OP.Close, i_cur);
+    aux.place(v, ok);
+    _ = aux.emit(v, .Close, .{cur});
 }
 
 /// Port of exprTableRegister(): column `i_col` of `t` (-1 for the rowid)
@@ -245,8 +252,8 @@ fn exprTableColumn(p: *Parse, t: *Table, i_cursor: i32, i_col: i16) Oom!*Expr {
 /// registers from `reg_data`. `deferred`: isDeferred(p, fk).
 fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: ?[]const i32, reg_data: i32, n_incr: i32, is_update: bool) Oom!void {
     const v = build.getVdbe(p) orelse return;
-    var i_fk_if_zero: i32 = 0;
-    if (n_incr < 0) i_fk_if_zero = aux.addOp2(v, OP.FkIfZero, @intFromBool(deferred), 0);
+    var fk_if_zero: ?Addr = null;
+    if (n_incr < 0) fk_if_zero = aux.emit(v, .FkIfZero, .{ deferred, 0 });
 
     // WHERE parent.key1 = child.col1 AND ...
     var where: ?*Expr = null;
@@ -285,10 +292,10 @@ fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, 
     if (p.n_err == 0) {
         const z = if (n_incr > 0) dconstraint.foreignKey(p, .referenced, if (is_update) .update else .delete, fk, t, idx, reg_data, ai_col) else null;
         const w = where_mod.whereBegin(p, src, where, null, null, null, .{}, 0);
-        _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(deferred), n_incr, 0, z);
+        _ = aux.emitStr(v, .FkCounter, .{ deferred, n_incr, 0 }, z);
         if (w) |wi| where_mod.whereEnd(wi);
     }
-    if (i_fk_if_zero != 0) aux.jumpHereOrPopInst(v, i_fk_if_zero);
+    if (fk_if_zero) |addr| aux.jumpHereOrPopInst(v, addr.int());
 }
 
 /// Port of sqlite3FkReferences(): the foreign keys that refer to `t`.
@@ -307,7 +314,7 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
     const db = p.db;
     if (!db.flags.ForeignKeys or !t.isOrdinary()) return;
     const v = build.getVdbe(p) orelse return;
-    var i_skip: i32 = 0;
+    var skip: ?Label = null;
     if (fkReferences(t) == null) {
         // Only its own deferred foreign keys matter: if the counter is
         // zero, dropping the table changes nothing.
@@ -316,8 +323,9 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
             if (isDeferred(p, fk) or db.flags.DeferFKs) break;
         }
         if (it == null) return;
-        i_skip = aux.makeLabel(p);
-        _ = aux.addOp2(v, OP.FkIfZero, 1, i_skip);
+        const l = aux.newLabel(p);
+        skip = l;
+        _ = aux.emit(v, .FkIfZero, .{ 1, l });
     }
 
     p.disable_triggers = true;
@@ -327,14 +335,14 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
     // An immediate violation fails the DROP now, not at the end of the
     // statement (which would drop the table anyway).
     if (!db.flags.DeferFKs) {
-        _ = aux.addOp2(v, OP.FkIfZero, 0, aux.currentAddr(v) + 2);
+        _ = aux.emit(v, .FkIfZero, .{ 0, aux.here(v).plus(2) });
         if (dconstraint.foreignKeyUnknown(p)) |z| {
             build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, 0);
         } else {
             build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
         }
     }
-    if (i_skip != 0) aux.resolveLabel(v, i_skip);
+    if (skip) |l| aux.place(v, l);
 }
 
 /// Port of fkChildIsModified(): whether an UPDATE changes the child key
@@ -412,12 +420,13 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
                 // counts as empty, so each child row with a non-NULL key
                 // was a violation.
                 const v = build.getVdbe(p) orelse return;
-                const i_jump = aux.currentAddr(v) + @as(i32, @intCast(fk.cols.len)) + 1;
+                const jump = aux.here(v).plus(@as(i32, @intCast(fk.cols.len)) + 1);
+                const old_cols = Reg.from(reg_old).at(1);
                 for (fk.cols) |c| {
-                    const reg = build.tableColumnToStorage(fk.from, @intCast(c.i_from)) + reg_old + 1;
-                    _ = aux.addOp2(v, OP.IsNull, reg, i_jump);
+                    const reg = old_cols.at(build.tableColumnToStorage(fk.from, @intCast(c.i_from)));
+                    _ = aux.emit(v, .IsNull, .{ reg, jump });
                 }
-                _ = aux.addOp2(v, OP.FkCounter, @intFromBool(deferred), -1);
+                _ = aux.emit(v, .FkCounter, .{ deferred, -1 });
             }
             continue;
         }

@@ -34,7 +34,6 @@ const Sqlite3 = int.Sqlite3;
 const Vdbe = vi.Vdbe;
 const Mem = vi.Mem;
 const RC = int.RC;
-const OP = vi.OP;
 
 /// Port of execSql(): run `sql`. If it is a SELECT, each row's single
 /// column is SQL to run in turn, but only a CREATE or an INSERT: a
@@ -109,15 +108,15 @@ pub fn vacuum(p: *Parse, name: ?int.Token, into: ?*int.Expr) void {
     }
     // TEMP is not vacuumed.
     if (i_db != 1) {
-        var into_reg: i32 = 0;
+        var into_reg: aux.operand.Reg = .none;
         if (into) |e| {
             if (resolve.resolveSelfReference(p, null, .{}, e, null)) |_| {
                 p.n_mem += 1;
-                into_reg = p.n_mem;
-                expr_code.exprCode(p, e, into_reg);
+                into_reg = .from(p.n_mem);
+                expr_code.exprCode(p, e, into_reg.int());
             } else |_| {}
         }
-        _ = aux.addOp2(v, OP.Vacuum, @intCast(i_db), into_reg);
+        _ = aux.emit(v, .Vacuum, .{ i_db, into_reg });
         aux.usesBtree(v, @intCast(i_db));
     }
 }

@@ -11,7 +11,6 @@ const util = @import("util.zig");
 const update_mod = @import("update.zig");
 const main_mod = @import("main.zig");
 const printf = @import("printf.zig");
-const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 
 const Parse = int.Parse;
@@ -25,7 +24,8 @@ const Oom = int.Oom;
 const OE = int.OE;
 const RC = int.RC;
 const TK = int.TK;
-const OP = vi.OP;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
 
 /// Port of sqlite3UpsertNew(): one ON CONFLICT clause, before `next`.
 /// A null `set` means DO NOTHING.
@@ -170,29 +170,30 @@ pub fn ofIndex(list: ?*Upsert, idx: ?*Index) ?*Upsert {
 pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, i_cur: i32) Oom!void {
     const v = p.vdbe.?;
     const a = p.arena;
-    const i_data_cur = top.i_data_cur;
+    const cur: Cursor = .from(i_cur);
+    const data_cur: Cursor = .from(top.i_data_cur);
     const u = ofIndex(top, idx).?;
-    if (idx) |ix| if (i_cur != i_data_cur) {
+    if (idx) |ix| if (cur != data_cur) {
         // Move the table cursor to the conflicting row.
         if (t.hasRowid()) {
-            const reg_rowid = expr_mod.getTempReg(p);
-            _ = aux.addOp2(v, OP.IdxRowid, i_cur, reg_rowid);
-            _ = aux.addOp3(v, OP.SeekRowid, i_data_cur, 0, reg_rowid);
-            expr_mod.releaseTempReg(p, reg_rowid);
+            const rowid: Reg = .from(expr_mod.getTempReg(p));
+            _ = aux.emit(v, .IdxRowid, .{ cur, rowid });
+            _ = aux.emit(v, .SeekRowid, .{ data_cur, 0, rowid });
+            expr_mod.releaseTempReg(p, rowid.int());
         } else {
             const pk = build.primaryKeyIndex(t).?;
             const n_pk: i32 = pk.n_key_col;
-            const i_pk = p.n_mem + 1;
+            const pk_reg: Reg = .from(p.n_mem + 1);
             p.n_mem += n_pk;
             for (0..pk.n_key_col) |i| {
                 std.debug.assert(pk.ai_column[i] >= 0);
                 const k = build.tableColumnToIndex(ix, pk.ai_column[i]);
-                _ = aux.addOp3(v, OP.Column, i_cur, k, i_pk + @as(i32, @intCast(i)));
+                _ = aux.emit(v, .Column, .{ cur, k, pk_reg.at(i) });
             }
-            const addr = aux.addOp4Int(v, OP.Found, i_data_cur, 0, i_pk, n_pk);
-            _ = aux.addOp4Str(v, OP.Halt, RC.CORRUPT, OE.Abort.int(), 0, "corrupt database");
+            const addr = aux.emitInt(v, .Found, .{ data_cur, 0, pk_reg }, n_pk);
+            _ = aux.emitStr(v, .Halt, .{ RC.CORRUPT, OE.Abort.int(), 0 }, "corrupt database");
             main_mod.mayAbort(p);
-            aux.jumpHere(v, addr);
+            aux.landHere(v, addr);
         }
     };
     // The INSERT owns its FROM list; the UPDATE gets a copy.
@@ -200,7 +201,7 @@ pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, i_cur: i32) Oo
     // excluded.* columns of type REAL hold a real.
     for (t.cols, 0..) |*c, i| {
         if (c.affinity == int.Aff.real) {
-            _ = aux.addOp1(v, OP.RealAffinity, top.reg_data + build.tableColumnToStorage(t, @intCast(i)));
+            _ = aux.emit(v, .RealAffinity, .{Reg.from(top.reg_data).at(build.tableColumnToStorage(t, @intCast(i)))});
         }
     }
     update_mod.update(p, src, try expr_mod.listDup(a, u.set), try expr_mod.exprDup(a, u.where), OE.Abort, null, null, u);

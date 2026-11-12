@@ -160,8 +160,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         // OP_Clear adds the rows it removes to r[P3] if P3 is positive.
         const clear_count: i32 = if (mem_cnt.isNone()) -1 else mem_cnt.int();
         if (t.hasRowid()) {
-            const clear = aux.emit(v, .Clear, .{ t.tnum, i_db, clear_count });
-            aux.changeP4Str(v, clear.int(), t.name);
+            _ = aux.emitStr(v, .Clear, .{ t.tnum, i_db, clear_count }, t.name);
         }
         idx_opt = t.index;
         while (idx_opt) |ix| : (idx_opt = ix.next) {
@@ -240,9 +239,8 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
                 p.n_mem += 1;
                 key = .from(p.n_mem);
                 n_key = 0;
-                const rec = aux.emit(v, .MakeRecord, .{ pk_reg, n_pk, key });
-                aux.changeP4Str(v, rec.int(), insert.indexAffinityPrefix(p, k, @intCast(n_pk)));
-                _ = aux.emit4(v, .IdxInsert, .{ eph_cur, key, pk_reg }, .{ .int32 = n_pk });
+                _ = aux.emitStr(v, .MakeRecord, .{ pk_reg, n_pk, key }, insert.indexAffinityPrefix(p, k, @intCast(n_pk)));
+                _ = aux.emitInt(v, .IdxInsert, .{ eph_cur, key, pk_reg }, n_pk);
             } else {
                 n_key = 1;
                 _ = aux.emit(v, .RowSetAdd, .{ row_set, key });
@@ -263,7 +261,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         var addr_loop: Addr = undefined;
         if (e_one_pass != ONEPASS.OFF) {
             if (!t.isVirtual() and to_open.?[@intCast(i_data_cur - i_tab_cur)]) {
-                _ = aux.emit4(v, .NotFound, .{ Cursor.from(i_data_cur), bypass, key }, .{ .int32 = n_key });
+                _ = aux.emitInt(v, .NotFound, .{ Cursor.from(i_data_cur), bypass, key }, n_key);
             }
         } else if (pk != null) {
             addr_loop = aux.emit(v, .Rewind, .{eph_cur});
@@ -295,10 +293,10 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             where_mod.whereEnd(w);
         } else if (pk != null) {
             _ = aux.emit(v, .Next, .{ eph_cur, addr_loop.plus(1) });
-            aux.jumpHere(v, addr_loop.int());
+            aux.landHere(v, addr_loop);
         } else {
             _ = aux.emit(v, .Goto, .{ 0, addr_loop });
-            aux.jumpHere(v, addr_loop.int());
+            aux.landHere(v, addr_loop);
         }
     }
 
@@ -352,15 +350,9 @@ pub fn generateRowDelete(
     // Seek the row; it may be gone already (deleted by a trigger).
     const gone = aux.newLabel(p);
     const i_label = gone.int();
-    const seek = struct {
-        fn code(vdbe: *Vdbe, tab: *Table, cur: Cursor, miss: Label, key: Reg, n_key: i16) void {
-            _ = if (tab.hasRowid())
-                aux.emit4(vdbe, .NotExists, .{ cur, miss, key }, .{ .int32 = n_key })
-            else
-                aux.emit4(vdbe, .NotFound, .{ cur, miss, key }, .{ .int32 = n_key });
-        }
-    }.code;
-    if (e_mode == ONEPASS.OFF) seek(v, t, data_cur, gone, pk_reg, n_pk);
+    const op_seek: OP = if (t.hasRowid()) .NotExists else .NotFound;
+    const seek_shape = .{ .cursor, .jump, .reg };
+    if (e_mode == ONEPASS.OFF) aux.changeP4(v, aux.emitAny(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }).int(), .{ .int32 = n_pk });
 
     // The OLD.* registers of triggers and foreign keys.
     if (fkey.fkRequired(p, t, null, false) != 0 or trig != null) {
@@ -379,7 +371,7 @@ pub fn generateRowDelete(
         trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_BEFORE, t, i_old, onconf, i_label);
         // BEFORE triggers may have moved the cursor or deleted the row.
         if (addr_start < aux.currentAddr(v)) {
-            seek(v, t, data_cur, gone, pk_reg, n_pk);
+            aux.changeP4(v, aux.emitAny(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }).int(), .{ .int32 = n_pk });
             i_idx_no_seek = -1;
         }
         fkey.fkCheck(p, t, i_old, 0, null, false);

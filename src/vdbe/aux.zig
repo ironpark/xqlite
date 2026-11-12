@@ -106,6 +106,41 @@ pub fn emit4(v: *Vdbe, comptime op: OP, args: anytype, p4: P4) operand.Addr {
     return addr;
 }
 
+/// emit() with a number as P4 (sqlite3VdbeAddOp4Int()).
+pub fn emitInt(v: *Vdbe, comptime op: OP, args: anytype, p4: i32) operand.Addr {
+    const addr = emit(v, op, args);
+    if (!v.db.malloc_failed) v.ops.items[@intCast(addr.int())].setP4(.{ .int32 = p4 });
+    return addr;
+}
+
+/// emit() with a copy of `z` as P4 (P4_DYNAMIC).
+pub fn emitStr(v: *Vdbe, comptime op: OP, args: anytype, z: ?[]const u8) operand.Addr {
+    const addr = emit(v, op, args);
+    changeP4Str(v, addr.int(), z);
+    return addr;
+}
+
+/// emit() for an opcode chosen when the statement is compiled (OP_NotExists
+/// or OP_NotFound, by the kind of table): `shape` is what the operands of
+/// every opcode `op` can be are, and the arguments are checked against it.
+pub fn emitAny(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype) operand.Addr {
+    std.debug.assert(std.meta.eql(operand.kinds(op), shape));
+    if (args.len > 3) @compileError("more than P1, P2 and P3");
+    var p: [3]i32 = .{ 0, 0, 0 };
+    inline for (args, 0..) |arg, n| p[n] = operand.value(null, n, shape[n], arg);
+    return .from(addOp3(v, op, p[0], p[1], p[2]));
+}
+
+/// The address of the next instruction (sqlite3VdbeCurrentAddr()).
+pub fn here(v: *Vdbe) operand.Addr {
+    return .from(currentAddr(v));
+}
+
+/// The jump at `addr` goes to the next instruction (sqlite3VdbeJumpHere()).
+pub fn landHere(v: *Vdbe, addr: operand.Addr) void {
+    jumpHere(v, addr.int());
+}
+
 /// A new label (sqlite3VdbeMakeLabel()).
 pub fn newLabel(p: *Parse) operand.Label {
     return .from(makeLabel(p));

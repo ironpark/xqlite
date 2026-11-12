@@ -86,6 +86,20 @@ pub const Addr = enum(i32) {
     }
 };
 
+/// Where a jump goes when the code that made the number has not moved to
+/// Label and Addr yet: either of them.
+pub const Jump = enum(i32) {
+    _,
+
+    pub fn from(i: i32) Jump {
+        return @fromBackingInt(@intCast(i));
+    }
+
+    pub fn int(j: Jump) i32 {
+        return @backingInt(j);
+    }
+};
+
 /// What an operand is.
 pub const Kind = enum {
     /// A number, or not used.
@@ -203,9 +217,9 @@ comptime {
 }
 
 /// The number of an argument of aux.emit() for an operand of `kind`.
-pub inline fn value(comptime op: OP, comptime n: usize, comptime kind: Kind, arg: anytype) i32 {
+pub inline fn value(comptime op: ?OP, comptime n: usize, comptime kind: Kind, arg: anytype) i32 {
     const T = @TypeOf(arg);
-    const name = @tagName(op) ++ " P" ++ .{'1' + n};
+    const name = (if (op) |o| @tagName(o) else "the opcode's") ++ " P" ++ .{'1' + n};
     // 0 is "not used" for an operand of any kind.
     if (T == comptime_int) {
         if (arg != 0 and kind != .int) @compileError(name ++ " is a " ++ @tagName(kind) ++ ", not a number");
@@ -219,7 +233,7 @@ pub inline fn value(comptime op: OP, comptime n: usize, comptime kind: Kind, arg
         },
         .reg => if (T != Reg) @compileError(name ++ " is a register, not " ++ @typeName(T)),
         .cursor => if (T != Cursor) @compileError(name ++ " is a cursor, not " ++ @typeName(T)),
-        .jump => if (T != Label and T != Addr) @compileError(name ++ " is a jump (Label or Addr), not " ++ @typeName(T)),
+        .jump => if (T != Label and T != Addr and T != Jump) @compileError(name ++ " is a jump (Label or Addr), not " ++ @typeName(T)),
     }
     return @backingInt(arg);
 }

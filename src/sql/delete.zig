@@ -352,7 +352,7 @@ pub fn generateRowDelete(
     const i_label = gone.int();
     const op_seek: OP = if (t.hasRowid()) .NotExists else .NotFound;
     const seek_shape = .{ .cursor, .jump, .reg };
-    if (e_mode == ONEPASS.OFF) aux.changeP4(v, aux.emitAny(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }).int(), .{ .int32 = n_pk });
+    if (e_mode == ONEPASS.OFF) _ = aux.emitAnyInt(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }, n_pk);
 
     // The OLD.* registers of triggers and foreign keys.
     if (fkey.fkRequired(p, t, null, false) != 0 or trig != null) {
@@ -371,7 +371,7 @@ pub fn generateRowDelete(
         trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_BEFORE, t, i_old, onconf, i_label);
         // BEFORE triggers may have moved the cursor or deleted the row.
         if (addr_start < aux.currentAddr(v)) {
-            aux.changeP4(v, aux.emitAny(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }).int(), .{ .int32 = n_pk });
+            _ = aux.emitAnyInt(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }, n_pk);
             i_idx_no_seek = -1;
         }
         fkey.fkCheck(p, t, i_old, 0, null, false);

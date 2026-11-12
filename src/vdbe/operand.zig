@@ -98,6 +98,12 @@ pub const Jump = enum(i32) {
     pub fn int(j: Jump) i32 {
         return @backingInt(j);
     }
+
+    /// A Label or an Addr as a Jump, for a place that takes either.
+    pub fn of(x: anytype) Jump {
+        if (@TypeOf(x) != Label and @TypeOf(x) != Addr and @TypeOf(x) != Jump) @compileError("not a Label or an Addr: " ++ @typeName(@TypeOf(x)));
+        return .from(x.int());
+    }
 };
 
 /// What an operand is.
@@ -108,6 +114,9 @@ pub const Kind = enum {
     cursor,
     /// Where to jump: a Label or an Addr.
     jump,
+    /// An address that is not P2 of a jump, so a label in it would never
+    /// be resolved: an Addr only.
+    addr,
 };
 
 /// What P1, P2 and P3 of `op` are. An operand that is a register only in
@@ -118,6 +127,7 @@ pub fn kinds(op: OP) [3]Kind {
     const r = Kind.reg;
     const c = Kind.cursor;
     const j = Kind.jump;
+    const a = Kind.addr;
     return switch (op) {
         // Transactions and the schema.
         .Savepoint, .AutoCommit, .Transaction, .SetCookie, .TableLock => .{ i, i, i },
@@ -129,12 +139,16 @@ pub fn kinds(op: OP) [3]Kind {
 
         // Control.
         .Init, .Goto, .Once, .ElseEq, .FkIfZero, .IncrVacuum => .{ i, j, i },
-        .Gosub, .InitCoroutine, .Yield, .MustBeInt, .If, .IfNot, .IsNull, .NotNull => .{ r, j, i },
+        .Gosub, .Yield, .MustBeInt, .If, .IfNot, .IsNull, .NotNull => .{ r, j, i },
+        // P3 is where the co-routine starts.
+        .InitCoroutine => .{ r, j, a },
         .IfPos, .IfNotZero, .DecrJumpZero => .{ r, j, i },
-        .Jump => .{ i, j, i },
+        .Jump => .{ a, j, a },
         .Return, .EndCoroutine => .{ r, i, i },
         .HaltIfNull => .{ i, i, r },
-        .Halt, .FkCheck, .FkCounter, .ResetCount, .Permutation, .Trace, .Noop, .Explain, .Abortable => .{ i, i, i },
+        // P3 is the register of RAISE's message, if any.
+        .Halt => .{ i, i, r },
+        .FkCheck, .FkCounter, .ResetCount, .Permutation, .Trace, .Noop, .Explain, .Abortable => .{ i, i, i },
         .Program => .{ r, j, r },
         .Param => .{ i, r, i },
 
@@ -160,7 +174,9 @@ pub fn kinds(op: OP) [3]Kind {
         .AggFinal => .{ r, i, i },
 
         // Opening and closing cursors.
-        .OpenRead, .OpenWrite, .ReopenIdx, .OpenAutoindex, .OpenEphemeral, .SorterOpen => .{ c, i, i },
+        .OpenRead, .OpenWrite, .ReopenIdx, .SorterOpen => .{ c, i, i },
+        // P3, if any, is a register that is set to NULL.
+        .OpenAutoindex, .OpenEphemeral => .{ c, i, r },
         .OpenDup => .{ c, c, i },
         .OpenPseudo => .{ c, r, i },
         .Close, .ColumnsUsed, .NullRow, .SeekEnd, .FinishSeek, .ResetSorter, .CursorLock, .CursorUnlock, .CursorHint => .{ c, i, i },
@@ -175,11 +191,13 @@ pub fn kinds(op: OP) [3]Kind {
 
         // Reading and writing rows.
         .Column, .Offset => .{ c, i, r },
-        .Count, .Sequence, .Rowid, .RowData, .SorterInsert => .{ c, r, i },
+        .Count, .Sequence, .Rowid, .RowData => .{ c, r, i },
+        // P3 is not used; the sorter of an ORDER BY takes OP_IdxInsert's operands.
+        .SorterInsert => .{ c, r, r },
         .NewRowid, .Insert, .IdxInsert => .{ c, r, r },
         .RowCell => .{ c, c, r },
         // P2 is an address, never a label (the opcode is not OPFLG_JUMP).
-        .SorterCompare => .{ c, i, r },
+        .SorterCompare => .{ c, a, r },
         .SorterData => .{ c, r, c },
         .IdxDelete => .{ c, r, i },
         .DeferredSeek => .{ c, i, c },
@@ -234,6 +252,7 @@ pub inline fn value(comptime op: ?OP, comptime n: usize, comptime kind: Kind, ar
         .reg => if (T != Reg) @compileError(name ++ " is a register, not " ++ @typeName(T)),
         .cursor => if (T != Cursor) @compileError(name ++ " is a cursor, not " ++ @typeName(T)),
         .jump => if (T != Label and T != Addr and T != Jump) @compileError(name ++ " is a jump (Label or Addr), not " ++ @typeName(T)),
+        .addr => if (T != Addr) @compileError(name ++ " is an address, not " ++ @typeName(T)),
     }
     return @backingInt(arg);
 }

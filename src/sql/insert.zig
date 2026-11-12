@@ -70,7 +70,7 @@ pub fn openTable(p: *Parse, i_cur: i32, i_db: usize, t: *Table, opcode: OP) void
     const cur: Cursor = .from(i_cur);
     build.tableLock(p, i_db, t.tnum, opcode == OP.OpenWrite, t.name);
     if (t.hasRowid()) {
-        aux.changeP4(v, aux.emitAny(v, opcode, open_shape, .{ cur, t.tnum, i_db }).int(), .{ .int32 = t.n_nv_col });
+        _ = aux.emitAnyInt(v, opcode, open_shape, .{ cur, t.tnum, i_db }, t.n_nv_col);
     } else {
         const pk = build.primaryKeyIndex(t).?;
         _ = aux.emitAny(v, opcode, open_shape, .{ cur, pk.tnum, i_db });
@@ -473,7 +473,7 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Selec
         subq.addr_fill_sub = aux.currentAddr(v) + 1;
         p.n_mem += 1;
         subq.reg_return = p.n_mem;
-        _ = aux.emit(v, .InitCoroutine, .{ Reg.from(subq.reg_return), 0, subq.addr_fill_sub });
+        _ = aux.emit(v, .InitCoroutine, .{ Reg.from(subq.reg_return), 0, Addr.from(subq.addr_fill_sub) });
         var dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
         // Two unused registers before the output, so that insert() can
         // use them as they are (rowid and the row of a virtual table).
@@ -614,7 +614,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             p.n_mem += 1;
             const yield_reg: Reg = .from(p.n_mem);
             const addr_top = aux.here(v).plus(1);
-            _ = aux.emit(v, .InitCoroutine, .{ yield_reg, 0, addr_top.int() });
+            _ = aux.emit(v, .InitCoroutine, .{ yield_reg, 0, addr_top });
             dest = select_mod.selectDestInit(SRT.Coroutine, yield_reg.int());
             dest.i_sdst = if (b_id_list_in_order) data_reg.int() else 0;
             dest.n_sdst = @intCast(t.cols.len);
@@ -1663,7 +1663,7 @@ fn generateConstraintChecksImpl(
                         const coll = @import("coll.zig").locateCollSeq(p, k.coll[ii]);
                         var x: i32 = k.ai_column[ii];
                         if (ii == k.n_key_col - 1) {
-                            addr_jump = .from(unique_ok.int());
+                            addr_jump = .of(unique_ok);
                             op = OP.Eq;
                         }
                         x = build.tableColumnToStorage(t, @intCast(x));

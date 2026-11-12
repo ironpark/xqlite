@@ -1240,7 +1240,7 @@ fn windowFullScan(cx: *WindowCodeArg) void {
             aux.appendP4(v, .{ .keyinfo = ki });
             // OP_Jump's P1 and P3 are addresses too (not labels).
             const addr = aux.here(v).plus(1);
-            _ = aux.emit(v, .Jump, .{ addr.int(), lbl_next, addr.int() });
+            _ = aux.emit(v, .Jump, .{ addr, lbl_next, addr });
         } else {
             _ = aux.emit(v, .Goto, .{ 0, lbl_next });
         }
@@ -1391,7 +1391,7 @@ fn windowIfNewPeer(p: *Parse, order_by: ?*ExprList, reg_new: Reg, reg_old: Reg, 
         if (key_info) |ki| aux.appendP4(v, .{ .keyinfo = ki });
         // OP_Jump's P1 and P3 are addresses too (not labels).
         const addr = aux.here(v).plus(1);
-        _ = aux.emit(v, .Jump, .{ addr.int(), dest, addr.int() });
+        _ = aux.emit(v, .Jump, .{ addr, dest, addr });
         _ = aux.emit(v, .Copy, .{ reg_new, reg_old, n_val - 1 });
     } else {
         _ = aux.emit(v, .Goto, .{ 0, dest });
@@ -1765,7 +1765,7 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
         const addr = aux.emit(v, .Compare, .{ reg_new_part, reg_part, n_part });
         if (key_info) |ki| aux.appendP4(v, .{ .keyinfo = ki });
         // OP_Jump's P1 and P3 are addresses too (not labels).
-        _ = aux.emit(v, .Jump, .{ addr.plus(2).int(), addr.plus(4), addr.plus(2).int() });
+        _ = aux.emit(v, .Jump, .{ addr.plus(2), addr.plus(4), addr.plus(2) });
         addr_gosub_flush = aux.emit(v, .Gosub, .{reg_flush_part});
         _ = aux.emit(v, .Copy, .{ reg_new_part, reg_part, n_part - 1 });
     }

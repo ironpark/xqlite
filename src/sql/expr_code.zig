@@ -101,11 +101,6 @@ fn dup(p: *Parse, e: ?*const Expr) ?*Expr {
     };
 }
 
-/// A label or an address as the jump target of code that takes either.
-fn asJump(target: anytype) Jump {
-    return .from(target.int());
-}
-
 /// Port of codeCompare(): code comparison `opcode` of registers `in1`
 /// and `in2`, jumping to `dest` (a Label, an Addr or a Jump) if true. As
 /// in C, `opcode` is the TK_ code of the comparison, which numbers its
@@ -770,7 +765,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
     const dest_step2 = if (dest_if_null == dest_if_false) dest_if_false else blk: {
         const step6 = aux.newLabel(p);
         dest_step6 = step6;
-        break :blk asJump(step6);
+        break :blk Jump.of(step6);
     };
     for (0..n_vector) |i| {
         const x = expr_mod.vectorFieldSubexpr(left, i);
@@ -817,7 +812,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
         aux.emit(v, .Rewind, .{ tab_cur, dest_if_false });
     // With a vector, a row that differs is passed over.
     const next_row: ?Label = if (n_vector > 1) aux.newLabel(p) else null;
-    const dest_not_null = if (next_row) |l| asJump(l) else dest_if_false;
+    const dest_not_null = if (next_row) |l| Jump.of(l) else dest_if_false;
     for (0..n_vector) |i| {
         const r3: Reg = .from(getTempReg(p));
         const x = expr_mod.vectorFieldSubexpr(left, i);
@@ -1443,7 +1438,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                 const dest_if_false = aux.newLabel(p);
                 const dest_if_null = aux.newLabel(p);
                 _ = aux.emit(v, .Null, .{ 0, out });
-                codeIN(p, e, asJump(dest_if_false), asJump(dest_if_null));
+                codeIN(p, e, Jump.of(dest_if_false), Jump.of(dest_if_null));
                 _ = aux.emit(v, .Integer, .{ 1, out });
                 aux.place(v, dest_if_false);
                 _ = aux.emit(v, .AddImm, .{ out, 0 });
@@ -1519,7 +1514,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                     r1 = .from(codeTemp(p, e.left, &reg_free1));
                     // P3 of OP_Halt is a number to operand.kinds(), and
                     // here the register of the message.
-                    _ = aux.addOp3(v, OP.Halt, if (p.trigger_tab != null) RC.CONSTRAINT_TRIGGER else RC.ERROR, e.aff_expr, r1.int());
+                    _ = aux.emit(v, .Halt, .{ @as(i32, if (p.trigger_tab != null) RC.CONSTRAINT_TRIGGER else RC.ERROR), e.aff_expr, r1 });
                 }
                 return in_reg.int();
             },
@@ -1882,8 +1877,8 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, dest: i32, jump_if_null_arg: u16) vo
         TK.BETWEEN => return codeBetween(p, e, dest, exprIfTrue, jump_if_null),
         TK.IN => {
             const dest_if_false = aux.newLabel(p);
-            const dest_if_null = if (jump_if_null != 0) to else asJump(dest_if_false);
-            codeIN(p, e, asJump(dest_if_false), dest_if_null);
+            const dest_if_null = if (jump_if_null != 0) to else Jump.of(dest_if_false);
+            codeIN(p, e, Jump.of(dest_if_false), dest_if_null);
             _ = aux.emit(v, .Goto, .{ 0, to });
             aux.place(v, dest_if_false);
             return;
@@ -1979,7 +1974,7 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, dest: i32, jump_if_null_arg: u16) v
                 codeIN(p, e, to, to);
             } else {
                 const dest_if_null = aux.newLabel(p);
-                codeIN(p, e, to, asJump(dest_if_null));
+                codeIN(p, e, to, Jump.of(dest_if_null));
                 aux.place(v, dest_if_null);
             }
             return;

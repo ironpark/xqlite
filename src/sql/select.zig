@@ -535,7 +535,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
         }
         const addr_jmp = aux.here(v);
         // P1 and P3 of OP_Jump are addresses too.
-        _ = aux.emit(v, .Jump, .{ addr_jmp.plus(1).int(), 0, addr_jmp.plus(1).int() });
+        _ = aux.emit(v, .Jump, .{ addr_jmp.plus(1), 0, addr_jmp.plus(1) });
         const bk_out = aux.newLabel(p);
         sort.label_bk_out = bk_out;
         p.n_mem += 1;
@@ -557,10 +557,9 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
         _ = aux.emit(v, .Delete, .{csr});
     }
     if (record.isNone()) record = makeSorterRecord(p, sort, s, base, n_base);
-    // Not aux.emitAny(): P3 is a register of OP_IdxInsert and a number
-    // (not used) of OP_SorterInsert, which gets the same one.
+    // OP_SorterInsert does not use P3; it gets what OP_IdxInsert needs.
     const op: OP = if (sort.sort_flags & SORTFLAG_UseSorter != 0) OP.SorterInsert else OP.IdxInsert;
-    _ = aux.addOp4Int(v, op, sort.cursor.int(), record.int(), base.at(n_ob_sat).int(), n_base - n_ob_sat);
+    _ = aux.emitAnyInt(v, op, .{ .cursor, .reg, .reg }, .{ sort.cursor, record, base.at(n_ob_sat) }, n_base - n_ob_sat);
     if (skip) |a| {
         aux.changeP2(v, a.int(), if (sort.label_ob_lopt) |l| l.int() else aux.currentAddr(v));
     }
@@ -905,7 +904,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         b_seq = 0;
     } else {
         addr = aux.emit(v, .Sort, .{ tab, done }).plus(1);
-        codeOffset(v, .from(s.i_offset), .from(next.int()));
+        codeOffset(v, .from(s.i_offset), .of(next));
         sort_tab = tab;
         b_seq = 1;
         if (s.i_offset > 0) _ = aux.emit(v, .AddImm, .{ Reg.from(s.i_limit), -1 });
@@ -1467,8 +1466,8 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     _ = aux.emit(v, .Delete, .{queue});
 
     const cont = aux.newLabel(p);
-    codeOffset(v, offset_reg, .from(cont.int()));
-    selectInnerLoop(p, s, current, null, null, dest, .from(cont.int()), .from(done.int()));
+    codeOffset(v, offset_reg, .of(cont));
+    selectInnerLoop(p, s, current, null, null, dest, .of(cont), .of(done));
     if (!limit_reg.isNone()) _ = aux.emit(v, .DecrJumpZero, .{ limit_reg, done });
     aux.place(v, cont);
 
@@ -1627,14 +1626,14 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
         const addr1 = aux.emit(v, .IfNot, .{reg_prev});
         const addr2 = aux.emit4(v, .Compare, .{ row, reg_prev.at(1), in.n_sdst }, if (key_info) |k| .{ .keyinfo = k } else .notused);
         // P1 and P3 of OP_Jump are addresses too.
-        _ = aux.emit(v, .Jump, .{ addr2.plus(2).int(), cont, addr2.plus(2).int() });
+        _ = aux.emit(v, .Jump, .{ addr2.plus(2), cont, addr2.plus(2) });
         aux.landHere(v, addr1);
         _ = aux.emit(v, .Copy, .{ row, reg_prev.at(1), in.n_sdst - 1 });
         _ = aux.emit(v, .Integer, .{ 1, reg_prev });
     }
     if (p.db.malloc_failed) return .from(0);
 
-    codeOffset(v, .from(s.i_offset), .from(cont.int()));
+    codeOffset(v, .from(s.i_offset), .of(cont));
 
     switch (dest.e_dest) {
         SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
@@ -1813,7 +1812,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
 
     // Co-routine A: the query on the left.
     const addr_select_a = aux.here(v).plus(1);
-    var addr1 = aux.emit(v, .InitCoroutine, .{ reg_addr_a, 0, addr_select_a.int() });
+    var addr1 = aux.emit(v, .InitCoroutine, .{ reg_addr_a, 0, addr_select_a });
     prior.i_limit = reg_limit_a.int();
     _ = aux.explain(p, true, "LEFT", .{});
     select(p, prior, &dest_a) catch {};
@@ -1822,7 +1821,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
 
     // Co-routine B: the query on the right.
     const addr_select_b = aux.here(v).plus(1);
-    addr1 = aux.emit(v, .InitCoroutine, .{ reg_addr_b, 0, addr_select_b.int() });
+    addr1 = aux.emit(v, .InitCoroutine, .{ reg_addr_b, 0, addr_select_b });
     const saved_limit = s.i_limit;
     const saved_offset = s.i_offset;
     s.i_limit = reg_limit_b.int();
@@ -1844,8 +1843,8 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     var addr_eof_a: Jump = undefined;
     var addr_eof_a_no_b: Jump = undefined;
     if (op == TK.EXCEPT or op == TK.INTERSECT) {
-        addr_eof_a = .from(label_end.int());
-        addr_eof_a_no_b = .from(label_end.int());
+        addr_eof_a = .of(label_end);
+        addr_eof_a_no_b = .of(label_end);
     } else {
         addr_eof_a = .from(aux.emit(v, .Gosub, .{ reg_out_b, addr_out_b }).int());
         addr_eof_a_no_b = .from(aux.emit(v, .Yield, .{ reg_addr_b, label_end }).int());
@@ -1903,7 +1902,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     _ = aux.emit4(v, .Compare, .{ Reg.from(dest_a.i_sdst), Reg.from(dest_b.i_sdst), n_order_by }, if (key_merge) |k| .{ .keyinfo = k } else .notused);
     if (permute != null) aux.changeP5(v, OPFLAG.PERMUTE);
     // P1 and P3 of OP_Jump are addresses too.
-    _ = aux.emit(v, .Jump, .{ addr_alt_b.int(), addr_aeq_b, addr_agt_b.int() });
+    _ = aux.emit(v, .Jump, .{ addr_alt_b, addr_aeq_b, addr_agt_b });
 
     aux.place(v, label_end);
 
@@ -3959,7 +3958,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             p.n_mem += 1;
             const reg_return: Reg = .from(p.n_mem);
             subq.reg_return = reg_return.int();
-            const addr_init = aux.emit(v, .InitCoroutine, .{ reg_return, 0, addr_top.int() });
+            const addr_init = aux.emit(v, .InitCoroutine, .{ reg_return, 0, addr_top });
             subq.addr_fill_sub = addr_top.int();
             var d = selectDestInit(SRT.Coroutine, subq.reg_return);
             _ = aux.explain(p, true, "CO-ROUTINE {f}", .{util.srcItemNameNoAlias(item)});
@@ -4119,7 +4118,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             aux.place(v, addr_gosub);
             // The inner-loop subroutine.
             sort.label_ob_lopt = null;
-            selectInnerLoop(p, s, null, &sort, &distinct, dest, .from(cont.int()), .from(brk.int()));
+            selectInnerLoop(p, s, null, &sort, &distinct, dest, .of(cont), .of(brk));
             aux.place(v, cont);
             _ = aux.emit(v, .Return, .{reg_gosub});
             aux.place(v, brk);
@@ -4307,7 +4306,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             _ = aux.emit4(v, .Compare, .{ a_mem, b_mem, n_gb }, if (key_info) |k| .{ .keyinfo = k } else .notused);
             const addr1 = aux.here(v);
             // P1 and P3 of OP_Jump are addresses too.
-            _ = aux.emit(v, .Jump, .{ addr1.plus(1).int(), 0, addr1.plus(1).int() });
+            _ = aux.emit(v, .Jump, .{ addr1.plus(1), 0, addr1.plus(1) });
 
             // A new group: output the previous one and reset.
             _ = aux.emit(v, .Gosub, .{ reg_output_row, output_row });
@@ -4343,7 +4342,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             _ = aux.emit(v, .Return, .{reg_output_row});
             finalizeAggFunctions(p, agg);
             ec.exprIfFalse(p, having, addr_output_row.plus(1).int(), vi.SQLITE_JUMPIFNULL);
-            selectInnerLoop(p, s, null, &sort, &distinct, dest, .from(addr_output_row.plus(1).int()), .from(addr_set_abort.int()));
+            selectInnerLoop(p, s, null, &sort, &distinct, dest, .of(addr_output_row.plus(1)), .of(addr_set_abort));
             _ = aux.emit(v, .Return, .{reg_output_row});
 
             // The subroutine resetting the accumulators.
@@ -4429,7 +4428,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
 
             sort.order_by = null;
             ec.exprIfFalse(p, having, addr_end.int(), vi.SQLITE_JUMPIFNULL);
-            selectInnerLoop(p, s, null, null, null, dest, .from(addr_end.int()), .from(addr_end.int()));
+            selectInnerLoop(p, s, null, null, null, dest, .of(addr_end), .of(addr_end));
         }
         aux.place(v, addr_end);
     }

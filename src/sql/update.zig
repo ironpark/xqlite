@@ -335,7 +335,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         eph_cur = .from(p.n_tab);
         p.n_tab += 1;
         // P3 is the register OP_Insert takes its (empty) record from.
-        addr_open = aux.emit(v, .OpenEphemeral, .{ eph_cur, 0, row_set.int() });
+        addr_open = aux.emit(v, .OpenEphemeral, .{ eph_cur, 0, row_set });
     } else {
         n_pk = if (pk) |k| k.n_key_col else 0;
         pk_reg = .from(p.n_mem + 1);

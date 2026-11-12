@@ -881,7 +881,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         std.debug.assert(tab_item.fg.is_subquery);
         const subq = tab_item.u4.subq.?;
         const reg_yield: Reg = .from(subq.reg_return);
-        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, subq.addr_fill_sub });
+        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, Addr.from(subq.addr_fill_sub) });
         level.p2 = aux.emit(v, .Yield, .{ reg_yield, addr_brk }).int();
         level.op = OP.Goto;
     } else if (loop.ws_flags.VIRTUALTABLE) {

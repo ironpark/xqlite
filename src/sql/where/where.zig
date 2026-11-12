@@ -365,7 +365,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         const subq = src.u4.subq.?;
         const reg_yield: Reg = .from(subq.reg_return);
         addr_counter = aux.emit(v, .Integer, .{ 0, 0 });
-        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, subq.addr_fill_sub });
+        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, Addr.from(subq.addr_fill_sub) });
         addr_top = aux.emit(v, .Yield, .{reg_yield});
     } else {
         std.debug.assert(level.addr_halt != 0);

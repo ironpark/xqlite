@@ -131,6 +131,20 @@ pub fn emitAny(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype)
     return .from(addOp3(v, op, p[0], p[1], p[2]));
 }
 
+/// emitAny() with P4.
+pub fn emitAny4(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype, p4: P4) operand.Addr {
+    const addr = emitAny(v, op, shape, args);
+    changeP4(v, addr.int(), p4);
+    return addr;
+}
+
+/// emitAny() with a number as P4.
+pub fn emitAnyInt(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype, p4: i32) operand.Addr {
+    const addr = emitAny(v, op, shape, args);
+    if (!v.db.malloc_failed) v.ops.items[@intCast(addr.int())].setP4(.{ .int32 = p4 });
+    return addr;
+}
+
 /// The address of the next instruction (sqlite3VdbeCurrentAddr()).
 pub fn here(v: *Vdbe) operand.Addr {
     return .from(currentAddr(v));

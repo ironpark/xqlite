@@ -2015,7 +2015,7 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     aux.changeP5(v, vi.OPFLAG.P2ISREG);
     // P3 of OP_InitCoroutine is the address the co-routine starts at.
     const addr_top = aux.here(v).plus(1);
-    _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, addr_top.int() });
+    _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, addr_top });
     if (p.n_err != 0) return;
     const sel_tab = (try select_mod.resultSetOfSelect(p, sel, Aff.blob)) orelse return;
     std.debug.assert(t.cols.len == 0);
@@ -2717,7 +2717,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
         addr2 = aux.here(v);
         // P2 of OP_SorterCompare is an address (that of the jump over
         // the error), not a label.
-        _ = aux.emitInt(v, .SorterCompare, .{ sorter, j2.int(), record }, idx.n_key_col);
+        _ = aux.emitInt(v, .SorterCompare, .{ sorter, j2, record }, idx.n_key_col);
         uniqueConstraint(p, OE.Abort, idx, 0);
         aux.landHere(v, j2);
     } else {

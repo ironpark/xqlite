@@ -53,18 +53,27 @@ const RC = int.RC;
 const Aff = int.Aff;
 const COLFLAG = int.COLFLAG;
 const SRT = select_mod.SRT;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Label = aux.operand.Label;
+const Addr = aux.operand.Addr;
+const Jump = aux.operand.Jump;
+
+/// The operands of OP_OpenRead and OP_OpenWrite.
+const open_shape: [3]aux.operand.Kind = .{ .cursor, .int, .int };
 
 /// Port of sqlite3OpenTable(): open cursor `i_cur` on table `t` with
 /// OP_OpenRead or OP_OpenWrite (on the PRIMARY KEY of a WITHOUT ROWID
 /// table).
 pub fn openTable(p: *Parse, i_cur: i32, i_db: usize, t: *Table, opcode: OP) void {
     const v = p.vdbe.?;
+    const cur: Cursor = .from(i_cur);
     build.tableLock(p, i_db, t.tnum, opcode == OP.OpenWrite, t.name);
     if (t.hasRowid()) {
-        _ = aux.addOp4Int(v, opcode, i_cur, @intCast(t.tnum), @intCast(i_db), t.n_nv_col);
+        aux.changeP4(v, aux.emitAny(v, opcode, open_shape, .{ cur, t.tnum, i_db }).int(), .{ .int32 = t.n_nv_col });
     } else {
         const pk = build.primaryKeyIndex(t).?;
-        _ = aux.addOp3(v, opcode, i_cur, @intCast(pk.tnum), @intCast(i_db));
+        _ = aux.emitAny(v, opcode, open_shape, .{ cur, pk.tnum, i_db });
         aux.setP4KeyInfo(p, pk);
     }
 }
@@ -123,8 +132,9 @@ fn tableAffinityStr(a: std.mem.Allocator, t: *const Table) Oom![:0]u8 {
 /// OP_MakeRecord just coded). STRICT tables get an OP_TypeCheck instead.
 pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
     const v = p.vdbe.?;
+    const first: Reg = .from(reg);
     if (t.tab_flags.Strict) {
-        if (reg == 0) {
+        if (first.isNone()) {
             // Turn the OP_MakeRecord into OP_TypeCheck and code it again.
             aux.appendP4(v, .{ .table = t });
             const prev = aux.getLastOp(v);
@@ -133,9 +143,9 @@ pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
             prev.p3 = 0;
             const p1 = prev.p1;
             const p2 = prev.p2;
-            _ = aux.addOp3(v, OP.MakeRecord, p1, p2, p3);
+            _ = aux.emit(v, .MakeRecord, .{ Reg.from(p1), p2, Reg.from(p3) });
         } else {
-            _ = aux.addOp2(v, OP.TypeCheck, reg, t.n_nv_col);
+            _ = aux.emit(v, .TypeCheck, .{ first, t.n_nv_col });
             aux.appendP4(v, .{ .table = t });
         }
         return;
@@ -147,8 +157,8 @@ pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
         break :blk s;
     };
     if (aff.len == 0) return;
-    if (reg != 0) {
-        _ = aux.addOp4Str(v, OP.Affinity, reg, @intCast(aff.len), 0, aff);
+    if (!first.isNone()) {
+        _ = aux.emitStr(v, .Affinity, .{ first, aff.len }, aff);
     } else {
         aux.changeP4Str(v, -1, aff);
     }
@@ -240,26 +250,26 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
 }
 
 /// Port of autoIncBegin(): the register holding the largest rowid of the
-/// AUTOINCREMENT table `t`, or 0 if `t` has no AUTOINCREMENT.
-fn autoIncBegin(p: *Parse, i_db: usize, t: *Table) i32 {
+/// AUTOINCREMENT table `t`, or none if `t` has no AUTOINCREMENT.
+fn autoIncBegin(p: *Parse, i_db: usize, t: *Table) Reg {
     const db = p.db;
-    if (!t.tab_flags.Autoincrement or db.m_db_flags.Vacuum) return 0;
+    if (!t.tab_flags.Autoincrement or db.m_db_flags.Vacuum) return .none;
     const top = build.toplevel(p);
     const seq = db.dbs.items[i_db].schema.seq_tab;
     // sqlite_sequence must be an ordinary rowid table of two columns.
     if (seq == null or !seq.?.hasRowid() or seq.?.e_tab_type == .vtab or seq.?.cols.len != 2) {
         p.n_err += 1;
         p.rc = RC.CORRUPT_SEQUENCE;
-        return 0;
+        return .none;
     }
     if (!top.uses_ainc) top.ainc = null;
     var info = top.ainc;
     while (info) |a| : (info = a.next) {
-        if (a.tab == t) return a.reg_ctr;
+        if (a.tab == t) return .from(a.reg_ctr);
     }
     const a = top.arena.create(int.AutoincInfo) catch {
         build.oomFault(p);
-        return 0;
+        return .none;
     };
     // Registers: the table name, the largest rowid, its rowid in
     // sqlite_sequence, and the original largest rowid.
@@ -268,7 +278,7 @@ fn autoIncBegin(p: *Parse, i_db: usize, t: *Table) i32 {
     top.n_mem += 3;
     top.ainc = a;
     top.uses_ainc = true;
-    return a.reg_ctr;
+    return .from(a.reg_ctr);
 }
 
 /// Port of sqlite3AutoincrementBegin(): load the AUTOINCREMENT counters
@@ -312,8 +322,8 @@ pub fn autoincrementBegin(p: *Parse) void {
 }
 
 /// Port of autoIncStep(): keep the largest rowid in `mem_id`.
-fn autoIncStep(p: *Parse, mem_id: i32, reg_rowid: i32) void {
-    if (mem_id > 0) _ = aux.addOp2(p.vdbe.?, OP.MemMax, mem_id, reg_rowid);
+fn autoIncStep(p: *Parse, mem_id: Reg, rowid: Reg) void {
+    if (!mem_id.isNone()) _ = aux.emit(p.vdbe.?, .MemMax, .{ mem_id, rowid });
 }
 
 /// Port of sqlite3AutoincrementEnd(): write the AUTOINCREMENT counters
@@ -326,7 +336,7 @@ pub fn autoincrementEnd(p: *Parse) void {
     while (info) |a| : (info = a.next) {
         const mem_id = a.reg_ctr;
         const i_rec = expr_mod.getTempReg(p);
-        _ = aux.addOp3(v, OP.Le, mem_id + 2, aux.currentAddr(v) + 7, mem_id);
+        _ = aux.emit(v, .Le, .{ Reg.from(mem_id + 2), aux.here(v).plus(7), Reg.from(mem_id) });
         openTable(p, 0, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenWrite);
         const ops = aux.addOpList(v, &.{
             .{ .opcode = OP.NotNull, .p2 = 2 },
@@ -373,20 +383,21 @@ fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void 
 /// xqlite: the value in register `reg`, stored into a column, through
 /// `st` (typing.Store.pick()).
 pub fn codeStore(p: *Parse, st: typing.Conv, reg: i32) void {
-    const tmp = expr_mod.getTempReg(p);
+    const val: Reg = .from(reg);
+    const tmp: Reg = .from(expr_mod.getTempReg(p));
     if (st.n_consts == 0) {
-        _ = aux.addFunctionCall(p, 0, reg, tmp, 1, st.def, 0);
+        _ = aux.addFunctionCall(p, 0, reg, tmp.int(), 1, st.def, 0);
     } else {
         // The value and the constants after it.
         const n: i32 = 1 + @as(i32, st.n_consts);
-        const base = expr_mod.getTempRange(p, n);
-        _ = aux.addOp2(p.vdbe.?, OP.Copy, reg, base);
-        for (st.consts[0..st.n_consts], 0..) |c, i| _ = aux.addOp2(p.vdbe.?, OP.Integer, c, base + 1 + @as(i32, @intCast(i)));
-        _ = aux.addFunctionCall(p, 0, base, tmp, n, st.def, 0);
-        expr_mod.releaseTempRange(p, base, n);
+        const base: Reg = .from(expr_mod.getTempRange(p, n));
+        _ = aux.emit(p.vdbe.?, .Copy, .{ val, base });
+        for (st.consts[0..st.n_consts], 0..) |c, i| _ = aux.emit(p.vdbe.?, .Integer, .{ c, base.at(1 + i) });
+        _ = aux.addFunctionCall(p, 0, base.int(), tmp.int(), n, st.def, 0);
+        expr_mod.releaseTempRange(p, base.int(), n);
     }
-    _ = aux.addOp3(p.vdbe.?, OP.Move, tmp, reg, 1);
-    expr_mod.releaseTempReg(p, tmp);
+    _ = aux.emit(p.vdbe.?, .Move, .{ tmp, val, 1 });
+    expr_mod.releaseTempReg(p, tmp.int());
 }
 
 /// Port of sqlite3MultiValuesEnd(): if `val` is a VALUES clause coded
@@ -462,7 +473,7 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Selec
         subq.addr_fill_sub = aux.currentAddr(v) + 1;
         p.n_mem += 1;
         subq.reg_return = p.n_mem;
-        _ = aux.addOp3(v, OP.InitCoroutine, subq.reg_return, 0, subq.addr_fill_sub);
+        _ = aux.emit(v, .InitCoroutine, .{ Reg.from(subq.reg_return), 0, subq.addr_fill_sub });
         var dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
         // Two unused registers before the output, so that insert() can
         // use them as they are (rowid and the row of a virtual table).
@@ -485,7 +496,7 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Selec
             select_mod.selectWrongNumTermsError(p, subq.select);
         } else {
             _ = ec.codeExprList(p, row, subq.reg_result, 0, 0);
-            _ = aux.addOp1(p.vdbe.?, OP.Yield, subq.reg_return);
+            _ = aux.emit(p.vdbe.?, .Yield, .{Reg.from(subq.reg_return)});
         }
     }
     return left;
@@ -532,18 +543,18 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         return;
     }
 
-    const reg_autoinc = autoIncBegin(p, i_db, t);
+    const autoinc = autoIncBegin(p, i_db, t);
 
     // The rowid and the columns of the new row.
-    var reg_rowid = p.n_mem + 1;
-    var reg_ins = reg_rowid;
+    var rowid: Reg = .from(p.n_mem + 1);
+    var ins_reg = rowid;
     p.n_mem += @as(i32, @intCast(t.cols.len)) + 1;
     if (t.isVirtual()) {
         // xUpdate takes the rowid to delete first.
-        reg_rowid += 1;
+        rowid = rowid.at(1);
         p.n_mem += 1;
     }
-    var reg_data = reg_rowid + 1;
+    var data_reg = rowid.at(1);
 
     // Map the IDLIST to the columns. b_id_list_in_order: the IDLIST
     // names the columns in storage order (a false negative is harmless,
@@ -580,8 +591,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     // The source of the rows: a co-routine running the SELECT, or the
     // single row of a VALUES clause.
     var n_column: i32 = 0;
-    var src_tab: i32 = 0;
-    var reg_from_select: i32 = 0;
+    var src_tab: ?Cursor = null;
+    var select_reg: Reg = .none;
     var use_temp_table = false;
     var dest: select_mod.SelectDest = undefined;
     if (sel) |s| {
@@ -591,35 +602,35 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             const item = s.src.?.at(0);
             const subq = item.u4.subq.?;
             dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
-            reg_from_select = subq.reg_result;
+            select_reg = .from(subq.reg_result);
             n_column = @intCast(subq.select.e_list.?.len());
             _ = aux.explain(p, false, "SCAN {f}", .{util.srcItemName(item)});
             if (b_id_list_in_order and n_column == t.cols.len) {
-                reg_data = reg_from_select;
-                reg_rowid = reg_data - 1;
-                reg_ins = reg_rowid - @intFromBool(t.isVirtual());
+                data_reg = select_reg;
+                rowid = data_reg.at(-1);
+                ins_reg = rowid.at(-@as(i32, @intFromBool(t.isVirtual())));
             }
         } else {
             p.n_mem += 1;
-            const reg_yield = p.n_mem;
-            const addr_top = aux.currentAddr(v) + 1;
-            _ = aux.addOp3(v, OP.InitCoroutine, reg_yield, 0, addr_top);
-            dest = select_mod.selectDestInit(SRT.Coroutine, reg_yield);
-            dest.i_sdst = if (b_id_list_in_order) reg_data else 0;
+            const yield_reg: Reg = .from(p.n_mem);
+            const addr_top = aux.here(v).plus(1);
+            _ = aux.emit(v, .InitCoroutine, .{ yield_reg, 0, addr_top.int() });
+            dest = select_mod.selectDestInit(SRT.Coroutine, yield_reg.int());
+            dest.i_sdst = if (b_id_list_in_order) data_reg.int() else 0;
             dest.n_sdst = @intCast(t.cols.len);
             const saved_values = p.xq_insert_values;
             if (s.sel_flags.Values) p.xq_insert_values = s;
             const rc = select_mod.select(p, s, &dest);
             p.xq_insert_values = saved_values;
-            reg_from_select = dest.i_sdst;
+            select_reg = .from(dest.i_sdst);
             rc catch return;
             if (p.n_err != 0) return;
             if (typing.active(db)) {
                 var it: ?*Select = s;
                 while (it) |term| : (it = term.prior) typeParams(p, t, column, term.e_list.?) catch return build.oomFault(p);
             }
-            aux.endCoroutine(v, reg_yield);
-            aux.jumpHere(v, addr_top - 1);
+            aux.endCoroutine(v, yield_reg.int());
+            aux.landHere(v, addr_top.plus(-1));
             n_column = @intCast(s.e_list.?.len());
         }
 
@@ -627,23 +638,22 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         // table written (or triggers run).
         if (trig != null or readsTable(p, i_db, t)) use_temp_table = true;
         if (use_temp_table) {
-            src_tab = p.n_tab;
+            src_tab = .from(p.n_tab);
             p.n_tab += 1;
-            const reg_rec = expr_mod.getTempReg(p);
-            const reg_temp_rowid = expr_mod.getTempReg(p);
-            _ = aux.addOp2(v, OP.OpenEphemeral, src_tab, n_column);
-            const addr_l = aux.addOp1(v, OP.Yield, dest.i_sd_parm);
-            _ = aux.addOp3(v, OP.MakeRecord, reg_from_select, n_column, reg_rec);
-            _ = aux.addOp2(v, OP.NewRowid, src_tab, reg_temp_rowid);
-            _ = aux.addOp3(v, OP.Insert, src_tab, reg_rec, reg_temp_rowid);
-            _ = aux.goto_(v, addr_l);
-            aux.jumpHere(v, addr_l);
-            expr_mod.releaseTempReg(p, reg_rec);
-            expr_mod.releaseTempReg(p, reg_temp_rowid);
+            const rec: Reg = .from(expr_mod.getTempReg(p));
+            const temp_rowid: Reg = .from(expr_mod.getTempReg(p));
+            _ = aux.emit(v, .OpenEphemeral, .{ src_tab.?, n_column });
+            const addr_l = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
+            _ = aux.emit(v, .MakeRecord, .{ select_reg, n_column, rec });
+            _ = aux.emit(v, .NewRowid, .{ src_tab.?, temp_rowid });
+            _ = aux.emit(v, .Insert, .{ src_tab.?, rec, temp_rowid });
+            _ = aux.emit(v, .Goto, .{ 0, addr_l });
+            aux.landHere(v, addr_l);
+            expr_mod.releaseTempReg(p, rec.int());
+            expr_mod.releaseTempReg(p, temp_rowid.int());
         }
     } else {
         var nc: NameContext = .{ .parse = p };
-        src_tab = -1;
         if (list) |l| {
             n_column = @intCast(l.len());
             resolve.resolveExprListNames(&nc, l) catch return;
@@ -678,11 +688,11 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         return;
     };
 
-    var reg_row_count: i32 = 0;
+    var row_count: Reg = .none;
     if (db.flags.CountRows and p.nested == 0 and p.trigger_tab == null and !p.returning) {
         p.n_mem += 1;
-        reg_row_count = p.n_mem;
-        _ = aux.addOp2(v, OP.Integer, 0, reg_row_count);
+        row_count = .from(p.n_mem);
+        _ = aux.emit(v, .Integer, .{ 0, row_count });
     }
 
     // Open the table and its indexes; a register range for each index
@@ -706,6 +716,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         p.n_mem += 1;
         reg_idx[n_idx] = p.n_mem;
     }
+    const data_cur: Cursor = .from(i_data_cur);
     if (upsert) |up| {
         if (t.e_tab_type == .vtab) {
             util.errorMsg(p, "UPSERT not implemented for virtual table \"{s}\"", .{t.name});
@@ -720,7 +731,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         var nx: ?*Upsert = up;
         while (nx) |n| : (nx = n.next) {
             n.src = tab_list;
-            n.reg_data = reg_data;
+            n.reg_data = data_reg.int();
             n.i_data_cur = i_data_cur;
             n.i_idx_cur = i_idx_cur;
             if (n.target != null) upsert_mod.analyzeTarget(p, tab_list, n, up) catch |err| switch (err) {
@@ -731,34 +742,34 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     }
 
     // The top of the loop over the rows.
-    var addr_ins_top: i32 = 0;
-    var addr_cont: i32 = 0;
+    var addr_ins_top: Addr = undefined;
+    var addr_cont: Addr = undefined;
     if (use_temp_table) {
-        addr_ins_top = aux.addOp1(v, OP.Rewind, src_tab);
-        addr_cont = aux.currentAddr(v);
+        addr_ins_top = aux.emit(v, .Rewind, .{src_tab.?});
+        addr_cont = aux.here(v);
     } else if (sel != null) {
-        addr_cont = aux.addOp1(v, OP.Yield, dest.i_sd_parm);
+        addr_cont = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
         addr_ins_top = addr_cont;
         // An INTEGER PRIMARY KEY from the SELECT goes to the rowid slot
         // now, before its column slot is set to NULL.
-        if (ipk_column >= 0) _ = aux.addOp2(v, OP.Copy, reg_from_select + ipk_column, reg_rowid);
+        if (ipk_column >= 0) _ = aux.emit(v, .Copy, .{ select_reg.at(ipk_column), rowid });
     }
 
-    // The ordinary columns, in storage order from reg_data. The rowid and
+    // The ordinary columns, in storage order from data_reg. The rowid and
     // the generated columns come after.
     {
         // xqlite: the functions the values of the dialect's types go
         // through (none in SQLite's dialect).
         const stores = if (is_view) null else typing.storeFunctions(p, t) catch return build.oomFault(p);
         var n_hidden: i32 = 0;
-        var i_reg_store = reg_data;
+        var store_reg = data_reg;
         for (t.cols, 0..) |*c, ii| {
-            defer i_reg_store += 1;
+            defer store_reg = store_reg.at(1);
             const i: i32 = @intCast(ii);
             if (i == t.i_pkey) {
                 // The INTEGER PRIMARY KEY is stored as NULL (it is the
                 // rowid).
-                _ = aux.addOp1(v, OP.SoftNull, i_reg_store);
+                _ = aux.emit(v, .SoftNull, .{store_reg});
                 continue;
             }
             var k: i32 = undefined;
@@ -767,13 +778,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 n_hidden += 1;
                 if (col_flags.VIRTUAL) {
                     // Not part of the record.
-                    i_reg_store -= 1;
+                    store_reg = store_reg.at(-1);
                     continue;
                 } else if (col_flags.STORED) {
-                    if (tmask & int.TRIGGER_BEFORE != 0) _ = aux.addOp1(v, OP.SoftNull, i_reg_store);
+                    if (tmask & int.TRIGGER_BEFORE != 0) _ = aux.emit(v, .SoftNull, .{store_reg});
                     continue;
                 } else if (column == null) {
-                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), i_reg_store);
+                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg.int());
                     continue;
                 }
             }
@@ -781,69 +792,69 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 const j = tab_col_map[ii];
                 if (j == 0) {
                     // Not in the IDLIST: the DEFAULT.
-                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), i_reg_store);
+                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg.int());
                     continue;
                 }
                 k = j - 1;
             } else if (n_column == 0) {
                 // DEFAULT VALUES.
-                ec.codeFactorable(p, build.columnExprAuth(t, c, p), i_reg_store);
+                ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg.int());
                 continue;
             } else {
                 k = i - n_hidden;
             }
 
             if (use_temp_table) {
-                _ = aux.addOp3(v, OP.Column, src_tab, k, i_reg_store);
+                _ = aux.emit(v, .Column, .{ src_tab.?, k, store_reg });
             } else if (sel != null) {
-                if (reg_from_select != reg_data) _ = aux.addOp2(v, OP.SCopy, reg_from_select + k, i_reg_store);
+                if (select_reg != data_reg) _ = aux.emit(v, .SCopy, .{ select_reg.at(k), store_reg });
             } else {
                 const x = list.?.at(@intCast(k)).expr.?;
-                const y = ec.codeTarget(p, x, i_reg_store);
-                if (y != i_reg_store) _ = aux.addOp2(v, if (x.flags.Subquery) OP.Copy else OP.SCopy, y, i_reg_store);
+                const y: Reg = .from(ec.codeTarget(p, x, store_reg.int()));
+                if (y != store_reg) _ = aux.emitAny(v, if (x.flags.Subquery) .Copy else .SCopy, .{ .reg, .reg, .int }, .{ y, store_reg });
                 if (stores) |f| if (f[ii]) |st| if (st.pick(db, x)) |s| {
                     if (typing.readStoredLiteral(p, s, x) catch return build.oomFault(p)) return;
-                    codeStore(p, s, i_reg_store);
+                    codeStore(p, s, store_reg.int());
                 };
                 continue;
             }
             // A row of the SELECT (here only from one: a VALUES of one row
             // took the branch above).
-            if (stores) |f| if (f[ii]) |st| if (try st.pickColumn(p, sel.?, @intCast(k))) |s| codeStore(p, s, i_reg_store);
+            if (stores) |f| if (f[ii]) |st| if (try st.pickColumn(p, sel.?, @intCast(k))) |s| codeStore(p, s, store_reg.int());
         }
     }
 
-    const end_of_loop = aux.makeLabel(p);
+    const end_of_loop = aux.newLabel(p);
 
     // BEFORE (and INSTEAD OF) triggers, given the NEW.* row.
     if (tmask & int.TRIGGER_BEFORE != 0) {
         const n_col: i32 = @intCast(t.cols.len);
-        const reg_cols = expr_mod.getTempRange(p, n_col + 1);
+        const cols_reg: Reg = .from(expr_mod.getTempRange(p, n_col + 1));
         // The rowid of a NULL INTEGER PRIMARY KEY is not known before the
         // insert: it is -1 here.
         if (ipk_column < 0) {
-            _ = aux.addOp2(v, OP.Integer, -1, reg_cols);
+            _ = aux.emit(v, .Integer, .{ -1, cols_reg });
         } else {
             std.debug.assert(!without_rowid);
             if (use_temp_table) {
-                _ = aux.addOp3(v, OP.Column, src_tab, ipk_column, reg_cols);
+                _ = aux.emit(v, .Column, .{ src_tab.?, ipk_column, cols_reg });
             } else {
                 std.debug.assert(sel == null);
-                ec.exprCode(p, list.?.at(@intCast(ipk_column)).expr, reg_cols);
+                ec.exprCode(p, list.?.at(@intCast(ipk_column)).expr, cols_reg.int());
             }
-            const addr1 = aux.addOp1(v, OP.NotNull, reg_cols);
-            _ = aux.addOp2(v, OP.Integer, -1, reg_cols);
-            aux.jumpHere(v, addr1);
-            _ = aux.addOp1(v, OP.MustBeInt, reg_cols);
+            const addr1 = aux.emit(v, .NotNull, .{cols_reg});
+            _ = aux.emit(v, .Integer, .{ -1, cols_reg });
+            aux.landHere(v, addr1);
+            _ = aux.emit(v, .MustBeInt, .{cols_reg});
             main_mod.mayAbort(p);
         }
-        _ = aux.addOp3(v, OP.Copy, reg_rowid + 1, reg_cols + 1, t.n_nv_col - 1);
+        _ = aux.emit(v, .Copy, .{ rowid.at(1), cols_reg.at(1), t.n_nv_col - 1 });
         // Generated columns may use the rowid, so they come last.
-        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, reg_cols + 1, t);
+        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, cols_reg.at(1).int(), t);
         // A view takes the values as they are.
-        if (!is_view) tableAffinity(p, t, reg_cols + 1);
-        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_BEFORE, t, reg_cols - n_col - 1, on_error, end_of_loop);
-        expr_mod.releaseTempRange(p, reg_cols, n_col + 1);
+        if (!is_view) tableAffinity(p, t, cols_reg.at(1).int());
+        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_BEFORE, t, cols_reg.int() - n_col - 1, on_error, end_of_loop.int());
+        expr_mod.releaseTempRange(p, cols_reg.int(), n_col + 1);
     }
 
     var append_flag = false;
@@ -852,96 +863,96 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     var ipk_default = false;
     if (!is_view) {
         // The row xUpdate deletes: none.
-        if (t.isVirtual()) _ = aux.addOp2(v, OP.Null, 0, reg_ins);
+        if (t.isVirtual()) _ = aux.emit(v, .Null, .{ 0, ins_reg });
         if (ipk_column >= 0) {
             // The rowid given by the row.
             if (use_temp_table) {
-                _ = aux.addOp3(v, OP.Column, src_tab, ipk_column, reg_rowid);
+                _ = aux.emit(v, .Column, .{ src_tab.?, ipk_column, rowid });
             } else if (sel != null) {
                 // Already copied above.
             } else {
                 const ipk = list.?.at(@intCast(ipk_column)).expr.?;
                 if (ipk.op == TK.NULL and !t.isVirtual()) {
-                    _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
+                    _ = aux.emit(v, .NewRowid, .{ data_cur, rowid, autoinc });
                     append_flag = true;
                 } else {
-                    ec.exprCode(p, ipk, reg_rowid);
+                    ec.exprCode(p, ipk, rowid.int());
                 }
             }
             // A NULL rowid gets a new one.
             if (!append_flag) {
                 if (!t.isVirtual()) {
-                    const addr1 = aux.addOp1(v, OP.NotNull, reg_rowid);
-                    _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
-                    aux.jumpHere(v, addr1);
+                    const addr1 = aux.emit(v, .NotNull, .{rowid});
+                    _ = aux.emit(v, .NewRowid, .{ data_cur, rowid, autoinc });
+                    aux.landHere(v, addr1);
                 } else {
-                    const addr1 = aux.currentAddr(v);
-                    _ = aux.addOp2(v, OP.IsNull, reg_rowid, addr1 + 2);
+                    const addr1 = aux.here(v);
+                    _ = aux.emit(v, .IsNull, .{ rowid, addr1.plus(2) });
                 }
-                _ = aux.addOp1(v, OP.MustBeInt, reg_rowid);
+                _ = aux.emit(v, .MustBeInt, .{rowid});
                 main_mod.mayAbort(p);
             }
         } else if (t.isVirtual() or without_rowid) {
-            _ = aux.addOp2(v, OP.Null, 0, reg_rowid);
+            _ = aux.emit(v, .Null, .{ 0, rowid });
         } else if (ipkDefault(p, t)) |dflt| {
             ipk_default = true;
             // xqlite: a typed dialect's INTEGER PRIMARY KEY left out takes
             // its DEFAULT (PostgreSQL's `id int PRIMARY KEY DEFAULT 99`;
             // SQLite gives a new rowid), a new rowid where it is NULL.
-            ec.exprCode(p, dflt, reg_rowid);
-            const addr1 = aux.addOp1(v, OP.NotNull, reg_rowid);
-            _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
-            aux.jumpHere(v, addr1);
-            _ = aux.addOp1(v, OP.MustBeInt, reg_rowid);
+            ec.exprCode(p, dflt, rowid.int());
+            const addr1 = aux.emit(v, .NotNull, .{rowid});
+            _ = aux.emit(v, .NewRowid, .{ data_cur, rowid, autoinc });
+            aux.landHere(v, addr1);
+            _ = aux.emit(v, .MustBeInt, .{rowid});
             main_mod.mayAbort(p);
         } else {
-            _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
+            _ = aux.emit(v, .NewRowid, .{ data_cur, rowid, autoinc });
             append_flag = true;
         }
-        autoIncStep(p, reg_autoinc, reg_rowid);
+        autoIncStep(p, autoinc, rowid);
 
         // Generated columns may use the rowid, so they come last.
-        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, reg_rowid + 1, t);
+        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, rowid.at(1).int(), t);
 
         if (t.isVirtual()) {
             vtab.makeWritable(p, t);
-            _ = aux.addOp4(v, OP.VUpdate, 1, @as(i32, @intCast(t.cols.len)) + 2, reg_ins, build.vtabP4(db, t));
+            _ = aux.emit4(v, .VUpdate, .{ 1, t.cols.len + 2, ins_reg }, build.vtabP4(db, t));
             aux.changeP5(v, (if (on_error == OE.Default) OE.Abort else on_error).int());
             main_mod.mayAbort(p);
         } else {
             var is_replace = false;
-            generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0 or ipk_default, on_error, end_of_loop, &is_replace, null, upsert);
-            if (db.flags.ForeignKeys) fkey.fkCheck(p, t, 0, reg_ins, null, false);
+            generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, ins_reg.int(), 0, ipk_column >= 0 or ipk_default, on_error, end_of_loop.int(), &is_replace, null, upsert);
+            if (db.flags.ForeignKeys) fkey.fkCheck(p, t, 0, ins_reg.int(), null, false);
             // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
             // trigger programs (a REPLACE delete then resets the seek
             // result).
             const use_seek = !is_replace or !aux.hasSubProgram(v);
-            completeInsertion(p, t, i_data_cur, i_idx_cur, reg_ins, reg_idx, 0, append_flag, use_seek);
+            completeInsertion(p, t, i_data_cur, i_idx_cur, ins_reg.int(), reg_idx, 0, append_flag, use_seek);
         }
     }
 
-    if (reg_row_count != 0) _ = aux.addOp2(v, OP.AddImm, reg_row_count, 1);
+    if (!row_count.isNone()) _ = aux.emit(v, .AddImm, .{ row_count, 1 });
 
     if (trig != null) {
-        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_AFTER, t, reg_data - 2 - @as(i32, @intCast(t.cols.len)), on_error, end_of_loop);
+        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_AFTER, t, data_reg.int() - 2 - @as(i32, @intCast(t.cols.len)), on_error, end_of_loop.int());
     }
 
     // The bottom of the loop.
-    aux.resolveLabel(v, end_of_loop);
+    aux.place(v, end_of_loop);
     if (use_temp_table) {
-        _ = aux.addOp2(v, OP.Next, src_tab, addr_cont);
-        aux.jumpHere(v, addr_ins_top);
-        _ = aux.addOp1(v, OP.Close, src_tab);
+        _ = aux.emit(v, .Next, .{ src_tab.?, addr_cont });
+        aux.landHere(v, addr_ins_top);
+        _ = aux.emit(v, .Close, .{src_tab.?});
     } else if (sel != null) {
-        _ = aux.goto_(v, addr_cont);
-        aux.jumpHere(v, addr_ins_top);
+        _ = aux.emit(v, .Goto, .{ 0, addr_cont });
+        aux.landHere(v, addr_ins_top);
     }
 
     if (p.nested == 0 and p.trigger_tab == null) autoincrementEnd(p);
-    if (reg_row_count != 0) delete_mod.codeChangeCount(v, reg_row_count, "rows inserted");
-    _ = &reg_ins;
-    _ = &reg_data;
-    _ = &reg_rowid;
+    if (!row_count.isNone()) delete_mod.codeChangeCount(v, row_count.int(), "rows inserted");
+    _ = &ins_reg;
+    _ = &data_reg;
+    _ = &rowid;
 }
 
 /// sqlite3_stricmp(), where a null string sorts first.
@@ -1089,18 +1100,18 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
     const i_db_src: usize = @intCast(prepare.schemaToIndex(db, src.schema));
     const v = build.getVdbe(p).?;
     build.codeVerifySchema(p, i_db_src);
-    const i_src = p.n_tab;
+    const src_cur: Cursor = .from(p.n_tab);
     p.n_tab += 1;
-    const i_dest = p.n_tab;
+    const dest_cur: Cursor = .from(p.n_tab);
     p.n_tab += 1;
-    const reg_autoinc = autoIncBegin(p, i_db_dest, dest);
-    const reg_data = expr_mod.getTempReg(p);
-    _ = aux.addOp2(v, OP.Null, 0, reg_data);
-    const reg_rowid = expr_mod.getTempReg(p);
-    openTable(p, i_dest, i_db_dest, dest, OP.OpenWrite);
+    const autoinc = autoIncBegin(p, i_db_dest, dest);
+    const data: Reg = .from(expr_mod.getTempReg(p));
+    _ = aux.emit(v, .Null, .{ 0, data });
+    const rowid: Reg = .from(expr_mod.getTempReg(p));
+    openTable(p, dest_cur.int(), i_db_dest, dest, OP.OpenWrite);
     std.debug.assert(dest.hasRowid() or dest_has_unique_idx);
-    var empty_dest_test: i32 = 0;
-    var empty_src_test: i32 = 0;
+    var empty_dest_test: ?Addr = null;
+    var empty_src_test: ?Addr = null;
     const vacuum = db.m_db_flags.Vacuum;
     if (!vacuum and ((dest.i_pkey < 0 and dest.index != null) or dest_has_unique_idx or
         (on_error != OE.Abort and on_error != OE.Rollback)))
@@ -1109,42 +1120,42 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         // KEY the rowids in its index entries might have to change, (2)
         // uniqueness is not checked, (3) neither is the conflict
         // resolution. VACUUM's destination is always empty.
-        const addr1 = aux.addOp2(v, OP.Rewind, i_dest, 0);
-        empty_dest_test = aux.addOp0(v, OP.Goto);
-        aux.jumpHere(v, addr1);
+        const addr1 = aux.emit(v, .Rewind, .{ dest_cur, 0 });
+        empty_dest_test = aux.emit(v, .Goto, .{});
+        aux.landHere(v, addr1);
     }
     if (src.hasRowid()) {
-        openTable(p, i_src, i_db_src, src, OP.OpenRead);
-        empty_src_test = aux.addOp2(v, OP.Rewind, i_src, 0);
-        var addr1: i32 = undefined;
+        openTable(p, src_cur.int(), i_db_src, src, OP.OpenRead);
+        empty_src_test = aux.emit(v, .Rewind, .{ src_cur, 0 });
+        var addr1: Addr = undefined;
         if (dest.i_pkey >= 0) {
-            addr1 = aux.addOp2(v, OP.Rowid, i_src, reg_rowid);
+            addr1 = aux.emit(v, .Rowid, .{ src_cur, rowid });
             if (!vacuum) {
-                const addr2 = aux.addOp3(v, OP.NotExists, i_dest, 0, reg_rowid);
-                build.rowidConstraint(p, on_error, dest, reg_rowid);
-                aux.jumpHere(v, addr2);
+                const addr2 = aux.emit(v, .NotExists, .{ dest_cur, 0, rowid });
+                build.rowidConstraint(p, on_error, dest, rowid.int());
+                aux.landHere(v, addr2);
             }
-            autoIncStep(p, reg_autoinc, reg_rowid);
+            autoIncStep(p, autoinc, rowid);
         } else if (dest.index == null and !db.m_db_flags.VacuumInto) {
-            addr1 = aux.addOp2(v, OP.NewRowid, i_dest, reg_rowid);
+            addr1 = aux.emit(v, .NewRowid, .{ dest_cur, rowid });
         } else {
-            addr1 = aux.addOp2(v, OP.Rowid, i_src, reg_rowid);
+            addr1 = aux.emit(v, .Rowid, .{ src_cur, rowid });
             std.debug.assert(!dest.tab_flags.Autoincrement);
         }
         var ins_flags: u16 = undefined;
         if (vacuum) {
-            _ = aux.addOp1(v, OP.SeekEnd, i_dest);
+            _ = aux.emit(v, .SeekEnd, .{dest_cur});
             ins_flags = OPFLAG.APPEND | OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT;
         } else {
             ins_flags = OPFLAG.NCHANGE | OPFLAG.LASTROWID | OPFLAG.APPEND | OPFLAG.PREFORMAT;
         }
-        _ = aux.addOp3(v, OP.RowCell, i_dest, i_src, reg_rowid);
-        _ = aux.addOp3(v, OP.Insert, i_dest, reg_data, reg_rowid);
+        _ = aux.emit(v, .RowCell, .{ dest_cur, src_cur, rowid });
+        _ = aux.emit(v, .Insert, .{ dest_cur, data, rowid });
         if (!vacuum) aux.appendP4(v, .{ .table = dest });
         aux.changeP5(v, ins_flags);
-        _ = aux.addOp2(v, OP.Next, i_src, addr1);
-        _ = aux.addOp2(v, OP.Close, i_src, 0);
-        _ = aux.addOp2(v, OP.Close, i_dest, 0);
+        _ = aux.emit(v, .Next, .{ src_cur, addr1 });
+        _ = aux.emit(v, .Close, .{ src_cur, 0 });
+        _ = aux.emit(v, .Close, .{ dest_cur, 0 });
     } else {
         build.tableLock(p, i_db_dest, dest.tnum, true, dest.name);
         build.tableLock(p, i_db_src, src.tnum, false, src.name);
@@ -1156,12 +1167,12 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         const src_idx = while (si) |x| : (si = x.next) {
             if (xferCompatibleIndex(dest_idx, x)) break x;
         } else unreachable;
-        _ = aux.addOp3(v, OP.OpenRead, i_src, @intCast(src_idx.tnum), @intCast(i_db_src));
+        _ = aux.emit(v, .OpenRead, .{ src_cur, src_idx.tnum, i_db_src });
         aux.setP4KeyInfo(p, src_idx);
-        _ = aux.addOp3(v, OP.OpenWrite, i_dest, @intCast(dest_idx.tnum), @intCast(i_db_dest));
+        _ = aux.emit(v, .OpenWrite, .{ dest_cur, dest_idx.tnum, i_db_dest });
         aux.setP4KeyInfo(p, dest_idx);
         aux.changeP5(v, OPFLAG.BULKCSR);
-        const addr1 = aux.addOp2(v, OP.Rewind, i_src, 0);
+        const addr1 = aux.emit(v, .Rewind, .{ src_cur, 0 });
         if (vacuum) {
             // The destination is empty, and if every column collates with
             // BINARY the keys come in sorted order: append each one at
@@ -1172,30 +1183,30 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
             } else true;
             if (all_binary) {
                 idx_ins_flags = OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT;
-                _ = aux.addOp1(v, OP.SeekEnd, i_dest);
-                _ = aux.addOp2(v, OP.RowCell, i_dest, i_src);
+                _ = aux.emit(v, .SeekEnd, .{dest_cur});
+                _ = aux.emit(v, .RowCell, .{ dest_cur, src_cur });
             }
         } else if (!src.hasRowid() and dest_idx.isPrimaryKey()) {
             idx_ins_flags |= OPFLAG.NCHANGE;
         }
         if (idx_ins_flags != OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT) {
-            _ = aux.addOp3(v, OP.RowData, i_src, reg_data, 1);
+            _ = aux.emit(v, .RowData, .{ src_cur, data, 1 });
         }
-        _ = aux.addOp2(v, OP.IdxInsert, i_dest, reg_data);
+        _ = aux.emit(v, .IdxInsert, .{ dest_cur, data });
         aux.changeP5(v, idx_ins_flags | OPFLAG.APPEND);
-        _ = aux.addOp2(v, OP.Next, i_src, addr1 + 1);
-        aux.jumpHere(v, addr1);
-        _ = aux.addOp2(v, OP.Close, i_src, 0);
-        _ = aux.addOp2(v, OP.Close, i_dest, 0);
+        _ = aux.emit(v, .Next, .{ src_cur, addr1.plus(1) });
+        aux.landHere(v, addr1);
+        _ = aux.emit(v, .Close, .{ src_cur, 0 });
+        _ = aux.emit(v, .Close, .{ dest_cur, 0 });
     }
-    if (empty_src_test != 0) aux.jumpHere(v, empty_src_test);
-    expr_mod.releaseTempReg(p, reg_rowid);
-    expr_mod.releaseTempReg(p, reg_data);
-    if (empty_dest_test != 0) {
+    if (empty_src_test) |addr| aux.landHere(v, addr);
+    expr_mod.releaseTempReg(p, rowid.int());
+    expr_mod.releaseTempReg(p, data.int());
+    if (empty_dest_test) |addr| {
         autoincrementEnd(p);
-        _ = aux.addOp2(v, OP.Halt, RC.OK, 0);
-        aux.jumpHere(v, empty_dest_test);
-        _ = aux.addOp2(v, OP.Close, i_dest, 0);
+        _ = aux.emit(v, .Halt, .{ RC.OK, 0 });
+        aux.landHere(v, addr);
+        _ = aux.emit(v, .Close, .{ dest_cur, 0 });
         return false;
     }
     return true;
@@ -1272,7 +1283,12 @@ fn generateConstraintChecksImpl(
     var upsert = upsert_arg;
     const db = p.db;
     const v = p.vdbe.?;
-    const is_update = reg_old_data != 0;
+    const data_cur: Cursor = .from(i_data_cur);
+    const idx_cur: Cursor = .from(i_idx_cur);
+    const new_data: Reg = .from(reg_new_data);
+    const old_data: Reg = .from(reg_old_data);
+    const ignore: Jump = .from(ignore_dest);
+    const is_update = !old_data.isNone();
     var seen_replace = false;
     var b_affinity_done = false;
 
@@ -1310,26 +1326,26 @@ fn generateConstraintChecksImpl(
                 } else if (b2nd_pass and !is_generated) {
                     continue;
                 }
-                const i_reg = build.tableColumnToStorage(t, @intCast(i)) + reg_new_data + 1;
+                const col_reg = new_data.at(1).at(build.tableColumnToStorage(t, @intCast(i)));
                 switch (on_error) {
                     OE.Replace => {
-                        const addr1 = aux.addOp1(v, OP.NotNull, i_reg);
+                        const addr1 = aux.emit(v, .NotNull, .{col_reg});
                         n_seen_replace += 1;
-                        ec.codeCopy(p, build.columnExprAuth(t, c, p), i_reg);
-                        aux.jumpHere(v, addr1);
+                        ec.codeCopy(p, build.columnExprAuth(t, c, p), col_reg.int());
+                        aux.landHere(v, addr1);
                     },
                     OE.Abort, OE.Rollback, OE.Fail => {
                         if (dconstraint.notNull(p, t, c, is_update, reg_new_data)) |z| {
-                            build.haltDialectConstraint(p, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, z, i_reg);
+                            build.haltDialectConstraint(p, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, z, col_reg.int());
                             continue;
                         }
                         if (on_error == OE.Abort) main_mod.mayAbort(p);
                         const msg = try std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, c.name() });
-                        _ = aux.addOp4Str(v, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error.int(), i_reg, msg);
+                        _ = aux.emitStr(v, .HaltIfNull, .{ RC.CONSTRAINT_NOTNULL, on_error.int(), col_reg }, msg);
                         aux.changeP5(v, vi.P5_ConstraintNotNull);
                     },
                     else => {
-                        _ = aux.addOp2(v, OP.IsNull, i_reg, ignore_dest);
+                        _ = aux.emit(v, .IsNull, .{ col_reg, ignore });
                     },
                 }
             }
@@ -1351,11 +1367,11 @@ fn generateConstraintChecksImpl(
                 tableAffinity(p, t, reg_new_data + 1);
                 b_affinity_done = true;
             }
-            const all_ok = aux.makeLabel(p);
+            const all_ok = aux.newLabel(p);
             const copy = try expr_mod.exprDup(p.arena, e);
-            if (!db.malloc_failed) ec.exprIfTrue(p, copy, all_ok, vi.SQLITE_JUMPIFNULL);
+            if (!db.malloc_failed) ec.exprIfTrue(p, copy, all_ok.int(), vi.SQLITE_JUMPIFNULL);
             if (on_error == OE.Ignore) {
-                _ = aux.goto_(v, ignore_dest);
+                _ = aux.emit(v, .Goto, .{ 0, ignore });
             } else {
                 if (on_error == OE.Replace) on_error = OE.Abort;
                 if (dconstraint.check(p, t, item.e_name, is_update, reg_new_data)) |z| {
@@ -1364,7 +1380,7 @@ fn generateConstraintChecksImpl(
                     build.haltConstraint(p, RC.CONSTRAINT_CHECK, on_error, item.e_name, vi.P5_ConstraintCheck);
                 }
             }
-            aux.resolveLabel(v, all_ok);
+            aux.place(v, all_ok);
         }
         p.i_self_tab = 0;
     };
@@ -1432,12 +1448,12 @@ fn generateConstraintChecksImpl(
     //
     // Deletes by REPLACE may run "replace triggers" (DELETE triggers or
     // foreign key actions). If any did, every uniqueness constraint is
-    // checked again afterwards, with ABORT: reg_trig_cnt counts them, and
+    // checked again afterwards, with ABORT: trig_cnt counts them, and
     // the rechecks are chained through lbl_recheck_ok from addr_recheck.
     var trig: ?*Trigger = null;
-    var reg_trig_cnt: i32 = 0;
-    var addr_recheck: i32 = 0;
-    var lbl_recheck_ok: i32 = 0;
+    var trig_cnt: Reg = .none;
+    var addr_recheck: ?Label = null;
+    var lbl_recheck_ok: ?Label = null;
     var n_replace_trig: i32 = 0;
     if (db.flags.intersects(.{ .RecTriggers = true, .ForeignKeys = true })) {
         if (db.flags.RecTriggers) trig = trigger.triggersExist(p, t, TK.DELETE, null, null);
@@ -1456,25 +1472,25 @@ fn generateConstraintChecksImpl(
         }
         if (may_fire) {
             p.n_mem += 1;
-            reg_trig_cnt = p.n_mem;
-            _ = aux.addOp2(v, OP.Integer, 0, reg_trig_cnt);
-            lbl_recheck_ok = aux.makeLabel(p);
+            trig_cnt = .from(p.n_mem);
+            _ = aux.emit(v, .Integer, .{ 0, trig_cnt });
+            lbl_recheck_ok = aux.newLabel(p);
             addr_recheck = lbl_recheck_ok;
         }
     }
 
-    var ipk_top: i32 = 0;
-    var ipk_bottom: i32 = 0;
+    var ipk_top: ?Addr = null;
+    var ipk_bottom: ?Addr = null;
     // The ON CONFLICT clause of the constraint being checked.
     var upsert_clause: ?*Upsert = null;
     // When the first ON CONFLICT clause is not on the rowid, the rowid
     // check jumps (from upsert_ipk_delay) after the checks of the clauses
     // before it, and returns (upsert_ipk_return) to the checks after.
-    var upsert_ipk_delay: i32 = 0;
-    var upsert_ipk_return: i32 = 0;
+    var upsert_ipk_delay: ?Addr = null;
+    var upsert_ipk_return: ?Addr = null;
     if (pk_chng and pk == null) {
         // The new rowid must not exist already.
-        const addr_rowid_ok = aux.makeLabel(p);
+        const rowid_ok = aux.newLabel(p);
         var on_error: OE = t.key_conf;
         if (override_error != OE.Default) {
             on_error = override_error;
@@ -1488,34 +1504,34 @@ fn generateConstraintChecksImpl(
                 // DO NOTHING is INSERT OR IGNORE.
                 on_error = if (uc.is_do_update) OE.Update else OE.Ignore;
             }
-            if (upsert_clause != up) upsert_ipk_delay = aux.addOp0(v, OP.Goto);
+            if (upsert_clause != up) upsert_ipk_delay = aux.emit(v, .Goto, .{});
         }
 
         // A REPLACE of the rowid waits until the other constraints, which
         // may FAIL or IGNORE, have been checked.
         if (on_error == OE.Replace and on_error != override_error and t.index != null) {
-            if (upsert_ipk_delay != 0) {
-                ipk_top = upsert_ipk_delay + 1;
-                upsert_ipk_delay = 0;
+            if (upsert_ipk_delay) |delay| {
+                ipk_top = delay.plus(1);
+                upsert_ipk_delay = null;
             } else {
-                ipk_top = aux.addOp0(v, OP.Goto) + 1;
+                ipk_top = aux.emit(v, .Goto, .{}).plus(1);
             }
         }
 
         // An UPDATE need not check an unchanged rowid.
         if (is_update) {
-            _ = aux.addOp3(v, OP.Eq, reg_new_data, addr_rowid_ok, reg_old_data);
+            _ = aux.emit(v, .Eq, .{ new_data, rowid_ok, old_data });
             aux.changeP5(v, vi.SQLITE_NOTNULL);
         }
 
-        _ = aux.addOp3(v, OP.NotExists, i_data_cur, addr_rowid_ok, reg_new_data);
+        _ = aux.emit(v, .NotExists, .{ data_cur, rowid_ok, new_data });
         switch (on_error) {
             OE.Replace => {
-                if (reg_trig_cnt != 0) {
+                if (!trig_cnt.isNone()) {
                     // Delete the other row, running its triggers.
                     main_mod.multiWrite(p);
                     delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_new_data, 1, false, OE.Replace, where_mod.ONEPASS.SINGLE, -1);
-                    _ = aux.addOp2(v, OP.AddImm, reg_trig_cnt, 1);
+                    _ = aux.emit(v, .AddImm, .{ trig_cnt, 1 });
                     n_replace_trig += 1;
                 } else if (t.index != null) {
                     // The index entries of the other row go; its record is
@@ -1527,18 +1543,18 @@ fn generateConstraintChecksImpl(
             },
             OE.Update => {
                 try upsert_mod.doUpdate(p, upsert.?, t, null, i_data_cur);
-                _ = aux.goto_(v, ignore_dest);
+                _ = aux.emit(v, .Goto, .{ 0, ignore });
             },
-            OE.Ignore => _ = aux.goto_(v, ignore_dest),
+            OE.Ignore => _ = aux.emit(v, .Goto, .{ 0, ignore }),
             OE.Rollback, OE.Fail => build.rowidConstraint(p, on_error, t, reg_new_data),
             else => build.rowidConstraint(p, OE.Abort, t, reg_new_data),
         }
-        aux.resolveLabel(v, addr_rowid_ok);
-        if (ipk_top != 0) {
-            ipk_bottom = aux.addOp0(v, OP.Goto);
-            aux.jumpHere(v, ipk_top - 1);
+        aux.place(v, rowid_ok);
+        if (ipk_top) |top| {
+            ipk_bottom = aux.emit(v, .Goto, .{});
+            aux.landHere(v, top.plus(-1));
         } else if (upsert != null and upsert_clause != upsert) {
-            upsert_ipk_return = aux.addOp0(v, OP.Goto);
+            upsert_ipk_return = aux.emit(v, .Goto, .{});
         }
     }
 
@@ -1548,53 +1564,54 @@ fn generateConstraintChecksImpl(
         const idx = term.idx;
         const ix = term.ix;
         if (reg_idx[ix] == 0) continue;
+        const idx_rec: Reg = .from(reg_idx[ix]);
         if (upsert) |up| {
             upsert_clause = upsert_mod.ofIndex(up, idx);
-            if (upsert_ipk_delay != 0 and upsert_clause == up) aux.jumpHere(v, upsert_ipk_delay);
+            if (upsert_ipk_delay) |delay| if (upsert_clause == up) aux.landHere(v, delay);
         }
-        const addr_unique_ok = aux.makeLabel(p);
+        const unique_ok = aux.newLabel(p);
         if (!b_affinity_done) {
             tableAffinity(p, t, reg_new_data + 1);
             b_affinity_done = true;
         }
-        const i_this_cur = i_idx_cur + @as(i32, @intCast(ix));
+        const this_cur = idx_cur.at(ix);
 
         // A partial index whose WHERE is false gets no entry.
         if (idx.part_idx_where) |w| {
-            _ = aux.addOp2(v, OP.Null, 0, reg_idx[ix]);
+            _ = aux.emit(v, .Null, .{ 0, idx_rec });
             p.i_self_tab = -(reg_new_data + 1);
-            ec.exprIfFalseDup(p, w, addr_unique_ok, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalseDup(p, w, unique_ok.int(), vi.SQLITE_JUMPIFNULL);
             p.i_self_tab = 0;
         }
 
         // The new index entry, to reg_idx[ix].
-        const reg_ix = reg_idx[ix] + 1;
+        const key_reg = idx_rec.at(1);
         for (0..idx.n_column) |ii| {
             const i: i32 = @intCast(ii);
             const i_field = idx.ai_column[ii];
             if (i_field == int.XN_EXPR) {
                 p.i_self_tab = -(reg_new_data + 1);
-                ec.codeCopy(p, idx.col_expr.?.at(ii).expr, reg_ix + i);
+                ec.codeCopy(p, idx.col_expr.?.at(ii).expr, key_reg.at(i).int());
                 p.i_self_tab = 0;
             } else if (i_field == int.XN_ROWID or i_field == t.i_pkey) {
-                _ = aux.addOp2(v, OP.IntCopy, reg_new_data, reg_ix + i);
+                _ = aux.emit(v, .IntCopy, .{ new_data, key_reg.at(i) });
             } else {
-                const x = build.tableColumnToStorage(t, i_field) + reg_new_data + 1;
-                _ = aux.addOp2(v, OP.SCopy, x, reg_ix + i);
+                const x = new_data.at(1).at(build.tableColumnToStorage(t, i_field));
+                _ = aux.emit(v, .SCopy, .{ x, key_reg.at(i) });
             }
         }
-        _ = aux.addOp3(v, OP.MakeRecord, reg_ix, idx.n_column, reg_idx[ix]);
+        _ = aux.emit(v, .MakeRecord, .{ key_reg, idx.n_column, idx_rec });
 
         // The PRIMARY KEY of an UPDATE that does not change it cannot
         // collide.
         if (is_update and pk == idx and !pk_chng) {
-            aux.resolveLabel(v, addr_unique_ok);
+            aux.place(v, unique_ok);
             continue;
         }
 
         var on_error: OE = idx.on_error;
         if (on_error == OE.None) {
-            aux.resolveLabel(v, addr_unique_ok);
+            aux.place(v, unique_ok);
             continue;
         }
         if (override_error != OE.Default) {
@@ -1611,21 +1628,21 @@ fn generateConstraintChecksImpl(
             (!db.flags.RecTriggers or trigger.triggersExist(p, t, TK.DELETE, null, null) == null) and
             (!db.flags.ForeignKeys or (t.u.tab.fkey == null and fkey.fkReferences(t) == null)))
         {
-            aux.resolveLabel(v, addr_unique_ok);
+            aux.place(v, unique_ok);
             continue;
         }
 
         // Is the new entry unique?
-        var addr_conflict_ck = aux.addOp4Int(v, OP.NoConflict, i_this_cur, addr_unique_ok, reg_ix, idx.n_key_col);
+        var addr_conflict_ck = aux.emitInt(v, .NoConflict, .{ this_cur, unique_ok, key_reg }, idx.n_key_col);
 
-        // On a collision, the key of the other row goes to reg_r.
-        const reg_r = if (idx == pk) reg_ix else expr_mod.getTempRange(p, n_pk_field);
+        // On a collision, the key of the other row goes to other_key.
+        const other_key: Reg = if (idx == pk) key_reg else .from(expr_mod.getTempRange(p, n_pk_field));
         if (is_update or on_error == OE.Replace) {
             if (t.hasRowid()) {
-                _ = aux.addOp2(v, OP.IdxRowid, i_this_cur, reg_r);
+                _ = aux.emit(v, .IdxRowid, .{ this_cur, other_key });
                 // No conflict with the row being updated.
                 if (is_update) {
-                    _ = aux.addOp3(v, OP.Eq, reg_r, addr_unique_ok, reg_old_data);
+                    _ = aux.emit(v, .Eq, .{ other_key, unique_ok, old_data });
                     aux.changeP5(v, vi.SQLITE_NOTNULL);
                 }
             } else {
@@ -1633,106 +1650,110 @@ fn generateConstraintChecksImpl(
                 if (idx != k) {
                     for (0..k.n_key_col) |ii| {
                         const x = build.tableColumnToIndex(idx, k.ai_column[ii]);
-                        _ = aux.addOp3(v, OP.Column, i_this_cur, x, reg_r + @as(i32, @intCast(ii)));
+                        _ = aux.emit(v, .Column, .{ this_cur, x, other_key.at(ii) });
                     }
                 }
                 if (is_update) {
                     // A conflict only if the PRIMARY KEY found differs from
                     // the old one.
-                    var addr_jump = aux.currentAddr(v) + k.n_key_col;
+                    var addr_jump: Jump = .from(aux.currentAddr(v) + k.n_key_col);
                     var op: OP = OP.Ne;
-                    const reg_cmp = if (idx.isPrimaryKey()) reg_ix else reg_r;
+                    const cmp_reg = if (idx.isPrimaryKey()) key_reg else other_key;
                     for (0..k.n_key_col) |ii| {
                         const coll = @import("coll.zig").locateCollSeq(p, k.coll[ii]);
                         var x: i32 = k.ai_column[ii];
                         if (ii == k.n_key_col - 1) {
-                            addr_jump = addr_unique_ok;
+                            addr_jump = .from(unique_ok.int());
                             op = OP.Eq;
                         }
                         x = build.tableColumnToStorage(t, @intCast(x));
-                        _ = aux.addOp4(v, op, reg_old_data + 1 + x, addr_jump, reg_cmp + @as(i32, @intCast(ii)), if (coll) |cl| .{ .collseq = cl } else .notused);
+                        const cmp = aux.emitAny(v, op, .{ .reg, .jump, .reg }, .{ old_data.at(1 + x), addr_jump, cmp_reg.at(ii) });
+                        aux.changeP4(v, cmp.int(), if (coll) |cl| .{ .collseq = cl } else .notused);
                         aux.changeP5(v, vi.SQLITE_NOTNULL);
                     }
                 }
             }
         }
 
-        const n_conflict_end = aux.currentAddr(v);
+        const n_conflict_end = aux.here(v);
         switch (on_error) {
-            OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx, reg_ix),
+            OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx, key_reg.int()),
             OE.Update => {
-                try upsert_mod.doUpdate(p, upsert.?, t, idx, i_idx_cur + @as(i32, @intCast(ix)));
-                _ = aux.goto_(v, ignore_dest);
+                try upsert_mod.doUpdate(p, upsert.?, t, idx, this_cur.int());
+                _ = aux.emit(v, .Goto, .{ 0, ignore });
             },
-            OE.Ignore => _ = aux.goto_(v, ignore_dest),
+            OE.Ignore => _ = aux.emit(v, .Goto, .{ 0, ignore }),
             else => {
                 // REPLACE: delete the other row.
-                if (reg_trig_cnt != 0) {
+                if (!trig_cnt.isNone()) {
                     main_mod.multiWrite(p);
                     n_replace_trig += 1;
                 }
-                if (trig != null and is_update) _ = aux.addOp1(v, OP.CursorLock, i_data_cur);
-                delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_r, @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS.SINGLE else where_mod.ONEPASS.OFF, i_this_cur);
-                if (trig != null and is_update) _ = aux.addOp1(v, OP.CursorUnlock, i_data_cur);
+                if (trig != null and is_update) _ = aux.emit(v, .CursorLock, .{data_cur});
+                delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, other_key.int(), @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS.SINGLE else where_mod.ONEPASS.OFF, this_cur.int());
+                if (trig != null and is_update) _ = aux.emit(v, .CursorUnlock, .{data_cur});
                 seen_replace = true;
             },
         }
-        if (reg_trig_cnt != 0) {
-            _ = aux.addOp2(v, OP.AddImm, reg_trig_cnt, 1);
-            const addr_bypass = aux.addOp0(v, OP.Goto);
+        if (!trig_cnt.isNone()) {
+            _ = aux.emit(v, .AddImm, .{ trig_cnt, 1 });
+            const addr_bypass = aux.emit(v, .Goto, .{});
 
             // The recheck, run after all the constraint checks if a
             // replace trigger fired: the conflict check above again,
             // jumping on to the next recheck when it passes.
-            aux.resolveLabel(v, lbl_recheck_ok);
-            lbl_recheck_ok = aux.makeLabel(p);
-            if (idx.part_idx_where != null) _ = aux.addOp2(v, OP.IsNull, reg_ix - 1, lbl_recheck_ok);
-            while (addr_conflict_ck < n_conflict_end) : (addr_conflict_ck += 1) {
-                const x = aux.getOp(v, addr_conflict_ck).*;
+            aux.place(v, lbl_recheck_ok.?);
+            const recheck_ok = aux.newLabel(p);
+            lbl_recheck_ok = recheck_ok;
+            if (idx.part_idx_where != null) _ = aux.emit(v, .IsNull, .{ key_reg.at(-1), recheck_ok });
+            while (addr_conflict_ck.int() < n_conflict_end.int()) : (addr_conflict_ck = addr_conflict_ck.plus(1)) {
+                const x = aux.getOp(v, addr_conflict_ck.int()).*;
                 if (x.opcode != OP.IdxRowid or is_update) {
-                    const p2 = if (x.opcode.opflags() & vi.opcodes.OPFLG.JUMP != 0) lbl_recheck_ok else x.p2;
+                    // A copy of an instruction of any opcode: its operands
+                    // are numbers here.
+                    const p2 = if (x.opcode.opflags() & vi.opcodes.OPFLG.JUMP != 0) recheck_ok.int() else x.p2;
                     _ = aux.addOp4(v, x.opcode, x.p1, p2, x.p3, x.getP4());
                     aux.changeP5(v, x.p5);
                 }
             }
-            build.uniqueConstraint(p, OE.Abort, idx, reg_ix);
-            aux.jumpHere(v, addr_bypass);
+            build.uniqueConstraint(p, OE.Abort, idx, key_reg.int());
+            aux.landHere(v, addr_bypass);
         }
-        aux.resolveLabel(v, addr_unique_ok);
-        if (reg_r != reg_ix) expr_mod.releaseTempRange(p, reg_r, n_pk_field);
-        if (upsert_clause) |uc| if (upsert_ipk_return != 0 and upsert_mod.nextIsIpk(uc)) {
-            _ = aux.goto_(v, upsert_ipk_delay + 1);
-            aux.jumpHere(v, upsert_ipk_return);
-            upsert_ipk_return = 0;
+        aux.place(v, unique_ok);
+        if (other_key != key_reg) expr_mod.releaseTempRange(p, other_key.int(), n_pk_field);
+        if (upsert_clause) |uc| if (upsert_ipk_return) |ret| if (upsert_mod.nextIsIpk(uc)) {
+            _ = aux.emit(v, .Goto, .{ 0, upsert_ipk_delay.?.plus(1) });
+            aux.landHere(v, ret);
+            upsert_ipk_return = null;
         };
     }
 
     // The deferred REPLACE of the rowid.
-    if (ipk_top != 0) {
-        _ = aux.goto_(v, ipk_top);
-        aux.jumpHere(v, ipk_bottom);
+    if (ipk_top) |top| {
+        _ = aux.emit(v, .Goto, .{ 0, top });
+        aux.landHere(v, ipk_bottom.?);
     }
 
     // Recheck the uniqueness constraints after replace triggers ran.
     if (n_replace_trig != 0) {
-        _ = aux.addOp2(v, OP.IfNot, reg_trig_cnt, lbl_recheck_ok);
+        _ = aux.emit(v, .IfNot, .{ trig_cnt, lbl_recheck_ok.? });
         if (pk == null) {
             if (is_update) {
-                _ = aux.addOp3(v, OP.Eq, reg_new_data, addr_recheck, reg_old_data);
+                _ = aux.emit(v, .Eq, .{ new_data, addr_recheck.?, old_data });
                 aux.changeP5(v, vi.SQLITE_NOTNULL);
             }
-            _ = aux.addOp3(v, OP.NotExists, i_data_cur, addr_recheck, reg_new_data);
+            _ = aux.emit(v, .NotExists, .{ data_cur, addr_recheck.?, new_data });
             build.rowidConstraint(p, OE.Abort, t, reg_new_data);
         } else {
-            _ = aux.goto_(v, addr_recheck);
+            _ = aux.emit(v, .Goto, .{ 0, addr_recheck.? });
         }
     }
-    if (reg_trig_cnt != 0) aux.resolveLabel(v, lbl_recheck_ok);
+    if (!trig_cnt.isNone()) aux.place(v, lbl_recheck_ok.?);
 
     // The table record.
     if (t.hasRowid()) {
-        const reg_rec = reg_idx[n_idx];
-        _ = aux.addOp3(v, OP.MakeRecord, reg_new_data + 1, t.n_nv_col, reg_rec);
+        const rec: Reg = .from(reg_idx[n_idx]);
+        _ = aux.emit(v, .MakeRecord, .{ new_data.at(1), t.n_nv_col, rec });
         if (!b_affinity_done) tableAffinity(p, t, 0);
     }
     may_replace.* = seen_replace;
@@ -1746,6 +1767,8 @@ const IndexListTerm = struct { idx: *Index, ix: usize };
 /// INSERT, else OPFLAG_ISUPDATE (and OPFLAG_SAVEPOSITION).
 pub fn completeInsertion(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: i32, reg_new_data: i32, reg_idx: []const i32, update_flags: u16, append_bias: bool, use_seek_result: bool) void {
     const v = p.vdbe.?;
+    const data_cur: Cursor = .from(i_data_cur);
+    const idx_cur: Cursor = .from(i_idx_cur);
     var i: usize = 0;
     var idx_opt = t.index;
     while (idx_opt) |idx| : ({
@@ -1753,18 +1776,18 @@ pub fn completeInsertion(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: i32, 
         i += 1;
     }) {
         if (reg_idx[i] == 0) continue;
+        const rec: Reg = .from(reg_idx[i]);
         // A NULL record: no entry (partial indexes, and UPDATE of an index
         // on expressions).
         if (idx.part_idx_where != null or (update_flags != 0 and idx.has_expr)) {
-            _ = aux.addOp2(v, OP.IsNull, reg_idx[i], aux.currentAddr(v) + 2);
+            _ = aux.emit(v, .IsNull, .{ rec, aux.here(v).plus(2) });
         }
         var pik_flags: u16 = if (use_seek_result) OPFLAG.USESEEKRESULT else 0;
         if (idx.isPrimaryKey() and !t.hasRowid()) {
             pik_flags |= OPFLAG.NCHANGE;
             pik_flags |= update_flags & OPFLAG.SAVEPOSITION;
         }
-        const ii: i32 = @intCast(i);
-        _ = aux.addOp4Int(v, OP.IdxInsert, i_idx_cur + ii, reg_idx[i], reg_idx[i] + 1, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
+        _ = aux.emitInt(v, .IdxInsert, .{ idx_cur.at(i), rec, rec.at(1) }, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
         aux.changeP5(v, pik_flags);
     }
     if (!t.hasRowid()) return;
@@ -1775,7 +1798,7 @@ pub fn completeInsertion(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: i32, 
     }
     if (append_bias) pik_flags |= OPFLAG.APPEND;
     if (use_seek_result) pik_flags |= OPFLAG.USESEEKRESULT;
-    _ = aux.addOp3(v, OP.Insert, i_data_cur, reg_idx[i], reg_new_data);
+    _ = aux.emit(v, .Insert, .{ data_cur, Reg.from(reg_idx[i]), Reg.from(reg_new_data) });
     if (p.nested == 0) aux.appendP4(v, .{ .table = t });
     aux.changeP5(v, pik_flags);
 }
@@ -1794,33 +1817,33 @@ pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, i_base_arg:
     }
     const i_db: usize = @intCast(prepare.schemaToIndex(p.db, t.schema));
     const v = p.vdbe.?;
-    var i_base = if (i_base_arg < 0) p.n_tab else i_base_arg;
-    const i_data_cur = i_base;
-    i_base += 1;
-    data_cur.* = i_data_cur;
+    var base: Cursor = .from(if (i_base_arg < 0) p.n_tab else i_base_arg);
+    const tab_cur = base;
+    base = base.at(1);
+    data_cur.* = tab_cur.int();
     if (t.hasRowid() and (to_open == null or to_open.?[0])) {
-        openTable(p, i_data_cur, i_db, t, op);
+        openTable(p, tab_cur.int(), i_db, t, op);
     } else build.tableLock(p, i_db, t.tnum, op == OP.OpenWrite, t.name);
-    idx_cur.* = i_base;
+    idx_cur.* = base.int();
     var i: usize = 0;
     var idx_opt = t.index;
     while (idx_opt) |idx| : ({
         idx_opt = idx.next;
         i += 1;
     }) {
-        const i_idx_cur = i_base;
-        i_base += 1;
+        const this_cur = base;
+        base = base.at(1);
         if (idx.isPrimaryKey() and !t.hasRowid()) {
-            data_cur.* = i_idx_cur;
+            data_cur.* = this_cur.int();
             p5 = 0;
         }
         if (to_open == null or to_open.?[i + 1]) {
-            _ = aux.addOp3(v, op, i_idx_cur, @intCast(idx.tnum), @intCast(i_db));
+            _ = aux.emitAny(v, op, open_shape, .{ this_cur, idx.tnum, i_db });
             aux.setP4KeyInfo(p, idx);
             aux.changeP5(v, p5);
         }
     }
-    if (i_base > p.n_tab) p.n_tab = i_base;
+    if (base.int() > p.n_tab) p.n_tab = base.int();
     return i;
 }
 

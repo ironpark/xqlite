@@ -291,6 +291,9 @@ const Index = int.Index;
 const Schema = int.Schema;
 const Upsert = int.Upsert;
 const Vdbe = vi.Vdbe;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Addr = aux.operand.Addr;
 const OP = vi.OP;
 const OPFLAG = vi.OPFLAG;
 const RC = int.RC;
@@ -360,36 +363,35 @@ pub fn finishCoding(p: *Parse) void {
             // Return the rows the RETURNING trigger stored.
             const ret = p.u1.d.returning.?;
             if (ret.n_ret_col != 0) {
-                _ = aux.addOp0(v, OP.FkCheck);
-                const addr_rewind = aux.addOp1(v, OP.Rewind, ret.i_ret_cur);
-                const reg = ret.i_ret_reg;
+                const ret_cur: Cursor = .from(ret.i_ret_cur);
+                _ = aux.emit(v, .FkCheck, .{});
+                const addr_rewind = aux.emit(v, .Rewind, .{ret_cur});
+                const reg: Reg = .from(ret.i_ret_reg);
                 var i: i32 = 0;
-                while (i < ret.n_ret_col) : (i += 1) _ = aux.addOp3(v, OP.Column, ret.i_ret_cur, i, reg + i);
-                _ = aux.addOp2(v, OP.ResultRow, reg, ret.n_ret_col);
-                _ = aux.addOp2(v, OP.Next, ret.i_ret_cur, addr_rewind + 1);
-                aux.jumpHere(v, addr_rewind);
+                while (i < ret.n_ret_col) : (i += 1) _ = aux.emit(v, .Column, .{ ret_cur, i, reg.at(i) });
+                _ = aux.emit(v, .ResultRow, .{ reg, ret.n_ret_col });
+                _ = aux.emit(v, .Next, .{ ret_cur, addr_rewind.plus(1) });
+                aux.landHere(v, addr_rewind);
             }
         }
-        _ = aux.addOp0(v, OP.Halt);
+        _ = aux.emit(v, .Halt, .{});
 
         // Start a transaction on, and verify the schema cookie of, every
         // database the statement uses.
-        aux.jumpHere(v, 0);
+        aux.landHere(v, .from(0));
         for (db.dbs.items, 0..) |*d, i_db| {
             if (p.cookie_mask & (@as(u32, 1) << @intCast(i_db)) == 0) continue;
             aux.usesBtree(v, @intCast(i_db));
-            _ = aux.addOp4Int(
+            _ = aux.emitInt(
                 v,
-                OP.Transaction,
-                @intCast(i_db),
-                @intFromBool(p.write_mask & (@as(u32, 1) << @intCast(i_db)) != 0),
-                d.schema.schema_cookie,
+                .Transaction,
+                .{ i_db, p.write_mask & (@as(u32, 1) << @intCast(i_db)) != 0, d.schema.schema_cookie },
                 d.schema.i_generation,
             );
             if (!db.init.busy) aux.changeP5(v, 1);
         }
         for (p.vtab_lock.items) |t| {
-            _ = aux.addOp4(v, OP.VBegin, 0, 0, 0, vtabP4(db, t));
+            _ = aux.emit4(v, .VBegin, .{}, vtabP4(db, t));
         }
         p.vtab_lock = .empty;
 
@@ -410,10 +412,10 @@ pub fn finishCoding(p: *Parse) void {
 
         if (p.returning) {
             const ret = p.u1.d.returning.?;
-            if (ret.n_ret_col != 0) _ = aux.addOp2(v, OP.OpenEphemeral, ret.i_ret_cur, ret.n_ret_col);
+            if (ret.n_ret_col != 0) _ = aux.emit(v, .OpenEphemeral, .{ Cursor.from(ret.i_ret_cur), ret.n_ret_col });
         }
 
-        _ = aux.goto_(v, 1);
+        _ = aux.emit(v, .Goto, .{ 0, Addr.from(1) });
     }
 
     if (p.n_err == 0 and !db.malloc_failed) {
@@ -941,7 +943,7 @@ pub fn tableLock(p: *Parse, i_db: usize, i_tab: u32, write: bool, name: [:0]cons
 fn codeTableLocks(p: *Parse) void {
     const v = p.vdbe.?;
     for (p.table_locks.items) |l| {
-        _ = aux.addOp4(v, OP.TableLock, @intCast(l.i_db), @intCast(l.i_tab), @intFromBool(l.write), .{ .z = l.name });
+        _ = aux.emit4(v, .TableLock, .{ l.i_db, l.i_tab, l.write }, .{ .z = l.name });
     }
 }
 
@@ -950,7 +952,7 @@ fn codeTableLocks(p: *Parse) void {
 pub fn openSchemaTable(p: *Parse, i_db: usize) void {
     const v = getVdbe(p) orelse return;
     tableLock(p, i_db, int.SCHEMA_ROOT, true, int.LEGACY_SCHEMA_TABLE);
-    _ = aux.addOp4Int(v, OP.OpenWrite, 0, int.SCHEMA_ROOT, @intCast(i_db), 5);
+    _ = aux.emitInt(v, .OpenWrite, .{ 0, int.SCHEMA_ROOT, i_db }, 5);
     if (p.n_tab == 0) p.n_tab = 1;
 }
 
@@ -1086,9 +1088,9 @@ pub fn columnIndex(t: *const Table, name: []const u8) i32 {
 /// Port of sqlite3ForceNotReadOnly(): make sqlite3_stmt_readonly() false.
 fn forceNotReadOnly(p: *Parse) void {
     p.n_mem += 1;
-    const reg = p.n_mem;
+    const reg: Reg = .from(p.n_mem);
     const v = getVdbe(p) orelse return;
-    _ = aux.addOp3(v, OP.JournalMode, 0, reg, -1);
+    _ = aux.emit(v, .JournalMode, .{ 0, reg, -1 });
     aux.usesBtree(v, 0);
 }
 
@@ -1186,33 +1188,33 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
     if (v_opt) |v| {
         const null_row = [_]u8{ 6, 0, 0, 0, 0, 0 };
         beginWriteOperation(p, true, i_db);
-        if (is_virtual) _ = aux.addOp0(v, OP.VBegin);
+        if (is_virtual) _ = aux.emit(v, .VBegin, .{});
         p.n_mem += 1;
-        const reg1 = p.n_mem;
+        const reg1: Reg = .from(p.n_mem);
         p.n_mem += 1;
-        const reg2 = p.n_mem;
+        const reg2: Reg = .from(p.n_mem);
         p.n_mem += 1;
-        const reg3 = p.n_mem;
-        p.u1 = .{ .cr = .{ .reg_rowid = reg1, .reg_root = reg2 } };
-        _ = aux.addOp3(v, OP.ReadCookie, @intCast(i_db), reg3, @backingInt(btree.Meta.file_format));
+        const reg3: Reg = .from(p.n_mem);
+        p.u1 = .{ .cr = .{ .reg_rowid = reg1.int(), .reg_root = reg2.int() } };
+        _ = aux.emit(v, .ReadCookie, .{ i_db, reg3, @backingInt(btree.Meta.file_format) });
         aux.usesBtree(v, @intCast(i_db));
-        const addr1 = aux.addOp1(v, OP.If, reg3);
+        const addr1 = aux.emit(v, .If, .{reg3});
         const file_format: i32 = if (db.flags.LegacyFileFmt) 1 else int.MAX_FILE_FORMAT;
-        _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.file_format), file_format);
-        _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.text_encoding), db.enc);
-        aux.jumpHere(v, addr1);
+        _ = aux.emit(v, .SetCookie, .{ i_db, @backingInt(btree.Meta.file_format), file_format });
+        _ = aux.emit(v, .SetCookie, .{ i_db, @backingInt(btree.Meta.text_encoding), db.enc });
+        aux.landHere(v, addr1);
         if (is_view or is_virtual) {
-            _ = aux.addOp2(v, OP.Integer, 0, reg2);
+            _ = aux.emit(v, .Integer, .{ 0, reg2 });
         } else {
-            p.u1.cr.addr_cr_tab = aux.addOp3(v, OP.CreateBtree, @intCast(i_db), reg2, BTREE_INTKEY);
+            p.u1.cr.addr_cr_tab = aux.emit(v, .CreateBtree, .{ i_db, reg2, BTREE_INTKEY }).int();
         }
         openSchemaTable(p, i_db);
-        _ = aux.addOp2(v, OP.NewRowid, 0, reg1);
-        const blob = aux.addOp3(v, OP.Blob, 6, reg3, 0);
-        aux.changeP4Str(v, blob, &null_row);
-        _ = aux.addOp3(v, OP.Insert, 0, reg3, reg1);
+        // sqlite_schema is open on cursor 0.
+        _ = aux.emit(v, .NewRowid, .{ 0, reg1 });
+        _ = aux.emitStr(v, .Blob, .{ 6, reg3 }, &null_row);
+        _ = aux.emit(v, .Insert, .{ 0, reg3, reg1 });
         aux.changeP5(v, OPFLAG.APPEND);
-        _ = aux.addOp0(v, OP.Close);
+        _ = aux.emit(v, .Close, .{});
     } else if (db.init.imposter_table != 0) {
         t.tab_flags.Imposter = true;
         if (db.init.imposter_table >= 2) t.tab_flags.Readonly = true;
@@ -1554,7 +1556,7 @@ pub fn changeCookie(p: *Parse, i_db: usize) void {
     const db = p.db;
     const v = p.vdbe.?;
     const cookie: u32 = @bitCast(db.dbs.items[i_db].schema.schema_cookie);
-    _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.schema_version), @bitCast(cookie +% 1));
+    _ = aux.emit(v, .SetCookie, .{ i_db, @backingInt(btree.Meta.schema_version), @as(i32, @bitCast(cookie +% 1)) });
 }
 
 /// Port of identPut(): append an identifier, quoted if it is not a plain
@@ -1915,7 +1917,7 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: TF, sel:
     // Unless reading the schema, code the table's sqlite_schema row.
     if (!db.init.busy) {
         const v = getVdbe(p) orelse return;
-        _ = aux.addOp1(v, OP.Close, 0);
+        _ = aux.emit(v, .Close, .{});
         const typ: []const u8, const typ2: []const u8 = if (t.isOrdinary()) .{ "table", "TABLE" } else .{ "view", "VIEW" };
 
         if (sel) |s| {
@@ -1960,7 +1962,7 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: TF, sel:
         // Check generated columns for cycles and bad expressions.
         if (t.tab_flags.intersects(TF.HasGenerated)) {
             const q = try mprintf(p, "SELECT*FROM\"%w\".\"%w\"", &.{ .{ .str = db.dbs.items[i_db].name }, .{ .str = t.name } });
-            _ = aux.addOp4Str(v, OP.SqlExec, 0x0001, 0, 0, q);
+            _ = aux.emitStr(v, .SqlExec, .{0x0001}, q);
         }
     }
 
@@ -2000,43 +2002,44 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
         p.n_err += 1;
         return;
     }
-    const i_csr = p.n_tab;
+    const csr: Cursor = .from(p.n_tab);
     p.n_tab += 1;
     p.n_mem += 1;
-    const reg_yield = p.n_mem;
+    const reg_yield: Reg = .from(p.n_mem);
     p.n_mem += 1;
-    const reg_rec = p.n_mem;
+    const reg_rec: Reg = .from(p.n_mem);
     p.n_mem += 1;
-    const reg_rowid = p.n_mem;
+    const reg_rowid: Reg = .from(p.n_mem);
     main_mod.mayAbort(p);
-    _ = aux.addOp3(v, OP.OpenWrite, i_csr, p.u1.cr.reg_root, @intCast(i_db));
+    _ = aux.emit(v, .OpenWrite, .{ csr, p.u1.cr.reg_root, i_db });
     aux.changeP5(v, vi.OPFLAG.P2ISREG);
-    const addr_top = aux.currentAddr(v) + 1;
-    _ = aux.addOp3(v, OP.InitCoroutine, reg_yield, 0, addr_top);
+    // P3 of OP_InitCoroutine is the address the co-routine starts at.
+    const addr_top = aux.here(v).plus(1);
+    _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, addr_top.int() });
     if (p.n_err != 0) return;
     const sel_tab = (try select_mod.resultSetOfSelect(p, sel, Aff.blob)) orelse return;
     std.debug.assert(t.cols.len == 0);
     t.cols = sel_tab.cols;
     t.n_nv_col = @intCast(sel_tab.cols.len);
     sel_tab.cols = &.{};
-    var dest = select_mod.selectDestInit(select_mod.SRT.Coroutine, reg_yield);
+    var dest = select_mod.selectDestInit(select_mod.SRT.Coroutine, reg_yield.int());
     select_mod.select(p, sel, &dest) catch {};
     if (p.n_err != 0) return;
-    aux.endCoroutine(v, reg_yield);
-    aux.jumpHere(v, addr_top - 1);
-    const addr_ins_loop = aux.addOp1(v, OP.Yield, dest.i_sd_parm);
-    _ = aux.addOp3(v, OP.MakeRecord, dest.i_sdst, dest.n_sdst, reg_rec);
+    aux.endCoroutine(v, reg_yield.int());
+    aux.landHere(v, addr_top.plus(-1));
+    const addr_ins_loop = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
+    _ = aux.emit(v, .MakeRecord, .{ Reg.from(dest.i_sdst), dest.n_sdst, reg_rec });
     insert_mod.tableAffinity(p, t, 0);
-    _ = aux.addOp2(v, OP.NewRowid, i_csr, reg_rowid);
-    _ = aux.addOp3(v, OP.Insert, i_csr, reg_rec, reg_rowid);
+    _ = aux.emit(v, .NewRowid, .{ csr, reg_rowid });
+    _ = aux.emit(v, .Insert, .{ csr, reg_rec, reg_rowid });
     // xqlite: a dialect that counts the rows (Hooks.count_create_as).
     if (@import("../dialect/dialect.zig").hooks(p.db).count_create_as) {
         aux.changeP5(v, OPFLAG.NCHANGE);
         aux.countChanges(v);
     }
-    _ = aux.goto_(v, addr_ins_loop);
-    aux.jumpHere(v, addr_ins_loop);
-    _ = aux.addOp1(v, OP.Close, i_csr);
+    _ = aux.emit(v, .Goto, .{ 0, addr_ins_loop });
+    aux.landHere(v, addr_ins_loop);
+    _ = aux.emit(v, .Close, .{csr});
 }
 
 /// Port of sqlite3CreateForeignKey(): a REFERENCES clause or FOREIGN KEY
@@ -2473,14 +2476,14 @@ fn createIndexImpl(
             // Code the index's b-tree and sqlite_schema row, unless this
             // is the PRIMARY KEY of a WITHOUT ROWID table.
             p.n_mem += 1;
-            const i_mem = p.n_mem;
+            const root_reg: Reg = .from(p.n_mem);
             const v = getVdbe(p) orelse return;
             beginWriteOperation(p, true, i_db);
 
             // convertToWithoutRowidTable() turns this OP_Noop into a jump
             // over the code below if the index is the primary key.
-            idx.tnum = @intCast(aux.addOp0(v, OP.Noop));
-            _ = aux.addOp3(v, OP.CreateBtree, @intCast(i_db), i_mem, BTREE_BLOBKEY);
+            idx.tnum = @intCast(aux.emit(v, .Noop, .{}).int());
+            _ = aux.emit(v, .CreateBtree, .{ i_db, root_reg, BTREE_BLOBKEY });
 
             var stmt: ?[:0]const u8 = null;
             if (start != null) {
@@ -2494,19 +2497,19 @@ fn createIndexImpl(
                 .{ .str = db.dbs.items[i_db].name },
                 .{ .str = idx.name },
                 .{ .str = t.name },
-                .{ .int = i_mem },
+                .{ .int = root_reg.int() },
                 .{ .str = stmt },
             });
 
             // Fill the index and reread its schema row.
             if (tbl_name != null) {
-                refillIndex(p, idx, i_mem);
+                refillIndex(p, idx, root_reg.int());
                 changeCookie(p, i_db);
                 const w = try mprintf(p, "name='%q' AND type='index'", &.{.{ .str = idx.name }});
                 aux.addParseSchemaOp(v, @intCast(i_db), w, 0);
-                _ = aux.addOp2(v, OP.Expire, 0, 1);
+                _ = aux.emit(v, .Expire, .{ 0, 1 });
             }
-            aux.jumpHere(v, @intCast(idx.tnum));
+            aux.landHere(v, .from(@intCast(idx.tnum)));
         }
     }
     if (db.init.busy or tbl_name == null) {
@@ -2675,8 +2678,8 @@ fn viewResetAll(db: *Sqlite3, idx: usize) void {
 fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     const db = p.db;
     const t = idx.table;
-    const i_tab = p.n_tab;
-    const i_idx = p.n_tab + 1;
+    const tab_cur: Cursor = .from(p.n_tab);
+    const idx_cur: Cursor = .from(p.n_tab + 1);
     p.n_tab += 2;
     const i_db: i32 = @intCast(prepare.schemaToIndex(db, idx.schema));
     if (auth.check(p, auth.Code.REINDEX, idx.name, null, db.dbs.items[@intCast(i_db)].name) != auth.OK) return;
@@ -2688,46 +2691,49 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     const key_p4: vi.P4 = if (key) |k| .{ .keyinfo = k } else .notused;
 
     // The index records of all rows go to the sorter.
-    const i_sorter = p.n_tab;
+    const sorter: Cursor = .from(p.n_tab);
     p.n_tab += 1;
-    _ = aux.addOp4(v, OP.SorterOpen, i_sorter, 0, idx.n_key_col, key_p4);
-    insert_mod.openTable(p, i_tab, @intCast(i_db), t, OP.OpenRead);
-    var addr1 = aux.addOp2(v, OP.Rewind, i_tab, 0);
-    const reg_record = expr_mod.getTempReg(p);
+    _ = aux.emit4(v, .SorterOpen, .{ sorter, 0, idx.n_key_col }, key_p4);
+    insert_mod.openTable(p, tab_cur.int(), @intCast(i_db), t, OP.OpenRead);
+    var addr1 = aux.emit(v, .Rewind, .{tab_cur});
+    const record: Reg = .from(expr_mod.getTempReg(p));
     main_mod.multiWrite(p);
     var part_idx_label: i32 = 0;
-    _ = delete_mod.generateIndexKey(p, idx, i_tab, reg_record, false, &part_idx_label, null, 0);
-    _ = aux.addOp2(v, OP.SorterInsert, i_sorter, reg_record);
+    _ = delete_mod.generateIndexKey(p, idx, tab_cur.int(), record.int(), false, &part_idx_label, null, 0);
+    _ = aux.emit(v, .SorterInsert, .{ sorter, record });
     delete_mod.resolvePartIdxLabel(p, part_idx_label);
-    _ = aux.addOp2(v, OP.Next, i_tab, addr1 + 1);
-    aux.jumpHere(v, addr1);
-    if (mem_root_page < 0) _ = aux.addOp2(v, OP.Clear, tnum, i_db);
-    _ = aux.addOp4(v, OP.OpenWrite, i_idx, tnum, i_db, key_p4);
+    _ = aux.emit(v, .Next, .{ tab_cur, addr1.plus(1) });
+    aux.landHere(v, addr1);
+    if (mem_root_page < 0) _ = aux.emit(v, .Clear, .{ tnum, i_db });
+    // P2 is the root page, or with OPFLAG_P2ISREG the register it is in.
+    _ = aux.emit4(v, .OpenWrite, .{ idx_cur, tnum, i_db }, key_p4);
     aux.changeP5(v, vi.OPFLAG.BULKCSR | (if (mem_root_page >= 0) vi.OPFLAG.P2ISREG else 0));
 
     // Then, sorted, to the index (checking uniqueness).
-    addr1 = aux.addOp2(v, OP.SorterSort, i_sorter, 0);
-    var addr2: i32 = undefined;
+    addr1 = aux.emit(v, .SorterSort, .{sorter});
+    var addr2: Addr = undefined;
     if (idx.isUnique()) {
-        const j2 = aux.goto_(v, 1);
-        addr2 = aux.currentAddr(v);
-        _ = aux.addOp4Int(v, OP.SorterCompare, i_sorter, j2, reg_record, idx.n_key_col);
+        const j2 = aux.emit(v, .Goto, .{ 0, Addr.from(1) });
+        addr2 = aux.here(v);
+        // P2 of OP_SorterCompare is an address (that of the jump over
+        // the error), not a label.
+        _ = aux.emitInt(v, .SorterCompare, .{ sorter, j2.int(), record }, idx.n_key_col);
         uniqueConstraint(p, OE.Abort, idx, 0);
-        aux.jumpHere(v, j2);
+        aux.landHere(v, j2);
     } else {
         main_mod.mayAbort(p);
-        addr2 = aux.currentAddr(v);
+        addr2 = aux.here(v);
     }
-    _ = aux.addOp3(v, OP.SorterData, i_sorter, reg_record, i_idx);
-    if (!idx.asc_key_bug) _ = aux.addOp1(v, OP.SeekEnd, i_idx);
-    _ = aux.addOp2(v, OP.IdxInsert, i_idx, reg_record);
+    _ = aux.emit(v, .SorterData, .{ sorter, record, idx_cur });
+    if (!idx.asc_key_bug) _ = aux.emit(v, .SeekEnd, .{idx_cur});
+    _ = aux.emit(v, .IdxInsert, .{ idx_cur, record });
     aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
-    expr_mod.releaseTempReg(p, reg_record);
-    _ = aux.addOp2(v, OP.SorterNext, i_sorter, addr2);
-    aux.jumpHere(v, addr1);
-    _ = aux.addOp1(v, OP.Close, i_tab);
-    _ = aux.addOp1(v, OP.Close, i_idx);
-    _ = aux.addOp1(v, OP.Close, i_sorter);
+    expr_mod.releaseTempReg(p, record.int());
+    _ = aux.emit(v, .SorterNext, .{ sorter, addr2 });
+    aux.landHere(v, addr1);
+    _ = aux.emit(v, .Close, .{tab_cur});
+    _ = aux.emit(v, .Close, .{idx_cur});
+    _ = aux.emit(v, .Close, .{sorter});
 }
 
 /// Port of sqlite3BeginTransaction(): BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE].
@@ -2739,11 +2745,11 @@ pub fn beginTransaction(p: *Parse, kind: i32) void {
     if (kind != TK.DEFERRED) {
         for (db.dbs.items, 0..) |*d, i| {
             const txn: i32 = if (d.bt != null and d.bt.?.bs.read_only) 0 else if (kind == TK.EXCLUSIVE) 2 else 1;
-            _ = aux.addOp2(v, OP.Transaction, @intCast(i), txn);
+            _ = aux.emit(v, .Transaction, .{ i, txn });
             aux.usesBtree(v, @intCast(i));
         }
     }
-    _ = aux.addOp0(v, OP.AutoCommit);
+    _ = aux.emit(v, .AutoCommit, .{});
 }
 
 /// Port of sqlite3EndTransaction(): COMMIT, END or ROLLBACK.
@@ -2752,7 +2758,7 @@ pub fn endTransaction(p: *Parse, op: u16) void {
     if (p.syntax_only) return;
     if (auth.check(p, auth.Code.TRANSACTION, if (op == TK.ROLLBACK) "ROLLBACK" else "COMMIT", null, null) != auth.OK) return;
     const v = getVdbe(p) orelse return;
-    _ = aux.addOp2(v, OP.AutoCommit, 1, @intFromBool(op == TK.ROLLBACK));
+    _ = aux.emit(v, .AutoCommit, .{ 1, op == TK.ROLLBACK });
 }
 
 /// SAVEPOINT_* operations.
@@ -2765,7 +2771,7 @@ pub fn savepoint(p: *Parse, op: SAVEPOINT, name: Token) void {
     const v = getVdbe(p) orelse return;
     const az = [3][]const u8{ "BEGIN", "RELEASE", "ROLLBACK" };
     if (auth.check(p, auth.Code.SAVEPOINT, az[@intCast(op.int())], z, null) != auth.OK) return;
-    _ = aux.addOp4Str(v, OP.Savepoint, op.int(), 0, 0, z);
+    _ = aux.emitStr(v, .Savepoint, .{op.int()}, z);
 }
 
 /// Port of sqlite3OpenTempDatabase(): open the TEMP database if it is not
@@ -2822,7 +2828,7 @@ pub fn beginWriteOperation(p: *Parse, set_statement: bool, i_db: usize) void {
 pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, p5_errmsg: u16) void {
     const v = getVdbe(p) orelse return;
     if (on_error == OE.Abort) main_mod.mayAbort(p);
-    _ = aux.addOp4Str(v, OP.Halt, err_code, on_error.int(), 0, msg);
+    _ = aux.emitStr(v, .Halt, .{ err_code, on_error.int() }, msg);
     aux.changeP5(v, p5_errmsg);
 }
 
@@ -2834,7 +2840,12 @@ pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: 
     std.debug.assert(op == OP.HaltIfNull or reg_null == 0);
     const v = getVdbe(p) orelse return;
     if (on_error == OE.Abort) main_mod.mayAbort(p);
-    _ = aux.addOp4Str(v, op, err_code, on_error.int(), reg_null, z);
+    // P3 is a register of OP_HaltIfNull only.
+    _ = switch (op) {
+        .HaltIfNull => aux.emitStr(v, .HaltIfNull, .{ err_code, on_error.int(), Reg.from(reg_null) }, z),
+        .Halt => aux.emitStr(v, .Halt, .{ err_code, on_error.int() }, z),
+        else => unreachable,
+    };
     aux.changeP5(v, vi.P5_ConstraintDialect);
 }
 
@@ -2909,17 +2920,17 @@ pub fn keyInfoOfIndex(p: *Parse, idx: *Index) ?*vi.KeyInfo {
 /// one's sqlite_schema row.
 fn destroyRootPage(p: *Parse, i_table: int.Pgno, i_db: usize) void {
     const v = getVdbe(p) orelse return;
-    const r1 = expr_mod.getTempReg(p);
+    const r1: Reg = .from(expr_mod.getTempReg(p));
     if (i_table < 2) util.errorMsg(p, "corrupt schema", .{});
-    _ = aux.addOp3(v, OP.Destroy, @intCast(i_table), r1, @intCast(i_db));
+    _ = aux.emit(v, .Destroy, .{ i_table, r1, i_db });
     main_mod.mayAbort(p);
     nestedParse(p, "UPDATE %Q." ++ int.LEGACY_SCHEMA_TABLE ++ " SET rootpage=%d WHERE #%d AND rootpage=#%d", &.{
         .{ .str = p.db.dbs.items[i_db].name },
         .{ .int = @intCast(i_table) },
-        .{ .int = r1 },
-        .{ .int = r1 },
+        .{ .int = r1.int() },
+        .{ .int = r1.int() },
     });
-    expr_mod.releaseTempReg(p, r1);
+    expr_mod.releaseTempReg(p, r1.int());
 }
 
 /// Port of destroyTable(): erase the b-trees of `t` and its indexes,
@@ -2960,7 +2971,7 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
     const db = p.db;
     const v = getVdbe(p) orelse return;
     beginWriteOperation(p, true, i_db);
-    if (t.isVirtual()) _ = aux.addOp0(v, OP.VBegin);
+    if (t.isVirtual()) _ = aux.emit(v, .VBegin, .{});
     // Drop its triggers (TEMP triggers on it too).
     var trig = trigger_mod.triggerList(p, t);
     while (trig) |tr| : (trig = tr.next) trigger_mod.dropTriggerPtr(p, tr);
@@ -2972,10 +2983,10 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
     nestedParse(p, "DELETE FROM %Q." ++ int.LEGACY_SCHEMA_TABLE ++ " WHERE tbl_name=%Q and type!='trigger'", &.{ .{ .str = db_name }, .{ .str = t.name } });
     if (!is_view and t.e_tab_type != .vtab) destroyTable(p, t);
     if (t.isVirtual()) {
-        _ = aux.addOp4Str(v, OP.VDestroy, @intCast(i_db), 0, 0, t.name);
+        _ = aux.emitStr(v, .VDestroy, .{i_db}, t.name);
         main_mod.mayAbort(p);
     }
-    _ = aux.addOp4Str(v, OP.DropTable, @intCast(i_db), 0, 0, t.name);
+    _ = aux.emitStr(v, .DropTable, .{i_db}, t.name);
     changeCookie(p, i_db);
     viewResetAll(db, i_db);
 }
@@ -3135,7 +3146,7 @@ pub fn dropIndex(p: *Parse, name: ?*SrcList, if_exists: bool) void {
     clearStatTables(p, i_db, "idx", idx.name);
     changeCookie(p, i_db);
     destroyRootPage(p, idx.tnum, i_db);
-    _ = aux.addOp4Str(v, OP.DropIndex, @intCast(i_db), 0, 0, idx.name);
+    _ = aux.emitStr(v, .DropIndex, .{i_db}, idx.name);
 }
 
 /// Port of collationMatch(): whether a column of `idx` uses collation

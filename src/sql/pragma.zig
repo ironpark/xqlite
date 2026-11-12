@@ -38,6 +38,10 @@ const Table = int.Table;
 const Index = int.Index;
 const DbFlag = int.DbFlag;
 const Vdbe = vi.Vdbe;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Label = aux.operand.Label;
+const Addr = aux.operand.Addr;
 const OP = vi.OP;
 const Oom = int.Oom;
 
@@ -378,17 +382,21 @@ fn xqDialect(p: *Parse, v: *Vdbe, right: ?[]const u8) void {
     returnSingleText(v, main_mod.getDialect(p.db).name());
 }
 
+/// The first register of the row a pragma returns: pragmas use their
+/// registers by number, as pragma.c does.
+const result_reg: Reg = .from(1);
+
 /// Port of returnSingleInt().
 fn returnSingleInt(v: *Vdbe, value: i64) void {
-    _ = aux.addInt64(v, 1, value);
-    _ = aux.addOp2(v, OP.ResultRow, 1, 1);
+    _ = aux.addInt64(v, result_reg.int(), value);
+    _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
 }
 
 /// Port of returnSingleText().
 fn returnSingleText(v: *Vdbe, value: ?[]const u8) void {
     if (value) |z| {
-        _ = aux.loadString(v, 1, z);
-        _ = aux.addOp2(v, OP.ResultRow, 1, 1);
+        _ = aux.loadString(v, result_reg.int(), z);
+        _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
     }
 }
 
@@ -449,13 +457,31 @@ fn pragmaFunclistLine(v: *Vdbe, f: *const int.FuncDef, is_builtin: bool, show_in
     }, false);
 }
 
+/// The registers the integrity check uses by number, as pragma.c does.
+const ck = struct {
+    /// The number of errors still allowed.
+    const errs_left: Reg = .from(1);
+    /// The message of the b-tree check, then the start of the "wrong # of
+    /// entries" message.
+    const text: Reg = .from(2);
+    /// The message of the row that is output.
+    const msg: Reg = .from(3);
+    /// A part of a message.
+    const part: Reg = .from(4);
+    /// The number of rows of the table being checked.
+    const rows: Reg = .from(7);
+    /// The first of the entry counts: of each b-tree after the b-tree
+    /// check, of each index of the table while its rows are checked.
+    const counts: Reg = .from(8);
+};
+
 /// Port of integrityCheckResultRow(): output the row in register 3, count
 /// it against the error limit in register 1, and halt at the limit.
 /// Returns the address of the OP_IfPos.
-fn integrityCheckResultRow(v: *Vdbe) i32 {
-    _ = aux.addOp2(v, OP.ResultRow, 3, 1);
-    const addr = aux.addOp3(v, OP.IfPos, 1, aux.currentAddr(v) + 2, 1);
-    _ = aux.addOp0(v, OP.Halt);
+fn integrityCheckResultRow(v: *Vdbe) Addr {
+    _ = aux.emit(v, .ResultRow, .{ ck.msg, 1 });
+    const addr = aux.emit(v, .IfPos, .{ ck.errs_left, aux.here(v).plus(2), 1 });
+    _ = aux.emit(v, .Halt, .{});
     return addr;
 }
 
@@ -568,7 +594,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             if (right) |z| {
                 const size = absInt32(atoi(z));
                 build.beginWriteOperation(p, false, i_db);
-                _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.default_cache_size), size);
+                _ = aux.emit(v, .SetCookie, .{ i_db, @backingInt(btree.Meta.default_cache_size), size });
                 pdb.schema.cache_size = size;
                 pdb.bt.?.setCacheSize(size);
             } else {
@@ -614,9 +640,9 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         .page_count => {
             build.codeVerifySchema(p, i_db);
             p.n_mem += 1;
-            const reg = p.n_mem;
+            const reg: Reg = .from(p.n_mem);
             if (ctype.toLower(left[0]) == 'p') {
-                _ = aux.addOp2(v, OP.Pagecount, @intCast(i_db), reg);
+                _ = aux.emit(v, .Pagecount, .{ i_db, reg });
             } else {
                 var x: i64 = 0;
                 if (right) |z| {
@@ -626,9 +652,9 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                         x = 0;
                     }
                 }
-                _ = aux.addOp3(v, OP.MaxPgcnt, @intCast(i_db), reg, @bitCast(@as(u32, @intCast(x))));
+                _ = aux.emit(v, .MaxPgcnt, .{ i_db, reg, @as(i32, @bitCast(@as(u32, @intCast(x)))) });
             }
-            _ = aux.addOp2(v, OP.ResultRow, reg, 1);
+            _ = aux.emit(v, .ResultRow, .{ reg, 1 });
         },
 
         // PRAGMA [schema.]locking_mode[=NORMAL|EXCLUSIVE]. Without a
@@ -682,10 +708,10 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 ii -= 1;
                 if (db.dbs.items[ii].bt != null and (ii == i_db or id2.n == 0)) {
                     aux.usesBtree(v, @intCast(ii));
-                    _ = aux.addOp3(v, OP.JournalMode, @intCast(ii), 1, mode);
+                    _ = aux.emit(v, .JournalMode, .{ ii, result_reg, mode });
                 }
             }
-            _ = aux.addOp2(v, OP.ResultRow, 1, 1);
+            _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
         },
 
         // PRAGMA [schema.]journal_size_limit[=N].
@@ -738,12 +764,13 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             if (right) |z| limit = atoi(z);
             if (limit <= 0) limit = 0x7fffffff;
             build.beginWriteOperation(p, false, i_db);
-            _ = aux.addOp2(v, OP.Integer, limit, 1);
-            const addr = aux.addOp1(v, OP.IncrVacuum, @intCast(i_db));
-            _ = aux.addOp1(v, OP.ResultRow, 1);
-            _ = aux.addOp2(v, OP.AddImm, 1, -1);
-            _ = aux.addOp2(v, OP.IfPos, 1, addr);
-            aux.jumpHere(v, addr);
+            // Register 1 counts the pages left to free.
+            _ = aux.emit(v, .Integer, .{ limit, result_reg });
+            const addr = aux.emit(v, .IncrVacuum, .{i_db});
+            _ = aux.emit(v, .ResultRow, .{result_reg});
+            _ = aux.emit(v, .AddImm, .{ result_reg, -1 });
+            _ = aux.emit(v, .IfPos, .{ result_reg, addr });
+            aux.landHere(v, addr);
         },
 
         // PRAGMA [schema.]cache_size[=N]: pages, or KiB if negative.
@@ -879,7 +906,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 }
                 // Many flags change the code generated, so expire every
                 // statement.
-                _ = aux.addOp0(v, OP.Expire);
+                _ = aux.emit(v, .Expire, .{});
                 setAllPagerFlags(db);
                 // The C b-tree reads cell_size_check from db->flags; this
                 // one keeps its own copy, set here and when a b-tree opens.
@@ -1022,7 +1049,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                             .{ .i = @intFromBool(i < idx.n_key_col) },
                         }, true);
                     }
-                    _ = aux.addOp2(v, OP.ResultRow, 1, p.n_mem);
+                    _ = aux.emit(v, .ResultRow, .{ result_reg, p.n_mem });
                 }
             }
         },
@@ -1228,8 +1255,8 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             p.n_mem = 1;
             var i: i32 = 0;
             while (func.compileoptionGet(i)) |opt| : (i += 1) {
-                _ = aux.loadString(v, 1, opt);
-                _ = aux.addOp2(v, OP.ResultRow, 1, 1);
+                _ = aux.loadString(v, result_reg.int(), opt);
+                _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
             }
             aux.reusable(v);
         },
@@ -1252,8 +1279,8 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 }
             }
             p.n_mem = 3;
-            _ = aux.addOp3(v, OP.Checkpoint, i_bt, @backingInt(e_mode), 1);
-            _ = aux.addOp2(v, OP.ResultRow, 1, 3);
+            _ = aux.emit(v, .Checkpoint, .{ i_bt, @backingInt(e_mode), result_reg });
+            _ = aux.emit(v, .ResultRow, .{ result_reg, 3 });
         },
 
         // PRAGMA wal_autocheckpoint[=N].
@@ -1333,10 +1360,13 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
     const db = p.db;
     var i_db = i_db_arg;
     var zdb = zdb_arg;
-    const reg_result = p.n_mem + 1;
+    const reg_result: Reg = .from(p.n_mem + 1);
     p.n_mem += 4;
     p.n_mem += 1;
-    const reg_row = p.n_mem;
+    const reg_row: Reg = .from(p.n_mem);
+    // The table that is checked is open on cursor 0, the parents of its
+    // foreign keys on the cursors from 1.
+    const child_cur: Cursor = .from(0);
     // As in C, nothing is checked if the schema has no tables, even if a
     // table is named.
     var it = db.dbs.items[i_db].schema.tbl_order.iterator();
@@ -1355,9 +1385,9 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
         zdb = db.dbs.items[i_db].name;
         build.codeVerifySchema(p, i_db);
         build.tableLock(p, i_db, t.tnum, false, t.name);
-        expr.touchRegister(p, t.nCol() + reg_row);
-        insert.openTable(p, 0, i_db, t, OP.OpenRead);
-        _ = aux.loadString(v, reg_result, t.name);
+        expr.touchRegister(p, t.nCol() + reg_row.int());
+        insert.openTable(p, child_cur.int(), i_db, t, OP.OpenRead);
+        _ = aux.loadString(v, reg_result.int(), t.name);
 
         // Open each parent table, or the index its key uses.
         var i: i32 = 1;
@@ -1371,7 +1401,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
             build.tableLock(p, i_db, parent.tnum, false, parent.name);
             if (!fkey.fkLocateIndex(p, parent, fk, &idx, null)) {
                 if (idx) |ix| {
-                    _ = aux.addOp3(v, OP.OpenRead, i, @intCast(ix.tnum), @intCast(i_db));
+                    _ = aux.emit(v, .OpenRead, .{ Cursor.from(i), ix.tnum, i_db });
                     aux.setP4KeyInfo(p, ix);
                 } else {
                     insert.openTable(p, i, i_db, parent, OP.OpenRead);
@@ -1385,7 +1415,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
         if (p.n_tab < i) p.n_tab = i;
 
         // Look up the parent key of each child row.
-        const addr_top = aux.addOp1(v, OP.Rewind, 0);
+        const addr_top = aux.emit(v, .Rewind, .{child_cur});
         i = 1;
         fk_opt = t.u.tab.fkey;
         while (fk_opt) |fk| : ({
@@ -1396,41 +1426,42 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
             var idx: ?*Index = null;
             var ai_cols: ?[]i32 = null;
             if (parent) |par| _ = fkey.fkLocateIndex(p, par, fk, &idx, &ai_cols);
-            const addr_ok = aux.makeLabel(p);
+            const parent_cur: Cursor = .from(i);
+            const ok = aux.newLabel(p);
             const n_col: i32 = @intCast(fk.cols.len);
 
             // A NULL in the child key cannot violate the constraint.
-            expr.touchRegister(p, reg_row + n_col);
+            expr.touchRegister(p, reg_row.int() + n_col);
             for (fk.cols, 0..) |fc, j| {
                 const i_col = if (ai_cols) |a| a[j] else fc.i_from;
-                const reg = reg_row + @as(i32, @intCast(j));
-                ec.codeGetColumnOfTable(v, t, 0, i_col, reg);
-                _ = aux.addOp2(v, OP.IsNull, reg, addr_ok);
+                const reg = reg_row.at(j);
+                ec.codeGetColumnOfTable(v, t, child_cur.int(), i_col, reg.int());
+                _ = aux.emit(v, .IsNull, .{ reg, ok });
             }
 
             // A matching parent key is fine.
             if (idx) |ix| {
                 const aff = insert.indexAffinityStr(p, ix) orelse return error.OutOfMemory;
-                _ = aux.addOp4Str(v, OP.Affinity, reg_row, n_col, 0, aff[0..@intCast(n_col)]);
-                _ = aux.addOp4Int(v, OP.Found, i, addr_ok, reg_row, n_col);
+                _ = aux.emitStr(v, .Affinity, .{ reg_row, n_col }, aff[0..@intCast(n_col)]);
+                _ = aux.emitInt(v, .Found, .{ parent_cur, ok, reg_row }, n_col);
             } else if (parent != null) {
-                const jmp = aux.currentAddr(v) + 2;
-                _ = aux.addOp3(v, OP.SeekRowid, i, jmp, reg_row);
-                _ = aux.goto_(v, addr_ok);
+                const jmp = aux.here(v).plus(2);
+                _ = aux.emit(v, .SeekRowid, .{ parent_cur, jmp, reg_row });
+                _ = aux.emit(v, .Goto, .{ 0, ok });
             }
 
             // Report the violation.
             if (t.hasRowid()) {
-                _ = aux.addOp2(v, OP.Rowid, 0, reg_result + 1);
+                _ = aux.emit(v, .Rowid, .{ child_cur, reg_result.at(1) });
             } else {
-                _ = aux.addOp2(v, OP.Null, 0, reg_result + 1);
+                _ = aux.emit(v, .Null, .{ 0, reg_result.at(1) });
             }
-            aux.multiLoad(v, reg_result + 2, &.{ .{ .s = fk.to }, .{ .i = i - 1 } }, true);
-            _ = aux.addOp2(v, OP.ResultRow, reg_result, 4);
-            aux.resolveLabel(v, addr_ok);
+            aux.multiLoad(v, reg_result.at(2).int(), &.{ .{ .s = fk.to }, .{ .i = i - 1 } }, true);
+            _ = aux.emit(v, .ResultRow, .{ reg_result, 4 });
+            aux.place(v, ok);
         }
-        _ = aux.addOp2(v, OP.Next, 0, addr_top + 1);
-        aux.jumpHere(v, addr_top);
+        _ = aux.emit(v, .Next, .{ child_cur, addr_top.plus(1) });
+        aux.landHere(v, addr_top);
     }
 }
 
@@ -1455,7 +1486,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         }
     }
     // Register 1 holds the number of errors still allowed.
-    _ = aux.addOp2(v, OP.Integer, mx_err - 1, 1);
+    _ = aux.emit(v, .Integer, .{ mx_err - 1, ck.errs_left });
 
     for (0..db.dbs.items.len) |i| {
         if (i_db_opt) |only| if (i != only) continue;
@@ -1497,24 +1528,24 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         roots[0] = @intCast(cnt);
         const n_root: i32 = @intCast(cnt);
 
-        expr.touchRegister(p, 8 + n_root);
-        _ = aux.addOp3(v, OP.Null, 0, 8, 8 + n_root);
+        expr.touchRegister(p, ck.counts.at(n_root).int());
+        _ = aux.emit(v, .Null, .{ 0, ck.counts, ck.counts.at(n_root) });
         expr.clearTempRegCache(p);
 
         // The b-tree checks, which leave the entry count of each b-tree
         // in registers 8 and up.
-        _ = aux.addOp4(v, OP.IntegrityCk, 1, n_root, 8, .{ .intarray = roots });
+        _ = aux.emit4(v, .IntegrityCk, .{ ck.errs_left, n_root, ck.counts }, .{ .intarray = roots });
         aux.changeP5(v, @intCast(i));
-        var addr = aux.addOp1(v, OP.IsNull, 2);
+        var addr = aux.emit(v, .IsNull, .{ck.text});
         const in_db = try build.mprintf(p, "*** in database %s ***\n", &.{.{ .str = db.dbs.items[i].name }});
-        _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, in_db);
-        _ = aux.addOp3(v, OP.Concat, 2, 3, 3);
+        _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, in_db);
+        _ = aux.emit(v, .Concat, .{ ck.text, ck.msg, ck.msg });
         _ = integrityCheckResultRow(v);
-        aux.jumpHere(v, addr);
+        aux.landHere(v, addr);
 
         // Every index must have as many entries as its table.
         var k: i32 = if (obj_tab != null) 1 else 0;
-        _ = aux.loadString(v, 2, "wrong # of entries in index ");
+        _ = aux.loadString(v, ck.text.int(), "wrong # of entries in index ");
         it = tbls.iterator();
         while (it.next()) |t| {
             if (tableSkipIntegrityCheck(t, obj_tab)) continue;
@@ -1534,11 +1565,11 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
             var idx_opt = t.index;
             while (idx_opt) |idx| : (idx_opt = idx.next) {
                 if (idx.part_idx_where == null) {
-                    addr = aux.addOp3(v, OP.Eq, 8 + k, 0, 8 + i_tab);
-                    _ = aux.loadString(v, 4, idx.name);
-                    _ = aux.addOp3(v, OP.Concat, 4, 2, 3);
+                    addr = aux.emit(v, .Eq, .{ ck.counts.at(k), 0, ck.counts.at(i_tab) });
+                    _ = aux.loadString(v, ck.part.int(), idx.name);
+                    _ = aux.emit(v, .Concat, .{ ck.part, ck.text, ck.msg });
                     _ = integrityCheckResultRow(v);
-                    aux.jumpHere(v, addr);
+                    aux.landHere(v, addr);
                 }
                 k += 1;
             }
@@ -1565,11 +1596,11 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
             const pv = vt.vtab orelse continue;
             if (pv.module.i_version < 4) continue;
             if (pv.module.x_integrity == null) continue;
-            _ = aux.addOp3(v, OP.VCheck, @intCast(i), 3, @intFromBool(is_quick));
+            _ = aux.emit(v, .VCheck, .{ i, ck.msg, is_quick });
             aux.appendP4(v, .{ .tableref = t });
-            const a1 = aux.addOp1(v, OP.IsNull, 3);
+            const a1 = aux.emit(v, .IsNull, .{ck.msg});
             _ = integrityCheckResultRow(v);
-            aux.jumpHere(v, a1);
+            aux.landHere(v, a1);
         }
     }
 
@@ -1598,25 +1629,28 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
 fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void {
     const db = p.db;
     var pk: ?*Index = null;
-    var r2: i32 = 0;
+    // The key of the previous row of a WITHOUT ROWID table.
+    var r2: Reg = .none;
     if (!is_quick and !t.hasRowid()) {
         pk = build.primaryKeyIndex(t).?;
-        r2 = expr.getTempRange(p, pk.?.n_key_col);
-        _ = aux.addOp3(v, OP.Null, 1, r2, r2 + pk.?.n_key_col - 1);
+        r2 = .from(expr.getTempRange(p, pk.?.n_key_col));
+        _ = aux.emit(v, .Null, .{ 1, r2, r2.at(@as(i32, pk.?.n_key_col) - 1) });
     }
     var i_data_cur: i32 = undefined;
     var i_idx_cur: i32 = undefined;
     _ = insert.openTableAndIndices(p, t, OP.OpenRead, 0, 1, null, &i_data_cur, &i_idx_cur);
+    const data_cur: Cursor = .from(i_data_cur);
+    const idx_cur: Cursor = .from(i_idx_cur);
     // Register 7 counts the rows, 8+j the entries of the j-th index.
-    _ = aux.addOp2(v, OP.Integer, 0, 7);
+    _ = aux.emit(v, .Integer, .{ 0, ck.rows });
     var j: i32 = 0;
     var idx_opt = t.index;
     while (idx_opt) |idx| : ({
         idx_opt = idx.next;
         j += 1;
-    }) _ = aux.addOp2(v, OP.Integer, 0, 8 + j);
-    _ = aux.addOp2(v, OP.Rewind, i_data_cur, 0);
-    const loop_top = aux.addOp2(v, OP.AddImm, 7, 1);
+    }) _ = aux.emit(v, .Integer, .{ 0, ck.counts.at(j) });
+    _ = aux.emit(v, .Rewind, .{data_cur});
+    const loop_top = aux.emit(v, .AddImm, .{ ck.rows, 1 });
 
     // Fetch the right-most column, which parses and sanity-checks the
     // whole record header, and fills the column cache OP_IsType uses.
@@ -1631,21 +1665,21 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         mx_col = @as(i32, build.primaryKeyIndex(t).?.n_column) - 1;
     }
     if (mx_col >= 0) {
-        _ = aux.addOp3(v, OP.Column, i_data_cur, mx_col, 3);
-        aux.typeofColumn(v, 3);
+        _ = aux.emit(v, .Column, .{ data_cur, mx_col, ck.msg });
+        aux.typeofColumn(v, ck.msg.int());
     }
 
     if (pk) |pki| {
         // The keys of a WITHOUT ROWID table must be in order.
         const n_key: i32 = pki.n_key_col;
-        const a1 = aux.addOp4Int(v, OP.IdxGT, i_data_cur, 0, r2, n_key);
-        _ = aux.addOp1(v, OP.IsNull, r2);
+        const a1 = aux.emitInt(v, .IdxGT, .{ data_cur, 0, r2 }, n_key);
+        _ = aux.emit(v, .IsNull, .{r2});
         const msg = try build.mprintf(p, "row not in PRIMARY KEY order for %s", &.{.{ .str = t.name }});
-        _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, msg);
+        _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
         _ = integrityCheckResultRow(v);
-        aux.jumpHere(v, a1);
-        aux.jumpHere(v, a1 + 1);
-        for (0..pki.n_key_col) |jj| ec.codeLoadIndexColumn(p, pki, i_data_cur, jj, r2 + @as(i32, @intCast(jj)));
+        aux.landHere(v, a1);
+        aux.landHere(v, a1.plus(1));
+        for (0..pki.n_key_col) |jj| ec.codeLoadIndexColumn(p, pki, data_cur.int(), jj, r2.at(jj).int());
     }
 
     // The datatype of every column:
@@ -1661,14 +1695,15 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         const do_type_check = if (strict) col.e_ctype.int() > int.COLTYPE.ANY.int() else col.affinity > int.Aff.blob;
         if (col.not_null == .None and !do_type_check) continue;
 
-        // The operands of OP_IsType.
+        // The operands of OP_IsType: P1 is a cursor and P3 a column of it,
+        // or P1 is -1 and P3 a register.
         var p4: i32 = vi.SQLITE_NULL;
         var p1: i32 = undefined;
         var p3: i32 = undefined;
         if (col.col_flags.VIRTUAL) {
-            ec.codeGetColumnOfTable(v, t, i_data_cur, jc, 3);
+            ec.codeGetColumnOfTable(v, t, data_cur.int(), jc, ck.msg.int());
             p1 = -1;
-            p3 = 3;
+            p3 = ck.msg.int();
         } else {
             if (col.i_dflt != 0) {
                 const dflt = update.valueFromExpr(v, build.columnExpr(t, col), col.affinity) catch return error.OutOfMemory;
@@ -1677,7 +1712,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                     mem.release(m);
                 }
             }
-            p1 = i_data_cur;
+            p1 = data_cur.int();
             if (!t.hasRowid()) {
                 p3 = build.tableColumnToIndex(build.primaryKeyIndex(t).?, jc);
             } else {
@@ -1685,12 +1720,12 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             }
         }
 
-        const label_error = aux.makeLabel(p);
-        const label_ok = aux.makeLabel(p);
+        const label_error = aux.newLabel(p);
+        const label_ok = aux.newLabel(p);
         if (col.not_null != .None) {
             // (1) NOT NULL columns may not hold NULL.
-            const jmp2 = aux.addOp4Int(v, OP.IsType, p1, label_ok, p3, p4);
-            var jmp3: i32 = undefined;
+            const jmp2 = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
+            var jmp3: Addr = undefined;
             if (p1 < 0) {
                 aux.changeP5(v, 0x0f); // INT, REAL, TEXT or BLOB
                 jmp3 = jmp2;
@@ -1698,16 +1733,16 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 aux.changeP5(v, 0x0d); // INT, TEXT or BLOB
                 // OP_IsType takes a NaN stored as REAL for a REAL, but it
                 // reads as NULL: load the value to be sure.
-                _ = aux.addOp3(v, OP.Column, p1, p3, 3);
-                update.columnDefault(v, t, jc, 3);
-                jmp3 = aux.addOp2(v, OP.NotNull, 3, label_ok);
+                _ = aux.emit(v, .Column, .{ Cursor.from(p1), p3, ck.msg });
+                update.columnDefault(v, t, jc, ck.msg.int());
+                jmp3 = aux.emit(v, .NotNull, .{ ck.msg, label_ok });
             }
             const msg = try build.mprintf(p, "NULL value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
-            _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, msg);
+            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
             if (do_type_check) {
-                _ = aux.goto_(v, label_error);
-                aux.jumpHere(v, jmp2);
-                aux.jumpHere(v, jmp3);
+                _ = aux.emit(v, .Goto, .{ 0, label_error });
+                aux.landHere(v, jmp2);
+                aux.landHere(v, jmp3);
             }
         }
         if (strict and do_type_check) {
@@ -1720,51 +1755,51 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 0x13, // REAL
                 0x14, // TEXT
             };
-            _ = aux.addOp4Int(v, OP.IsType, p1, label_ok, p3, p4);
+            _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
             aux.changeP5(v, std_type_mask[col.e_ctype.stdTypeIndex()]);
             const msg = try build.mprintf(p, "non-%s value in %s.%s", &.{
                 .{ .str = build.std_type[col.e_ctype.stdTypeIndex()] },
                 .{ .str = t.name },
                 .{ .str = col.name() },
             });
-            _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, msg);
+            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
         } else if (!strict and col.affinity == int.Aff.text) {
             // (3) TEXT columns hold NULL, TEXT or BLOB.
-            _ = aux.addOp4Int(v, OP.IsType, p1, label_ok, p3, p4);
+            _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
             aux.changeP5(v, 0x1c); // NULL, TEXT or BLOB
             const msg = try build.mprintf(p, "NUMERIC value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
-            _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, msg);
+            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
         } else if (!strict and col.affinity >= int.Aff.numeric) {
             // (4) Numeric columns hold no TEXT that looks like a number.
-            _ = aux.addOp4Int(v, OP.IsType, p1, label_ok, p3, p4);
+            _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
             aux.changeP5(v, 0x1b); // NULL, INT, FLOAT or BLOB
-            if (p1 >= 0) ec.codeGetColumnOfTable(v, t, i_data_cur, jc, 3);
-            _ = aux.addOp4(v, OP.Affinity, 3, 1, 0, .{ .z = "C" });
-            _ = aux.addOp4Int(v, OP.IsType, -1, label_ok, 3, p4);
+            if (p1 >= 0) ec.codeGetColumnOfTable(v, t, data_cur.int(), jc, ck.msg.int());
+            _ = aux.emit4(v, .Affinity, .{ ck.msg, 1 }, .{ .z = "C" });
+            _ = aux.emitInt(v, .IsType, .{ -1, label_ok, ck.msg.int() }, p4);
             aux.changeP5(v, 0x1c); // NULL, TEXT or BLOB
             const msg = try build.mprintf(p, "TEXT value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
-            _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, msg);
+            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
         }
-        aux.resolveLabel(v, label_error);
+        aux.place(v, label_error);
         _ = integrityCheckResultRow(v);
-        aux.resolveLabel(v, label_ok);
+        aux.place(v, label_ok);
     }
 
     // CHECK constraints.
     if (t.check) |checks| if (!db.flags.IgnoreChecks) {
         const check = (try expr.listDup(p.arena, checks)).?;
-        const addr_ck_fault = aux.makeLabel(p);
-        const addr_ck_ok = aux.makeLabel(p);
-        p.i_self_tab = i_data_cur + 1;
+        const ck_fault = aux.newLabel(p);
+        const ck_ok = aux.newLabel(p);
+        p.i_self_tab = data_cur.int() + 1;
         var kk = check.len() - 1;
-        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, addr_ck_fault, 0);
-        ec.exprIfTrue(p, check.at(0).expr, addr_ck_ok, vi.SQLITE_JUMPIFNULL);
-        aux.resolveLabel(v, addr_ck_fault);
+        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, ck_fault.int(), 0);
+        ec.exprIfTrue(p, check.at(0).expr, ck_ok.int(), vi.SQLITE_JUMPIFNULL);
+        aux.place(v, ck_fault);
         p.i_self_tab = 0;
         const msg = try build.mprintf(p, "CHECK constraint failed in %s", &.{.{ .str = t.name }});
-        _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, msg);
+        _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
         _ = integrityCheckResultRow(v);
-        aux.resolveLabel(v, addr_ck_ok);
+        aux.place(v, ck_ok);
     };
 
     if (!is_quick) {
@@ -1778,88 +1813,90 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             j += 1;
         }) {
             if (pk == idx) continue;
-            const ck_uniq = aux.makeLabel(p);
+            const ck_uniq = aux.newLabel(p);
             var jmp3: i32 = 0;
-            r1 = delete.generateIndexKey(p, idx, i_data_cur, 0, false, &jmp3, prior, r1);
+            r1 = delete.generateIndexKey(p, idx, data_cur.int(), 0, false, &jmp3, prior, r1);
             prior = idx;
+            // The key of the row in this index, and the cursor of the index.
+            const key: Reg = .from(r1);
+            const cur = idx_cur.at(j);
             const n_column: i32 = idx.n_column;
             // Count the entry.
-            _ = aux.addOp2(v, OP.AddImm, 8 + j, 1);
+            _ = aux.emit(v, .AddImm, .{ ck.counts.at(j), 1 });
             // The index must hold an entry for the row.
-            _ = aux.addOp4Int(v, OP.Found, i_idx_cur + j, ck_uniq, r1, n_column);
-            const jmp2 = aux.addOp3(v, OP.IFindKey, i_idx_cur + j, ck_uniq, r1);
-            aux.changeP4(v, -1, .{ .index = idx });
+            _ = aux.emitInt(v, .Found, .{ cur, ck_uniq, key }, n_column);
+            const jmp2 = aux.emit4(v, .IFindKey, .{ cur, ck_uniq, key }, .{ .index = idx });
             const imprecise = try build.mprintf(p, "index %s stores an imprecise floating-point value for row ", &.{.{ .str = idx.name }});
-            _ = aux.addOp4Str(v, OP.String8, 0, 3, 0, imprecise);
-            _ = aux.addOp3(v, OP.Concat, 7, 3, 3);
+            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, imprecise);
+            _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
             _ = integrityCheckResultRow(v);
-            _ = aux.addOp2(v, OP.Goto, 0, ck_uniq);
+            _ = aux.emit(v, .Goto, .{ 0, ck_uniq });
 
-            aux.jumpHere(v, jmp2);
-            _ = aux.loadString(v, 3, "row ");
-            _ = aux.addOp3(v, OP.Concat, 7, 3, 3);
-            _ = aux.loadString(v, 4, " missing from index ");
-            _ = aux.addOp3(v, OP.Concat, 4, 3, 3);
-            const jmp5 = aux.loadString(v, 4, idx.name);
-            _ = aux.addOp3(v, OP.Concat, 4, 3, 3);
+            aux.landHere(v, jmp2);
+            _ = aux.loadString(v, ck.msg.int(), "row ");
+            _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
+            _ = aux.loadString(v, ck.part.int(), " missing from index ");
+            _ = aux.emit(v, .Concat, .{ ck.part, ck.msg, ck.msg });
+            const jmp5: Addr = .from(aux.loadString(v, ck.part.int(), idx.name));
+            _ = aux.emit(v, .Concat, .{ ck.part, ck.msg, ck.msg });
             const jmp4 = integrityCheckResultRow(v);
-            aux.resolveLabel(v, ck_uniq);
+            aux.place(v, ck_uniq);
 
             // OP_IdxRowid takes the rowid from the end of the entry, which
             // only works if nothing follows it.
             if (t.hasRowid()) {
-                _ = aux.addOp2(v, OP.IdxRowid, i_idx_cur + j, 3);
-                const jmp7 = aux.addOp3(v, OP.Eq, 3, 0, r1 + n_column - 1);
-                _ = aux.loadString(v, 3, "rowid not at end-of-record for row ");
-                _ = aux.addOp3(v, OP.Concat, 7, 3, 3);
-                _ = aux.loadString(v, 4, " of index ");
-                _ = aux.goto_(v, jmp5 - 1);
-                aux.jumpHere(v, jmp7);
+                _ = aux.emit(v, .IdxRowid, .{ cur, ck.msg });
+                const jmp7 = aux.emit(v, .Eq, .{ ck.msg, 0, key.at(n_column - 1) });
+                _ = aux.loadString(v, ck.msg.int(), "rowid not at end-of-record for row ");
+                _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
+                _ = aux.loadString(v, ck.part.int(), " of index ");
+                _ = aux.emit(v, .Goto, .{ 0, jmp5.plus(-1) });
+                aux.landHere(v, jmp7);
             }
 
             // Columns with a non-BINARY collation must still hold exactly
             // the text of the table.
-            var label6: i32 = 0;
+            var label6: ?Label = null;
             for (0..idx.n_key_col) |kk| {
                 if (idx.coll[kk].ptr == coll.str_binary.ptr) continue;
-                if (label6 == 0) label6 = aux.makeLabel(p);
-                _ = aux.addOp3(v, OP.Column, i_idx_cur + j, @intCast(kk), 3);
-                _ = aux.addOp3(v, OP.Ne, 3, label6, r1 + @as(i32, @intCast(kk)));
+                if (label6 == null) label6 = aux.newLabel(p);
+                _ = aux.emit(v, .Column, .{ cur, kk, ck.msg });
+                _ = aux.emit(v, .Ne, .{ ck.msg, label6.?, key.at(kk) });
             }
-            if (label6 != 0) {
-                const jmp6 = aux.addOp0(v, OP.Goto);
-                aux.resolveLabel(v, label6);
-                _ = aux.loadString(v, 3, "row ");
-                _ = aux.addOp3(v, OP.Concat, 7, 3, 3);
-                _ = aux.loadString(v, 4, " values differ from index ");
-                _ = aux.goto_(v, jmp5 - 1);
-                aux.jumpHere(v, jmp6);
+            if (label6) |differ| {
+                const jmp6 = aux.emit(v, .Goto, .{});
+                aux.place(v, differ);
+                _ = aux.loadString(v, ck.msg.int(), "row ");
+                _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
+                _ = aux.loadString(v, ck.part.int(), " values differ from index ");
+                _ = aux.emit(v, .Goto, .{ 0, jmp5.plus(-1) });
+                aux.landHere(v, jmp6);
             }
 
             // A UNIQUE index holds one entry per key, unless the key has a
             // NULL.
             if (idx.isUnique()) {
-                const uniq_ok = aux.makeLabel(p);
+                const uniq_ok = aux.newLabel(p);
                 for (0..idx.n_key_col) |kk| {
                     const i_col = idx.ai_column[kk];
                     if (i_col >= 0 and t.cols[@intCast(i_col)].not_null != .None) continue;
-                    _ = aux.addOp2(v, OP.IsNull, r1 + @as(i32, @intCast(kk)), uniq_ok);
+                    _ = aux.emit(v, .IsNull, .{ key.at(kk), uniq_ok });
                 }
-                const jmp6 = aux.addOp1(v, OP.Next, i_idx_cur + j);
-                _ = aux.goto_(v, uniq_ok);
-                aux.jumpHere(v, jmp6);
-                _ = aux.addOp4Int(v, OP.IdxGT, i_idx_cur + j, uniq_ok, r1, idx.n_key_col);
-                _ = aux.loadString(v, 3, "non-unique entry in index ");
-                _ = aux.goto_(v, jmp5);
-                aux.resolveLabel(v, uniq_ok);
+                const jmp6 = aux.emit(v, .Next, .{cur});
+                _ = aux.emit(v, .Goto, .{ 0, uniq_ok });
+                aux.landHere(v, jmp6);
+                _ = aux.emitInt(v, .IdxGT, .{ cur, uniq_ok, key }, idx.n_key_col);
+                _ = aux.loadString(v, ck.msg.int(), "non-unique entry in index ");
+                _ = aux.emit(v, .Goto, .{ 0, jmp5 });
+                aux.place(v, uniq_ok);
             }
-            aux.jumpHere(v, jmp4);
+            aux.landHere(v, jmp4);
             delete.resolvePartIdxLabel(p, jmp3);
         }
     }
-    _ = aux.addOp2(v, OP.Next, i_data_cur, loop_top);
-    aux.jumpHere(v, loop_top - 1);
-    if (pk) |pki| expr.releaseTempRange(p, r2, pki.n_key_col);
+    _ = aux.emit(v, .Next, .{ data_cur, loop_top });
+    aux.landHere(v, loop_top.plus(-1));
+    if (pk) |pki| expr.releaseTempRange(p, r2.int(), pki.n_key_col);
 }
 
 // ===================================================== pragma virtual tables

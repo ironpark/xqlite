@@ -14,6 +14,7 @@ const util = @import("../sql/util.zig");
 const main_mod = @import("../sql/main.zig");
 const btree = @import("xqlite_storage").btree;
 const opcodes = vi.opcodes;
+pub const operand = @import("operand.zig");
 
 const Vdbe = vi.Vdbe;
 const Op = vi.Op;
@@ -85,6 +86,35 @@ pub const PREPARE_DONT_LOG: u8 = 0x10;
 pub const PREPARE_FROM_DDL: u8 = 0x20;
 pub const PREPARE_SAVESQL: u8 = 0x80;
 pub const PREPARE_MASK: u8 = 0x3f;
+
+/// Append the instruction `op` with the operands `args` (P1, P2 and P3,
+/// those at the end left out being 0), each of the type operand.kinds()
+/// gives it: a Reg, a Cursor, a Label or Addr to jump to, or a number.
+/// Returns its address.
+pub fn emit(v: *Vdbe, comptime op: OP, args: anytype) operand.Addr {
+    const kinds = comptime operand.kinds(op);
+    if (args.len > 3) @compileError("more than P1, P2 and P3");
+    var p: [3]i32 = .{ 0, 0, 0 };
+    inline for (args, 0..) |arg, n| p[n] = operand.value(op, n, kinds[n], arg);
+    return .from(addOp3(v, op, p[0], p[1], p[2]));
+}
+
+/// emit() with P4.
+pub fn emit4(v: *Vdbe, comptime op: OP, args: anytype, p4: P4) operand.Addr {
+    const addr = emit(v, op, args);
+    changeP4(v, addr.int(), p4);
+    return addr;
+}
+
+/// A new label (sqlite3VdbeMakeLabel()).
+pub fn newLabel(p: *Parse) operand.Label {
+    return .from(makeLabel(p));
+}
+
+/// The next instruction is where `label` is (sqlite3VdbeResolveLabel()).
+pub fn place(v: *Vdbe, label: operand.Label) void {
+    resolveLabel(v, label.int());
+}
 
 /// Port of sqlite3VdbeAddOp3(): append an instruction; returns its
 /// address.

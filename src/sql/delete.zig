@@ -31,6 +31,10 @@ const Index = int.Index;
 const Trigger = int.Trigger;
 const NameContext = int.NameContext;
 const Vdbe = vi.Vdbe;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Label = aux.operand.Label;
+const Addr = aux.operand.Addr;
 const Oom = int.Oom;
 const OP = vi.OP;
 const OPFLAG = vi.OPFLAG;
@@ -44,8 +48,8 @@ const ONEPASS = where_mod.ONEPASS;
 /// Port of sqlite3CodeChangeCount(): return the number of rows changed
 /// as the statement's result.
 pub fn codeChangeCount(v: *Vdbe, reg_counter: i32, col_name: [:0]const u8) void {
-    _ = aux.addOp0(v, OP.FkCheck);
-    _ = aux.addOp2(v, OP.ResultRow, reg_counter, 1);
+    _ = aux.emit(v, .FkCheck, .{});
+    _ = aux.emit(v, .ResultRow, .{ Reg.from(reg_counter), 1 });
     aux.setNumCols(v, 1);
     aux.setColName(v, 0, vi.COLNAME_NAME, col_name);
 }
@@ -111,7 +115,8 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     defer auth.contextPop(&s_context);
 
     // Cursors for the table and its indexes.
-    const i_tab_cur = p.n_tab;
+    const tab_cur: Cursor = .from(p.n_tab);
+    const i_tab_cur = tab_cur.int();
     tab_list.at(0).i_cursor = i_tab_cur;
     p.n_tab += 1;
     var n_idx: usize = 0;
@@ -141,25 +146,29 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     var nc: NameContext = .{ .parse = p, .src_list = tab_list };
     resolve.resolveExprNames(&nc, where) catch return;
 
-    var mem_cnt: i32 = 0;
+    // The register that counts the rows deleted, if they are counted.
+    var mem_cnt: Reg = .none;
     if (db.flags.CountRows and p.nested == 0 and p.trigger_tab == null and !p.returning) {
         p.n_mem += 1;
-        mem_cnt = p.n_mem;
-        _ = aux.addOp2(v, OP.Integer, 0, mem_cnt);
+        mem_cnt = .from(p.n_mem);
+        _ = aux.emit(v, .Integer, .{ 0, mem_cnt });
     }
 
     if (rcauth == auth.OK and where == null and !b_complex and !t.isVirtual()) {
         // Without a WHERE clause the b-trees are just cleared.
         build.tableLock(p, @intCast(i_db), t.tnum, true, t.name);
+        // OP_Clear adds the rows it removes to r[P3] if P3 is positive.
+        const clear_count: i32 = if (mem_cnt.isNone()) -1 else mem_cnt.int();
         if (t.hasRowid()) {
-            _ = aux.addOp4Str(v, OP.Clear, @intCast(t.tnum), @intCast(i_db), if (mem_cnt != 0) mem_cnt else -1, t.name);
+            const clear = aux.emit(v, .Clear, .{ t.tnum, i_db, clear_count });
+            aux.changeP4Str(v, clear.int(), t.name);
         }
         idx_opt = t.index;
         while (idx_opt) |ix| : (idx_opt = ix.next) {
             if (ix.isPrimaryKey() and !t.hasRowid()) {
-                _ = aux.addOp3(v, OP.Clear, @intCast(ix.tnum), @intCast(i_db), if (mem_cnt != 0) mem_cnt else -1);
+                _ = aux.emit(v, .Clear, .{ ix.tnum, i_db, clear_count });
             } else {
-                _ = aux.addOp2(v, OP.Clear, @intCast(ix.tnum), @intCast(i_db));
+                _ = aux.emit(v, .Clear, .{ ix.tnum, i_db });
             }
         }
     } else {
@@ -171,22 +180,22 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         // WITHOUT ROWID table an ephemeral table of PRIMARY KEYs.
         var pk: ?*Index = null;
         var n_pk: i16 = 1;
-        var i_pk: i32 = 0;
-        var i_eph_cur: i32 = 0;
-        var i_row_set: i32 = 0;
-        var addr_eph_open: i32 = 0;
+        var pk_reg: Reg = .none;
+        var eph_cur: Cursor = undefined;
+        var row_set: Reg = .none;
+        var addr_eph_open: ?Addr = null;
         if (t.hasRowid()) {
             p.n_mem += 1;
-            i_row_set = p.n_mem;
-            _ = aux.addOp2(v, OP.Null, 0, i_row_set);
+            row_set = .from(p.n_mem);
+            _ = aux.emit(v, .Null, .{ 0, row_set });
         } else {
             pk = build.primaryKeyIndex(t);
             n_pk = @intCast(pk.?.n_key_col);
-            i_pk = p.n_mem + 1;
+            pk_reg = .from(p.n_mem + 1);
             p.n_mem += n_pk;
-            i_eph_cur = p.n_tab;
+            eph_cur = .from(p.n_tab);
             p.n_tab += 1;
-            addr_eph_open = aux.addOp2(v, OP.OpenEphemeral, i_eph_cur, n_pk);
+            addr_eph_open = aux.emit(v, .OpenEphemeral, .{ eph_cur, n_pk });
             aux.setP4KeyInfo(p, pk.?);
         }
 
@@ -195,25 +204,26 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         var ai_cur_one_pass: [2]i32 = .{ -1, -1 };
         const e_one_pass = where_mod.okOnePass(w, &ai_cur_one_pass);
         if (e_one_pass != ONEPASS.SINGLE) main_mod.multiWrite(p);
-        if (where_mod.usesDeferredSeek(w)) _ = aux.addOp1(v, OP.FinishSeek, i_tab_cur);
-        if (mem_cnt != 0) _ = aux.addOp2(v, OP.AddImm, mem_cnt, 1);
+        if (where_mod.usesDeferredSeek(w)) _ = aux.emit(v, .FinishSeek, .{tab_cur});
+        if (!mem_cnt.isNone()) _ = aux.emit(v, .AddImm, .{ mem_cnt, 1 });
 
         // The key of the current row.
-        var i_key: i32 = undefined;
+        var key: Reg = undefined;
         if (pk) |k| {
             for (0..k.n_key_col) |i| {
-                ec.codeGetColumnOfTable(v, t, i_tab_cur, k.ai_column[i], i_pk + @as(i32, @intCast(i)));
+                ec.codeGetColumnOfTable(v, t, i_tab_cur, k.ai_column[i], pk_reg.at(i).int());
             }
-            i_key = i_pk;
+            key = pk_reg;
         } else {
             p.n_mem += 1;
-            i_key = p.n_mem;
-            ec.codeGetColumnOfTable(v, t, i_tab_cur, -1, i_key);
+            key = .from(p.n_mem);
+            ec.codeGetColumnOfTable(v, t, i_tab_cur, -1, key.int());
         }
 
         var n_key: i16 = undefined;
         var to_open: ?[]bool = null;
-        var addr_bypass: i32 = 0;
+        // One pass: where to go when the row is gone already.
+        var bypass: Label = undefined;
         if (e_one_pass != ONEPASS.OFF) {
             // One pass: the key stays in its registers.
             n_key = n_pk;
@@ -223,18 +233,19 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             if (ai_cur_one_pass[0] >= 0) o[@intCast(ai_cur_one_pass[0] - i_tab_cur)] = false;
             if (ai_cur_one_pass[1] >= 0) o[@intCast(ai_cur_one_pass[1] - i_tab_cur)] = false;
             to_open = o;
-            if (addr_eph_open != 0) _ = aux.changeToNoop(v, addr_eph_open);
-            addr_bypass = aux.makeLabel(p);
+            if (addr_eph_open) |a| _ = aux.changeToNoop(v, a.int());
+            bypass = aux.newLabel(p);
         } else {
             if (pk) |k| {
                 p.n_mem += 1;
-                i_key = p.n_mem;
+                key = .from(p.n_mem);
                 n_key = 0;
-                _ = aux.addOp4Str(v, OP.MakeRecord, i_pk, n_pk, i_key, insert.indexAffinityPrefix(p, k, @intCast(n_pk)));
-                _ = aux.addOp4Int(v, OP.IdxInsert, i_eph_cur, i_key, i_pk, n_pk);
+                const rec = aux.emit(v, .MakeRecord, .{ pk_reg, n_pk, key });
+                aux.changeP4Str(v, rec.int(), insert.indexAffinityPrefix(p, k, @intCast(n_pk)));
+                _ = aux.emit4(v, .IdxInsert, .{ eph_cur, key, pk_reg }, .{ .int32 = n_pk });
             } else {
                 n_key = 1;
-                _ = aux.addOp2(v, OP.RowSetAdd, i_row_set, i_key);
+                _ = aux.emit(v, .RowSetAdd, .{ row_set, key });
             }
             where_mod.whereEnd(w);
         }
@@ -242,27 +253,27 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         // Open the table and its indexes for writing (a view only fires
         // its INSTEAD OF triggers).
         if (!is_view) {
-            var i_addr_once: i32 = 0;
-            if (e_one_pass == ONEPASS.MULTI) i_addr_once = aux.addOp0(v, OP.Once);
+            // With several rows in one pass, the cursors are opened once.
+            const once: ?Addr = if (e_one_pass == ONEPASS.MULTI) aux.emit(v, .Once, .{}) else null;
             _ = insert.openTableAndIndices(p, t, OP.OpenWrite, OPFLAG.FORDELETE, i_tab_cur, to_open, &i_data_cur, &i_idx_cur);
-            if (e_one_pass == ONEPASS.MULTI) aux.jumpHereOrPopInst(v, i_addr_once);
+            if (once) |a| aux.jumpHereOrPopInst(v, a.int());
         }
 
         // The loop over the keys found.
-        var addr_loop: i32 = 0;
+        var addr_loop: Addr = undefined;
         if (e_one_pass != ONEPASS.OFF) {
             if (!t.isVirtual() and to_open.?[@intCast(i_data_cur - i_tab_cur)]) {
-                _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, addr_bypass, i_key, n_key);
+                _ = aux.emit4(v, .NotFound, .{ Cursor.from(i_data_cur), bypass, key }, .{ .int32 = n_key });
             }
         } else if (pk != null) {
-            addr_loop = aux.addOp1(v, OP.Rewind, i_eph_cur);
+            addr_loop = aux.emit(v, .Rewind, .{eph_cur});
             if (t.isVirtual()) {
-                _ = aux.addOp3(v, OP.Column, i_eph_cur, 0, i_key);
+                _ = aux.emit(v, .Column, .{ eph_cur, 0, key });
             } else {
-                _ = aux.addOp2(v, OP.RowData, i_eph_cur, i_key);
+                _ = aux.emit(v, .RowData, .{ eph_cur, key });
             }
         } else {
-            addr_loop = aux.addOp3(v, OP.RowSetRead, i_row_set, 0, i_key);
+            addr_loop = aux.emit(v, .RowSetRead, .{ row_set, 0, key });
         }
 
         if (t.isVirtual()) {
@@ -270,29 +281,29 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             std.debug.assert(e_one_pass == ONEPASS.OFF or e_one_pass == ONEPASS.SINGLE);
             main_mod.mayAbort(p);
             if (e_one_pass == ONEPASS.SINGLE) {
-                _ = aux.addOp1(v, OP.Close, i_tab_cur);
+                _ = aux.emit(v, .Close, .{tab_cur});
                 if (p.toplevel == null) p.is_multi_write = false;
             }
-            _ = aux.addOp4(v, OP.VUpdate, 0, 1, i_key, build.vtabP4(db, t));
+            _ = aux.emit4(v, .VUpdate, .{ 0, 1, key }, build.vtabP4(db, t));
             aux.changeP5(v, OE.Abort.int());
         } else {
-            generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, i_key, n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
+            generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, key.int(), n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
         }
 
         if (e_one_pass != ONEPASS.OFF) {
-            aux.resolveLabel(v, addr_bypass);
+            aux.place(v, bypass);
             where_mod.whereEnd(w);
         } else if (pk != null) {
-            _ = aux.addOp2(v, OP.Next, i_eph_cur, addr_loop + 1);
-            aux.jumpHere(v, addr_loop);
+            _ = aux.emit(v, .Next, .{ eph_cur, addr_loop.plus(1) });
+            aux.jumpHere(v, addr_loop.int());
         } else {
-            _ = aux.goto_(v, addr_loop);
-            aux.jumpHere(v, addr_loop);
+            _ = aux.emit(v, .Goto, .{ 0, addr_loop });
+            aux.jumpHere(v, addr_loop.int());
         }
     }
 
     if (p.nested == 0 and p.trigger_tab == null) insert.autoincrementEnd(p);
-    if (mem_cnt != 0) codeChangeCount(v, mem_cnt, "rows deleted");
+    if (!mem_cnt.isNone()) codeChangeCount(v, mem_cnt.int(), "rows deleted");
 }
 
 /// Port of sqlite3MaterializeView(): code the rows of view `view` that
@@ -333,13 +344,23 @@ pub fn generateRowDelete(
     i_idx_no_seek_arg: i32,
 ) void {
     const v = p.vdbe.?;
+    const data_cur: Cursor = .from(i_data_cur);
+    const pk_reg: Reg = .from(i_pk);
     var i_idx_no_seek = i_idx_no_seek_arg;
     var i_old: i32 = 0;
 
     // Seek the row; it may be gone already (deleted by a trigger).
-    const i_label = aux.makeLabel(p);
-    const op_seek: OP = if (t.hasRowid()) OP.NotExists else OP.NotFound;
-    if (e_mode == ONEPASS.OFF) _ = aux.addOp4Int(v, op_seek, i_data_cur, i_label, i_pk, n_pk);
+    const gone = aux.newLabel(p);
+    const i_label = gone.int();
+    const seek = struct {
+        fn code(vdbe: *Vdbe, tab: *Table, cur: Cursor, miss: Label, key: Reg, n_key: i16) void {
+            _ = if (tab.hasRowid())
+                aux.emit4(vdbe, .NotExists, .{ cur, miss, key }, .{ .int32 = n_key })
+            else
+                aux.emit4(vdbe, .NotFound, .{ cur, miss, key }, .{ .int32 = n_key });
+        }
+    }.code;
+    if (e_mode == ONEPASS.OFF) seek(v, t, data_cur, gone, pk_reg, n_pk);
 
     // The OLD.* registers of triggers and foreign keys.
     if (fkey.fkRequired(p, t, null, false) != 0 or trig != null) {
@@ -347,7 +368,7 @@ pub fn generateRowDelete(
         mask |= fkey.fkOldmask(p, t);
         i_old = p.n_mem + 1;
         p.n_mem += 1 + @as(i32, @intCast(t.cols.len));
-        _ = aux.addOp2(v, OP.Copy, i_pk, i_old);
+        _ = aux.emit(v, .Copy, .{ pk_reg, Reg.from(i_old) });
         for (0..t.cols.len) |i_col| {
             if (mask == 0xffffffff or (i_col <= 31 and mask & (@as(u32, 1) << @intCast(i_col)) != 0)) {
                 const kk = build.tableColumnToStorage(t, @intCast(i_col));
@@ -358,7 +379,7 @@ pub fn generateRowDelete(
         trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_BEFORE, t, i_old, onconf, i_label);
         // BEFORE triggers may have moved the cursor or deleted the row.
         if (addr_start < aux.currentAddr(v)) {
-            _ = aux.addOp4Int(v, op_seek, i_data_cur, i_label, i_pk, n_pk);
+            seek(v, t, data_cur, gone, pk_reg, n_pk);
             i_idx_no_seek = -1;
         }
         fkey.fkCheck(p, t, i_old, 0, null, false);
@@ -369,17 +390,17 @@ pub fn generateRowDelete(
     if (!t.isView()) {
         var p5: u16 = 0;
         generateRowIndexDelete(p, t, i_data_cur, i_idx_cur, null, i_idx_no_seek);
-        _ = aux.addOp2(v, OP.Delete, i_data_cur, if (count) OPFLAG.NCHANGE else 0);
+        _ = aux.emit(v, .Delete, .{ data_cur, if (count) OPFLAG.NCHANGE else 0 });
         if (p.nested == 0 or std.ascii.eqlIgnoreCase(t.name, "sqlite_stat1")) aux.appendP4(v, .{ .table = t });
         if (e_mode != ONEPASS.OFF) aux.changeP5(v, OPFLAG.AUXDELETE);
-        if (i_idx_no_seek >= 0 and i_idx_no_seek != i_data_cur) _ = aux.addOp1(v, OP.Delete, i_idx_no_seek);
+        if (i_idx_no_seek >= 0 and i_idx_no_seek != i_data_cur) _ = aux.emit(v, .Delete, .{Cursor.from(i_idx_no_seek)});
         if (e_mode == ONEPASS.MULTI) p5 |= OPFLAG.SAVEPOSITION;
         aux.changeP5(v, p5);
     }
 
     fkey.fkActions(p, t, null, i_old, null, false);
     if (trig != null) trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_AFTER, t, i_old, onconf, i_label);
-    aux.resolveLabel(v, i_label);
+    aux.place(v, gone);
 }
 
 /// Port of sqlite3GenerateRowIndexDelete(): delete the index entries of
@@ -403,8 +424,7 @@ pub fn generateRowIndexDelete(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: 
         var part_idx_label: i32 = 0;
         r1 = generateIndexKey(p, idx, i_data_cur, 0, true, &part_idx_label, prior, r1);
         const p3: i32 = if (idx.has_expr and reg_idx != null) reg_idx.?[i] else 0;
-        _ = aux.addOp3(v, OP.IdxDelete, cur, r1, p3);
-        aux.changeP4(v, -1, .{ .index = idx });
+        _ = aux.emit4(v, .IdxDelete, .{ Cursor.from(cur), Reg.from(r1), p3 }, .{ .index = idx });
         aux.changeP5(v, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
         resolvePartIdxLabel(p, part_idx_label);
         prior = idx;
@@ -445,7 +465,7 @@ pub fn generateIndexKey(p: *Parse, idx: *Index, i_data_cur: i32, reg_out: i32, p
         // an integer.
         if (idx.ai_column[j] >= 0) _ = aux.deletePriorOpcode(v, OP.RealAffinity);
     }
-    if (reg_out != 0) _ = aux.addOp3(v, OP.MakeRecord, reg_base, n_col, reg_out);
+    if (reg_out != 0) _ = aux.emit(v, .MakeRecord, .{ Reg.from(reg_base), n_col, Reg.from(reg_out) });
     expr_mod.releaseTempRange(p, reg_base, n_col);
     return reg_base;
 }

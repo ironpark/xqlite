@@ -848,7 +848,7 @@ pub fn explainInto(p: *int.Parse, sql: []const u8, parent: i32) error{ OutOfMemo
         const detail = api.columnText(stmt, 3) orelse "";
         const msg = try v.alloc().dupeSentinel(u8, detail, 0);
         const this = v.nOp();
-        _ = aux.addOp4(v, vi.OP.Explain, this, ids.get(up) orelse parent, 0, .{ .z = msg });
+        _ = aux.emit4(v, .Explain, .{ this, ids.get(up) orelse parent }, .{ .z = msg });
         try ids.put(db.gpa, id, this);
     }
     if (rc != RC.DONE) return explainFailed(p, rc);

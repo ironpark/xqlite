@@ -89,7 +89,6 @@ pub const readAll = meta_mod.readAll;
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
 const RC = int.RC;
-const OP = vi.OP;
 
 pub const Error = int.Error;
 
@@ -155,7 +154,7 @@ pub fn schemaName(db: *Sqlite3, t: *const int.Table) []const u8 {
 pub fn codeExec(p: *Parse, i_db: usize, sql: [:0]const u8) void {
     const v = build.getVdbe(p) orelse return;
     build.beginWriteOperation(p, false, i_db);
-    _ = aux.addOp4Str(v, OP.SqlExec, 0x0001, 0, 0, sql);
+    _ = aux.emitStr(v, .SqlExec, .{0x0001}, sql);
 }
 
 /// Statements of the connection's dialect, run when the statement runs,
@@ -164,7 +163,7 @@ pub fn codeExec(p: *Parse, i_db: usize, sql: [:0]const u8) void {
 /// no transaction (opSqlExec()). An error keeps its state.
 pub fn codeExecDialect(p: *Parse, sql: [:0]const u8) void {
     const v = build.getVdbe(p) orelse return;
-    _ = aux.addOp4Str(v, OP.SqlExec, 0x0005, 0, 0, sql);
+    _ = aux.emitStr(v, .SqlExec, .{0x0005}, sql);
 }
 
 /// codeExec() of SQL formatted by SQLite's printf (%Q, %w ...).

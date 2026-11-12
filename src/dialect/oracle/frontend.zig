@@ -48,7 +48,7 @@ const jsonfuncs = @import("jsonfuncs.zig");
 const session = @import("session.zig");
 
 const RC = int.RC;
-const OP = @import("../../vdbe/vdbe_int.zig").OP;
+const Reg = aux.operand.Reg;
 
 pub const frontend: dialect.Frontend = .{ .run = run };
 
@@ -131,9 +131,9 @@ fn implicitTransaction(p: *int.Parse) void {
     if (p.explain != 0 or p.n_err > 0) return;
     const v = build.getVdbe(p) orelse return;
     const r = autocommitRegister(p) orelse return;
-    const skip = aux.addOp2(v, OP.IfNot, r, 0);
-    _ = aux.addOp2(v, OP.AutoCommit, 0, 0);
-    aux.jumpHere(v, skip);
+    const skip = aux.emit(v, .IfNot, .{r});
+    _ = aux.emit(v, .AutoCommit, .{});
+    aux.landHere(v, skip);
 }
 
 /// COMMIT/ROLLBACK, which do nothing without a transaction (xq_ora_
@@ -141,18 +141,18 @@ fn implicitTransaction(p: *int.Parse) void {
 fn endTransaction(p: *int.Parse, rollback: bool) void {
     const v = build.getVdbe(p) orelse return;
     const r = autocommitRegister(p) orelse return;
-    const skip = aux.addOp2(v, OP.If, r, 0);
-    _ = aux.addOp2(v, OP.AutoCommit, 1, @intFromBool(rollback));
-    aux.jumpHere(v, skip);
+    const skip = aux.emit(v, .If, .{r});
+    _ = aux.emit(v, .AutoCommit, .{ 1, rollback });
+    aux.landHere(v, skip);
 }
 
 /// A register with xq_ora_autocommit().
-fn autocommitRegister(p: *int.Parse) ?i32 {
+fn autocommitRegister(p: *int.Parse) ?Reg {
     const defs = dialect.engineFunctionSearch("xq_ora_autocommit");
     if (defs.len == 0) return null;
     p.n_mem += 1;
-    const r: i32 = @intCast(p.n_mem);
-    _ = aux.addFunctionCall(p, 0, 0, r, 0, &defs[0], 0);
+    const r: Reg = .from(p.n_mem);
+    _ = aux.addFunctionCall(p, 0, 0, r.int(), 0, &defs[0], 0);
     return r;
 }
 

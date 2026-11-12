@@ -138,7 +138,7 @@ fn openConn(host: *c.sqlite3) error{ OutOfMemory, CantOpen }!*Conn {
     }
     conn.db = h.?;
     conn.vdbe = .{ .db = conn.db, .arena = .init(conn.db.gpa) };
-    _ = aux.addOp3(&conn.vdbe, vi.OP.Function, 0, 0, 0);
+    _ = aux.emit(&conn.vdbe, .Function, .{});
     return conn;
 }
 

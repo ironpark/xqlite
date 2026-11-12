@@ -58,7 +58,6 @@ const types = @import("../../sql/types.zig");
 const util = @import("../../sql/util.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const aux = @import("../../vdbe/aux.zig");
-const vi = @import("../../vdbe/vdbe_int.zig");
 const lower = @import("../../ir/lower.zig");
 const callback = @import("../../sql/callback.zig");
 const Quoted = @import("../dialect.zig").Quoted('"');
@@ -163,7 +162,7 @@ pub const Plan = struct {
         const v = build.getVdbe(p) orelse return error.OutOfMemory;
         for (0..p.db.dbs.items.len) |i| if (plan.write_mask & (@as(u32, 1) << @intCast(i)) != 0) build.beginWriteOperation(p, true, i);
         main_mod.mayAbort(p);
-        _ = aux.addOp4Str(v, vi.OP.SqlExec, 0x0008, 0, 0, try rows.encode(p.arena, plan.steps.items));
+        _ = aux.emitStr(v, .SqlExec, .{0x0008}, try rows.encode(p.arena, plan.steps.items));
         if (plan.counts) aux.countChanges(v);
     }
 
@@ -176,7 +175,7 @@ pub const Plan = struct {
         for (plan.steps.items) |s| {
             if (s.label.len == 0) continue;
             const this = v.nOp();
-            _ = aux.addOp4(v, vi.OP.Explain, this, 0, 0, .{ .z = try v.alloc().dupeSentinel(u8, s.label, 0) });
+            _ = aux.emit4(v, .Explain, .{this}, .{ .z = try v.alloc().dupeSentinel(u8, s.label, 0) });
             rows.explainInto(p, s.sql, this) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.Failed => {
@@ -192,7 +191,7 @@ pub const Plan = struct {
         const v = build.getVdbe(p) orelse return error.OutOfMemory;
         var free: std.ArrayList(rows.Step) = .empty;
         for (plan.slots.items) |id| try free.append(p.arena, .{ .kind = .free, .a = id });
-        _ = aux.addOp4Str(v, vi.OP.SqlExec, 0x0008, 0, 0, try rows.encode(p.arena, free.items));
+        _ = aux.emitStr(v, .SqlExec, .{0x0008}, try rows.encode(p.arena, free.items));
     }
 };
 

@@ -39,6 +39,9 @@ const Oom = int.Oom;
 const Vdbe = vi.Vdbe;
 const Mem = vi.Mem;
 const Context = vi.Context;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Addr = aux.operand.Addr;
 const OP = vi.OP;
 const OPFLAG = vi.OPFLAG;
 
@@ -55,8 +58,8 @@ const RowCnt = u64;
 /// Port of openStatTable(): create sqlite_stat1 in database `i_db` if it
 /// does not exist, delete its rows (and those of sqlite_stat4 and
 /// sqlite_stat3) about `where` (all if null), a table or index name as
-/// `where_type` says, and open it for writing on cursor `i_stat_cur`.
-fn openStatTable(p: *Parse, i_db: usize, i_stat_cur: i32, where: ?[]const u8, where_type: []const u8) void {
+/// `where_type` says, and open it for writing on cursor `stat_cur`.
+fn openStatTable(p: *Parse, i_db: usize, stat_cur: Cursor, where: ?[]const u8, where_type: []const u8) void {
     const Stat = struct { name: [:0]const u8, cols: ?[]const u8 };
     const tables = [_]Stat{
         .{ .name = "sqlite_stat1", .cols = "tbl,idx,stat" },
@@ -84,7 +87,7 @@ fn openStatTable(p: *Parse, i_db: usize, i_stat_cur: i32, where: ?[]const u8, wh
                     .{ .str = pdb.name }, .{ .str = st.name }, .{ .str = where_type }, .{ .str = w },
                 });
             } else {
-                _ = aux.addOp2(v, OP.Clear, @intCast(roots[i]), @intCast(i_db));
+                _ = aux.emit(v, .Clear, .{ roots[i], i_db });
             }
         } else if (i < n_to_open) {
             // The sqlite_statN table does not exist. Create it. A side
@@ -98,7 +101,7 @@ fn openStatTable(p: *Parse, i_db: usize, i_stat_cur: i32, where: ?[]const u8, wh
 
     // Open the sqlite_stat1 table for writing.
     for (0..n_to_open) |i| {
-        _ = aux.addOp4Int(v, OP.OpenWrite, i_stat_cur + @as(i32, @intCast(i)), @bitCast(roots[i]), @intCast(i_db), 3);
+        _ = aux.emitInt(v, .OpenWrite, .{ stat_cur.at(i), @as(i32, @bitCast(roots[i])), i_db }, 3);
         aux.changeP5(v, create_tbl[i]);
     }
 }
@@ -240,41 +243,30 @@ const stat_get_funcdef: int.FuncDef = .{
 };
 
 /// Port of callStatGet().
-fn callStatGet(p: *Parse, reg_stat: i32, reg_out: i32) void {
-    std.debug.assert(reg_out != reg_stat and reg_out != reg_stat + 1);
-    _ = aux.addFunctionCall(p, 0, reg_stat, reg_out, 1, &stat_get_funcdef, 0);
+fn callStatGet(p: *Parse, reg_stat: Reg, reg_out: Reg) void {
+    std.debug.assert(reg_out != reg_stat and reg_out != reg_stat.at(1));
+    _ = aux.addFunctionCall(p, 0, reg_stat.int(), reg_out.int(), 1, &stat_get_funcdef, 0);
 }
 
 /// Port of analyzeOneTable(): code the analysis of the indexes of `t`
 /// (only `only_idx` if not null) into sqlite_stat1 on cursor
-/// `i_stat_cur`, using registers from `i_mem_arg` and cursors from
-/// `i_tab_arg` on.
-fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_mem_arg: i32, i_tab_arg: i32) Oom!void {
+/// `stat_cur`, using registers from `first_reg` and cursors from
+/// `first_cur` on.
+fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, first_reg: Reg, first_cur: Cursor) Oom!void {
     const db = p.db;
-    var i_mem = i_mem_arg;
-    var i_tab = i_tab_arg;
     var need_table_cnt = true;
-    const reg_new_rowid = i_mem; // Rowid for the inserted record
-    i_mem += 1;
-    const reg_stat = i_mem; // Register to hold the StatAccum object
-    i_mem += 1;
-    const reg_chng = i_mem; // Index of changed index field
-    i_mem += 1;
-    const reg_rowid = i_mem; // Rowid argument passed to stat_push()
-    i_mem += 1;
-    const reg_temp = i_mem; // Temporary use register
-    i_mem += 1;
-    const reg_temp2 = i_mem; // Second temporary use register
-    i_mem += 1;
-    const reg_tabname = i_mem; // Register containing the table name
-    i_mem += 1;
-    const reg_idxname = i_mem; // Register containing the index name
-    i_mem += 1;
-    const reg_stat1 = i_mem; // Value for the stat column of sqlite_stat1
-    i_mem += 1;
-    const reg_prev = i_mem; // MUST BE LAST (see below)
+    const reg_new_rowid = first_reg; // Rowid for the inserted record
+    const reg_stat = first_reg.at(1); // Register to hold the StatAccum object
+    const reg_chng = first_reg.at(2); // Index of changed index field
+    const reg_rowid = first_reg.at(3); // Rowid argument passed to stat_push()
+    const reg_temp = first_reg.at(4); // Temporary use register
+    const reg_temp2 = first_reg.at(5); // Second temporary use register
+    const reg_tabname = first_reg.at(6); // Register containing the table name
+    const reg_idxname = first_reg.at(7); // Register containing the index name
+    const reg_stat1 = first_reg.at(8); // Value for the stat column of sqlite_stat1
+    const reg_prev = first_reg.at(9); // MUST BE LAST (see below)
 
-    expr.touchRegister(p, i_mem);
+    expr.touchRegister(p, reg_prev.int());
     const v = build.getVdbe(p) orelse return;
     // Do not gather statistics on views or virtual tables, nor on system
     // tables.
@@ -284,16 +276,14 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_m
     if (auth.check(p, auth.Code.ANALYZE, t.name, null, db.dbs.items[i_db].name) != auth.OK) return;
 
     // Open a read-only cursor on the table. Also allocate a cursor number
-    // to use for scanning indexes (i_idx_cur). No index cursor is opened
+    // to use for scanning indexes (idx_cur). No index cursor is opened
     // at this time though.
     build.tableLock(p, i_db, t.tnum, false, t.name);
-    const i_tab_cur = i_tab;
-    i_tab += 1;
-    const i_idx_cur = i_tab;
-    i_tab += 1;
-    p.n_tab = @max(p.n_tab, i_tab);
-    insert.openTable(p, i_tab_cur, i_db, t, OP.OpenRead);
-    _ = aux.loadString(v, reg_tabname, t.name);
+    const tab_cur = first_cur;
+    const idx_cur = first_cur.at(1);
+    p.n_tab = @max(p.n_tab, first_cur.int() + 2);
+    insert.openTable(p, tab_cur.int(), i_db, t, OP.OpenRead);
+    _ = aux.loadString(v, reg_tabname.int(), t.name);
 
     var idx_opt = t.index;
     while (idx_opt) |idx| : (idx_opt = idx.next) {
@@ -313,7 +303,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_m
         }
 
         // Populate the register containing the index name.
-        _ = aux.loadString(v, reg_idxname, idx_name);
+        _ = aux.loadString(v, reg_idxname.int(), idx_name);
 
         // Pseudo-code for the loop that calls stat_push():
         //
@@ -350,32 +340,33 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_m
         //  end_of_scan:
 
         // Make sure there are enough memory cells for the regPrev array.
-        expr.touchRegister(p, reg_prev + n_col_test);
+        expr.touchRegister(p, reg_prev.at(n_col_test).int());
 
         // Open a read-only cursor on the index being analyzed.
-        _ = aux.addOp3(v, OP.OpenRead, i_idx_cur, @intCast(idx.tnum), @intCast(i_db));
+        _ = aux.emit(v, .OpenRead, .{ idx_cur, idx.tnum, i_db });
         aux.setP4KeyInfo(p, idx);
 
-        std.debug.assert(reg_temp2 == reg_stat + 4);
-        _ = aux.addOp2(v, OP.Integer, db.n_analysis_limit, reg_temp2);
+        std.debug.assert(reg_temp2 == reg_stat.at(4));
+        _ = aux.emit(v, .Integer, .{ db.n_analysis_limit, reg_temp2 });
 
         // Arguments to stat_init(): the number of columns in the index
         // including the rowid (or for a WITHOUT ROWID table, the number of
         // PK columns), the number of columns in the key without the
         // rowid/pk, and the estimated number of rows in the index.
-        _ = aux.addOp2(v, OP.Integer, n_col, reg_stat + 1);
-        std.debug.assert(reg_rowid == reg_stat + 2);
-        _ = aux.addOp2(v, OP.Integer, idx.n_key_col, reg_rowid);
-        _ = aux.addOp3(v, OP.Count, i_idx_cur, reg_temp, @intFromBool(db.optDisabled(opt_stat4)));
-        _ = aux.addFunctionCall(p, 0, reg_stat + 1, reg_stat, 4, &stat_init_funcdef, 0);
-        var addr_goto_end = aux.addOp1(v, OP.Rewind, i_idx_cur);
+        _ = aux.emit(v, .Integer, .{ n_col, reg_stat.at(1) });
+        std.debug.assert(reg_rowid == reg_stat.at(2));
+        _ = aux.emit(v, .Integer, .{ idx.n_key_col, reg_rowid });
+        _ = aux.emit(v, .Count, .{ idx_cur, reg_temp, db.optDisabled(opt_stat4) });
+        _ = aux.addFunctionCall(p, 0, reg_stat.at(1).int(), reg_stat.int(), 4, &stat_init_funcdef, 0);
+        // The jump past the scan of an empty index, until it has landed.
+        var addr_goto_end: ?Addr = aux.emit(v, .Rewind, .{idx_cur});
 
-        _ = aux.addOp2(v, OP.Integer, 0, reg_chng);
-        var addr_next_row = aux.currentAddr(v);
+        _ = aux.emit(v, .Integer, .{ 0, reg_chng });
+        var addr_next_row = aux.here(v);
 
         if (n_col_test > 0) {
-            const end_distinct_test = aux.makeLabel(p);
-            const goto_chng = try p.arena.alloc(i32, @intCast(n_col_test));
+            const end_distinct_test = aux.newLabel(p);
+            const goto_chng = try p.arena.alloc(Addr, @intCast(n_col_test));
 
             //  next_row:
             //   regChng = 0
@@ -385,84 +376,84 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_m
             //   ...
             //   regChng = N
             //   goto endDistinctTest
-            _ = aux.addOp0(v, OP.Goto);
-            addr_next_row = aux.currentAddr(v);
+            _ = aux.emit(v, .Goto, .{});
+            addr_next_row = aux.here(v);
             if (n_col_test == 1 and idx.n_key_col == 1 and idx.isUnique()) {
                 // For a single-column UNIQUE index, once a non-NULL row is
                 // found all the rest are distinct: skip the tests.
-                _ = aux.addOp2(v, OP.NotNull, reg_prev, end_distinct_test);
+                _ = aux.emit(v, .NotNull, .{ reg_prev, end_distinct_test });
             }
             for (goto_chng, 0..) |*g, ii| {
                 const i: i32 = @intCast(ii);
                 const cs = coll.locateCollSeq(p, idx.coll[ii]);
-                _ = aux.addOp2(v, OP.Integer, i, reg_chng);
-                _ = aux.addOp3(v, OP.Column, i_idx_cur, i, reg_temp);
-                g.* = aux.addOp4(v, OP.Ne, reg_temp, 0, reg_prev + i, if (cs) |c| .{ .collseq = c } else .notused);
+                _ = aux.emit(v, .Integer, .{ i, reg_chng });
+                _ = aux.emit(v, .Column, .{ idx_cur, i, reg_temp });
+                g.* = aux.emit4(v, .Ne, .{ reg_temp, 0, reg_prev.at(i) }, if (cs) |c| .{ .collseq = c } else .notused);
                 aux.changeP5(v, vi.SQLITE_NULLEQ);
             }
-            _ = aux.addOp2(v, OP.Integer, n_col_test, reg_chng);
-            _ = aux.goto_(v, end_distinct_test);
+            _ = aux.emit(v, .Integer, .{ n_col_test, reg_chng });
+            _ = aux.emit(v, .Goto, .{ 0, end_distinct_test });
 
             //  chng_addr_0:
             //   regPrev(0) = idx(0)
             //  chng_addr_1:
             //   regPrev(1) = idx(1)
             //  ...
-            aux.jumpHere(v, addr_next_row - 1);
+            aux.landHere(v, addr_next_row.plus(-1));
             for (goto_chng, 0..) |g, ii| {
                 const i: i32 = @intCast(ii);
-                aux.jumpHere(v, g);
-                _ = aux.addOp3(v, OP.Column, i_idx_cur, i, reg_prev + i);
+                aux.landHere(v, g);
+                _ = aux.emit(v, .Column, .{ idx_cur, i, reg_prev.at(i) });
             }
-            aux.resolveLabel(v, end_distinct_test);
+            aux.place(v, end_distinct_test);
         }
 
         //  chng_addr_N:
         //   stat_push(P, regChng)
         //   Next csr
         //   if !eof(csr) goto next_row;
-        std.debug.assert(reg_chng == reg_stat + 1);
-        _ = aux.addFunctionCall(p, 1, reg_stat, reg_temp, 2, &stat_push_funcdef, 0);
+        std.debug.assert(reg_chng == reg_stat.at(1));
+        _ = aux.addFunctionCall(p, 1, reg_stat.int(), reg_temp.int(), 2, &stat_push_funcdef, 0);
         if (db.n_analysis_limit != 0) {
-            const j1 = aux.addOp1(v, OP.IsNull, reg_temp);
-            const j2 = aux.addOp1(v, OP.If, reg_temp);
-            const j3 = aux.addOp4Int(v, OP.SeekGT, i_idx_cur, 0, reg_prev, 1);
-            aux.jumpHere(v, j1);
-            _ = aux.addOp2(v, OP.Next, i_idx_cur, addr_next_row);
-            aux.jumpHere(v, j2);
-            aux.jumpHere(v, j3);
+            const j1 = aux.emit(v, .IsNull, .{reg_temp});
+            const j2 = aux.emit(v, .If, .{reg_temp});
+            const j3 = aux.emitInt(v, .SeekGT, .{ idx_cur, 0, reg_prev }, 1);
+            aux.landHere(v, j1);
+            _ = aux.emit(v, .Next, .{ idx_cur, addr_next_row });
+            aux.landHere(v, j2);
+            aux.landHere(v, j3);
         } else {
-            _ = aux.addOp2(v, OP.Next, i_idx_cur, addr_next_row);
+            _ = aux.emit(v, .Next, .{ idx_cur, addr_next_row });
         }
 
         // Add the entry to the stat1 table.
         if (idx.part_idx_where != null) {
             // Partial indexes might get a zero-entry in sqlite_stat1. But
             // an empty table is omitted from sqlite_stat1.
-            aux.jumpHere(v, addr_goto_end);
-            addr_goto_end = 0;
+            aux.landHere(v, addr_goto_end.?);
+            addr_goto_end = null;
         }
         callStatGet(p, reg_stat, reg_stat1);
-        _ = aux.addOp4Str(v, OP.MakeRecord, reg_tabname, 3, reg_temp, "BBB");
-        _ = aux.addOp2(v, OP.NewRowid, i_stat_cur, reg_new_rowid);
-        _ = aux.addOp3(v, OP.Insert, i_stat_cur, reg_temp, reg_new_rowid);
+        _ = aux.emitStr(v, .MakeRecord, .{ reg_tabname, 3, reg_temp }, "BBB");
+        _ = aux.emit(v, .NewRowid, .{ stat_cur, reg_new_rowid });
+        _ = aux.emit(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid });
         aux.changeP5(v, OPFLAG.APPEND);
 
         // End of analysis.
-        if (addr_goto_end != 0) aux.jumpHere(v, addr_goto_end);
+        if (addr_goto_end) |a| aux.landHere(v, a);
     }
 
     // A single sqlite_stat1 entry with NULL as the index name and the row
     // count as the content.
     if (only_idx == null and need_table_cnt) {
-        _ = aux.addOp2(v, OP.Count, i_tab_cur, reg_stat1);
-        const j_zero_rows = aux.addOp1(v, OP.IfNot, reg_stat1);
-        _ = aux.addOp2(v, OP.Null, 0, reg_idxname);
-        _ = aux.addOp4Str(v, OP.MakeRecord, reg_tabname, 3, reg_temp, "BBB");
-        _ = aux.addOp2(v, OP.NewRowid, i_stat_cur, reg_new_rowid);
-        _ = aux.addOp3(v, OP.Insert, i_stat_cur, reg_temp, reg_new_rowid);
+        _ = aux.emit(v, .Count, .{ tab_cur, reg_stat1 });
+        const j_zero_rows = aux.emit(v, .IfNot, .{reg_stat1});
+        _ = aux.emit(v, .Null, .{ 0, reg_idxname });
+        _ = aux.emitStr(v, .MakeRecord, .{ reg_tabname, 3, reg_temp }, "BBB");
+        _ = aux.emit(v, .NewRowid, .{ stat_cur, reg_new_rowid });
+        _ = aux.emit(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid });
         aux.changeP5(v, OPFLAG.APPEND);
-        aux.jumpHere(v, j_zero_rows);
+        aux.landHere(v, j_zero_rows);
     }
 }
 
@@ -470,20 +461,20 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_m
 /// into the schema.
 fn loadAnalysis(p: *Parse, i_db: usize) void {
     const v = build.getVdbe(p) orelse return;
-    _ = aux.addOp1(v, OP.LoadAnalysis, @intCast(i_db));
+    _ = aux.emit(v, .LoadAnalysis, .{i_db});
 }
 
 /// Port of analyzeDatabase(): code the analysis of every table of `i_db`.
 fn analyzeDatabase(p: *Parse, i_db: usize) Oom!void {
     const db = p.db;
     build.beginWriteOperation(p, false, i_db);
-    const i_stat_cur = p.n_tab;
+    const stat_cur: Cursor = .from(p.n_tab);
     p.n_tab += 3;
-    openStatTable(p, i_db, i_stat_cur, null, "");
-    const i_mem = p.n_mem + 1;
-    const i_tab = p.n_tab;
+    openStatTable(p, i_db, stat_cur, null, "");
+    const first_reg: Reg = .from(p.n_mem + 1);
+    const first_cur: Cursor = .from(p.n_tab);
     var it = db.dbs.items[i_db].schema.tbl_order.iterator();
-    while (it.next()) |t| try analyzeOneTable(p, t, null, i_stat_cur, i_mem, i_tab);
+    while (it.next()) |t| try analyzeOneTable(p, t, null, stat_cur, first_reg, first_cur);
     loadAnalysis(p, i_db);
 }
 
@@ -492,14 +483,14 @@ fn analyzeDatabase(p: *Parse, i_db: usize) Oom!void {
 fn analyzeTable(p: *Parse, t: *Table, only_idx: ?*Index) Oom!void {
     const i_db: usize = @intCast(prepare.schemaToIndex(p.db, t.schema));
     build.beginWriteOperation(p, false, i_db);
-    const i_stat_cur = p.n_tab;
+    const stat_cur: Cursor = .from(p.n_tab);
     p.n_tab += 3;
     if (only_idx) |ix| {
-        openStatTable(p, i_db, i_stat_cur, ix.name, "idx");
+        openStatTable(p, i_db, stat_cur, ix.name, "idx");
     } else {
-        openStatTable(p, i_db, i_stat_cur, t.name, "tbl");
+        openStatTable(p, i_db, stat_cur, t.name, "tbl");
     }
-    try analyzeOneTable(p, t, only_idx, i_stat_cur, p.n_mem + 1, p.n_tab);
+    try analyzeOneTable(p, t, only_idx, stat_cur, .from(p.n_mem + 1), .from(p.n_tab));
     loadAnalysis(p, i_db);
 }
 
@@ -531,13 +522,13 @@ fn analyzeTablesImpl(p: *Parse, tables: []const *Table) Oom!void {
                 build.nestedParse(p, "DELETE FROM %Q.%s WHERE tbl=%Q", &.{ .{ .str = pdb.name }, .{ .str = name }, .{ .str = t.name } });
             }
         }
-        const i_stat_cur = p.n_tab;
+        const stat_cur: Cursor = .from(p.n_tab);
         p.n_tab += 3;
-        openStatTable(p, i_db, i_stat_cur, first.name, "tbl");
-        const i_mem = p.n_mem + 1;
-        const i_tab = p.n_tab;
+        openStatTable(p, i_db, stat_cur, first.name, "tbl");
+        const first_reg: Reg = .from(p.n_mem + 1);
+        const first_cur: Cursor = .from(p.n_tab);
         for (tables[i..]) |t| {
-            if (t.schema == first.schema) try analyzeOneTable(p, t, null, i_stat_cur, i_mem, i_tab);
+            if (t.schema == first.schema) try analyzeOneTable(p, t, null, stat_cur, first_reg, first_cur);
         }
         loadAnalysis(p, i_db);
     }
@@ -596,7 +587,7 @@ fn analyzeImpl(p: *Parse, name1_opt: ?Token, name2_opt: ?Token) Oom!void {
 /// prepared statements, whose plans may change with the statistics.
 fn expireAll(p: *Parse) void {
     if (p.db.n_sql_exec == 0) if (build.getVdbe(p)) |v| {
-        _ = aux.addOp0(v, OP.Expire);
+        _ = aux.emit(v, .Expire, .{});
     };
 }
 
@@ -635,7 +626,7 @@ pub fn optimize(p: *Parse, v: *Vdbe, i_db_arg: usize, all_dbs: bool, right: ?[]c
     } else {
         n_limit = default_optimize_limit;
     }
-    const i_tab_cur = p.n_tab; // Cursor for a table whose size needs checking
+    const tab_cur: Cursor = .from(p.n_tab); // Cursor for a table whose size needs checking
     p.n_tab += 1;
     var n_check: i32 = 0; // Number of tables to be optimized
     var n_btree: i32 = 0; // Number of btrees to scan
@@ -685,25 +676,25 @@ pub fn optimize(p: *Parse, v: *Vdbe, i_db_arg: usize, all_dbs: bool, right: ?[]c
             // Reanalyze if the table is 10 times larger or smaller than at
             // the last analysis; unconditionally if there are unanalyzed
             // indexes.
-            insert.openTable(p, i_tab_cur, i_db, t, OP.OpenRead);
+            insert.openTable(p, tab_cur.int(), i_db, t, OP.OpenRead);
             const skip: i32 = @intCast(op_mask & 1);
             if (sz_threshold >= 0) {
                 const i_range: LogEst = 33; // 10x size change
-                _ = aux.addOp4Int(v, OP.IfSizeBetween, i_tab_cur, aux.currentAddr(v) + 2 + skip, if (sz_threshold >= i_range) sz_threshold - i_range else -1, sz_threshold + i_range);
+                _ = aux.emitInt(v, .IfSizeBetween, .{ tab_cur, aux.here(v).plus(2 + skip), if (sz_threshold >= i_range) sz_threshold - i_range else -1 }, sz_threshold + i_range);
             } else {
-                _ = aux.addOp2(v, OP.Rewind, i_tab_cur, aux.currentAddr(v) + 2 + skip);
+                _ = aux.emit(v, .Rewind, .{ tab_cur, aux.here(v).plus(2 + skip) });
             }
             const sub_sql = try build.mprintf(p, "ANALYZE \"%w\".\"%w\"", &.{ .{ .str = db.dbs.items[i_db].name }, .{ .str = t.name } });
             if (op_mask & 0x01 != 0) {
-                const r1 = expr.getTempReg(p);
-                _ = aux.addOp4Str(v, OP.String8, 0, r1, 0, sub_sql);
-                _ = aux.addOp2(v, OP.ResultRow, r1, 1);
+                const r1: Reg = .from(expr.getTempReg(p));
+                _ = aux.emitStr(v, .String8, .{ 0, r1 }, sub_sql);
+                _ = aux.emit(v, .ResultRow, .{ r1, 1 });
             } else {
-                _ = aux.addOp4Str(v, OP.SqlExec, if (n_limit != 0) 0x02 else 0, n_limit, 0, sub_sql);
+                _ = aux.emitStr(v, .SqlExec, .{ @as(i32, if (n_limit != 0) 0x02 else 0), n_limit }, sub_sql);
             }
         }
     }
-    _ = aux.addOp0(v, OP.Expire);
+    _ = aux.emit(v, .Expire, .{});
 
     // In a schema with a large number of tables and indexes, scale back
     // the analysis_limit to avoid excess run-time in the worst case.

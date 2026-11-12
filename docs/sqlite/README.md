@@ -1,6 +1,6 @@
 # SQLite 호환
 
-xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 0.17로 새롭게 구현되었으며, 파일 포맷과 SQL 쿼리 결과뿐만 아니라 가능한 모든 영역에서 바이트코드(`EXPLAIN`)와 실행 계획(`EXPLAIN QUERY PLAN`)까지 SQLite와 100% 동일하게 호환됩니다.
+xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 0.17로 새롭게 구현되었으며, 파일 포맷, SQL 쿼리 결과, C ABI가 SQLite와 호환됩니다. 바이트코드(`EXPLAIN`)와 실행 계획(`EXPLAIN QUERY PLAN`)은 v0.0.4까지 SQLite와 같았지만 맞춰야 하는 대상은 아닙니다.
 
 ---
 
@@ -50,7 +50,7 @@ EXPLAIN SELECT * FROM users WHERE id = 1;
 | **파일 포맷** | `xqt interop` | 기존 SQLite 데이터베이스 파일을 그대로 읽고 쓰며, 서로 교차 수정한 파일이 `PRAGMA integrity_check`를 완벽 통과합니다. |
 | **저널 및 WAL** | `xqt interop hot-journal`, `wal` | 충돌 복구(Crash Recovery), 핫 저널 복구, WAL 체크포인트를 상호 수행하며, 한 DB를 SQLite3와 xqlite가 동시 읽기/쓰기합니다. |
 | **쿼리 결과** | `xqt slt` (sqllogictest) | SQLite 공식 sqllogictest 622개 스크립트, 5,939,879개 테스트를 저널 및 WAL 모드에서 100% 통과합니다. |
-| **바이트코드 & 실행 계획** | `xqt planner` | VDBE opcode 시퀀스와 쿼리 플래너의 비용 추정/인덱스 선택 결과가 일치합니다. |
+| **바이트코드 & 실행 계획** | `xqt planner` | 결과는 sqlite3와 비교합니다. VDBE opcode 시퀀스와 실행 계획은 xqlite의 기록과 비교해 의도하지 않은 변화를 잡습니다(SQLite와 같을 필요는 없음). |
 | **셸 도구 호환** | `xqt interop shell` | `.dump`, `.schema`, `.tables`, `.mode` 등 주요 점-명령어(dot commands)를 지원합니다. |
 
 ---

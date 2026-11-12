@@ -1,6 +1,12 @@
-//! `xqt planner [FILE...] [-k KINDS] [--known FILE]`: xqlite against
-//! sqlite3 3.54.1 on query results, EXPLAIN QUERY PLAN and EXPLAIN
-//! bytecode. (Was tools/planner/diff.py; tools/planner/README.md.)
+//! `xqt planner [FILE...] [-k KINDS] [--known FILE]`: xqlite's query
+//! results against sqlite3 3.54.1, and its EXPLAIN QUERY PLAN and
+//! EXPLAIN bytecode against what xqlite gave when they were last recorded
+//! (tools/planner/expected/NAME.plan, `--record`): the engine need not
+//! plan or code a statement as SQLite does, but a change of either is
+//! one somebody made and looked at. `--vs-sqlite` and `--base XQLITE`
+//! compare the plans and bytecode with sqlite3 or another xqlite instead,
+//! and show what differs. (Was tools/planner/diff.py;
+//! tools/planner/README.md.)
 //!
 //! A case file has blocks separated by lines "----". In each block, lines
 //! before a line "==" are setup SQL, run once by the reference shell; each
@@ -21,13 +27,20 @@ const Check = xqt.Check;
 
 pub const usage =
     \\usage: xqt planner [FILE...] [-k KINDS] [--known FILE]
+    \\       xqt planner --record [FILE...]
     \\
     \\  FILE          case files (default: tools/planner/*.txt but vtablog.txt)
     \\  -k KINDS      res,eqp,code (default: all)
     \\  --known FILE  failures to expect (tools/planner/known-failures.list)
+    \\  --record      write xqlite's plans and bytecode (their hashes) to
+    \\                tools/planner/expected/NAME.plan
+    \\  --vs-sqlite   compare eqp and code with sqlite3, not the recording
+    \\  --base XQLITE compare eqp and code with another xqlite (one built
+    \\                before a change), not the recording
     \\  -v            print what differs
     \\
-    \\The reference is --sq ($SQ, default sqlite3 on PATH): 3.54.1 built
+    \\res is compared with sqlite3; eqp and code with the recording. The
+    \\reference is --sq ($SQ, default sqlite3 on PATH): 3.54.1 built
     \\without SQLITE_ENABLE_EXPLAIN_COMMENTS. SQOPT=MASK runs it with
     \\".testctrl optimizations MASK".
     \\
@@ -58,6 +71,30 @@ const Block = struct {
 const CaseFile = struct {
     path: []const u8,
     blocks: []Block,
+    /// The recording, a list of queries per block; null if there is none
+    /// or it is of other queries (`rec_problem`).
+    rec: ?[]const []const Plan = null,
+    rec_problem: ?[]const u8 = null,
+};
+
+/// The first 16 hex digits of a SHA-256.
+const Hash = [16]u8;
+
+/// What xqlite gave for one query.
+const Plan = struct {
+    code: Hash,
+    eqp: Hash,
+};
+
+/// What eqp and code are compared with.
+const Against = union(enum) {
+    /// tools/planner/expected/NAME.plan.
+    recording,
+    sqlite,
+    /// Another xqlite.
+    base: []const u8,
+    /// Nothing: the recording is being written.
+    record,
 };
 
 const Failure = struct {
@@ -75,11 +112,14 @@ const Chunk = struct {
     start: usize,
     end: usize,
     failures: []Failure = &.{},
+    /// --record: one per query.
+    plans: []Plan = &.{},
 };
 
 const Ctx = struct {
     cfg: *const xqt.Config,
     kinds: std.EnumSet(Kind),
+    against: Against,
     /// SQOPT as the reference's first argument, or null.
     sqpre: ?[]const u8,
 };
@@ -99,6 +139,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     var paths: std.ArrayList([]const u8) = .empty;
     var kinds: std.EnumSet(Kind) = .full;
     var known_path: ?[]const u8 = null;
+    var against: Against = .recording;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -110,6 +151,14 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         } else if (std.mem.eql(u8, a, "--known") and i + 1 < args.len) {
             i += 1;
             known_path = args[i];
+        } else if (std.mem.eql(u8, a, "--record")) {
+            against = .record;
+        } else if (std.mem.eql(u8, a, "--vs-sqlite")) {
+            against = .sqlite;
+        } else if (std.mem.eql(u8, a, "--base") and i + 1 < args.len) {
+            i += 1;
+            // The engines run in the directories of the blocks.
+            against = .{ .base = try Io.Dir.cwd().realPathFileAlloc(io, args[i], arena) };
         } else if (a.len > 0 and a[0] == '-') {
             return usageError(out);
         } else {
@@ -117,6 +166,8 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         }
     }
     if (paths.items.len == 0) try defaultFiles(arena, io, cfg, &paths);
+    // Recording runs xqlite only.
+    if (against == .record) kinds = .initMany(&.{ .code, .eqp });
 
     var known: []Known = &.{};
     if (known_path) |p| known = try readKnown(arena, io, p);
@@ -125,6 +176,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     const ctx: Ctx = .{
         .cfg = cfg,
         .kinds = kinds,
+        .against = against,
         .sqpre = if (sqopt.len > 0) try std.fmt.allocPrint(arena, ".testctrl optimizations {s}", .{sqopt}) else null,
     };
 
@@ -136,6 +188,8 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
             return 2;
         };
         f.* = .{ .path = relative(cfg.root, p), .blocks = try parse(arena, cfg, fi, text) };
+        if (against == .recording and (kinds.contains(.code) or kinds.contains(.eqp)))
+            try readRecording(arena, io, f, try recordingPath(arena, p));
     }
 
     // 1. The setups.
@@ -181,12 +235,43 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         Io.Dir.cwd().deleteTree(io, try std.fs.path.join(arena, &.{ cfg.tmp, "planner-blocks" })) catch {};
     Io.Dir.cwd().deleteDir(io, cfg.tmp) catch {};
 
-    // The report, in the order of the files: what diff.py printed.
     var failed = setups.failed() > 0 or suite.failed() > 0;
+    if (against == .record) {
+        if (failed) {
+            try out.writeAll("xqt planner: nothing recorded (a check failed)\n");
+        } else {
+            var next: usize = 0;
+            for (files, paths.items) |*f, p| {
+                const to = try recordingPath(arena, p);
+                var text: Io.Writer.Allocating = .init(arena);
+                try text.writer.writeAll(recording_header);
+                for (f.blocks, 0..) |*b, bi| {
+                    if (bi > 0) try text.writer.writeAll("----\n");
+                    for (b.queries, 0..) |q, qi| {
+                        // The chunks are in the order of the files, blocks and queries.
+                        while (chunks.items[next].block != b or qi >= chunks.items[next].end) next += 1;
+                        const plan = chunks.items[next].plans[qi - chunks.items[next].start];
+                        try text.writer.print("{s} {s} {s}\n", .{ plan.code, plan.eqp, q });
+                    }
+                }
+                if (std.fs.path.dirname(to)) |d| try Io.Dir.cwd().createDirPath(io, d);
+                try Io.Dir.cwd().writeFile(io, .{ .sub_path = to, .data = text.written() });
+                try out.print("recorded {s}\n", .{relative(cfg.root, to)});
+            }
+        }
+        try out.flush();
+        return @intFromBool(failed);
+    }
+
+    // The report, in the order of the files: what diff.py printed.
     var n_known: usize = 0;
     var next_chunk: usize = 0;
     for (files) |*f| {
         try out.print("== {s}\n", .{f.path});
+        if (f.rec_problem) |why| {
+            try out.print("{s}: xqt planner --record {s}\n", .{ why, f.path });
+            failed = true;
+        }
         var counts: std.EnumArray(Kind, usize) = .initFill(0);
         var n_queries: usize = 0;
         for (f.blocks) |b| n_queries += b.queries.len;
@@ -228,6 +313,73 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     if (known_path) |p| if (n_known > 0) try out.print("{d} known failures ({s})\n", .{ n_known, p });
     try out.flush();
     return @intFromBool(failed);
+}
+
+const recording_header =
+    \\# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+    \\# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+    \\# the next block of the case file.
+    \\
+;
+
+/// tools/planner/NAME.txt's recording: tools/planner/expected/NAME.plan.
+fn recordingPath(arena: Allocator, case_path: []const u8) ![]const u8 {
+    const name = std.fs.path.stem(case_path);
+    return std.fs.path.join(arena, &.{ std.fs.path.dirname(case_path) orelse ".", "expected", try std.fmt.allocPrint(arena, "{s}.plan", .{name}) });
+}
+
+/// Reads `f`'s recording. It must be of the queries the case file has
+/// now, block by block.
+fn readRecording(arena: Allocator, io: Io, f: *CaseFile, path: []const u8) !void {
+    const text = Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => {
+            f.rec_problem = "NOT RECORDED";
+            return;
+        },
+        else => return err,
+    };
+    const rec = try arena.alloc([]const Plan, f.blocks.len);
+    var bi: usize = 0;
+    var plans: std.ArrayList(Plan) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    const stale = "STALE RECORDING";
+    while (it.next()) |line| {
+        if (line.len == 0 and it.peek() == null) break;
+        if (std.mem.startsWith(u8, line, "#")) continue;
+        if (bi >= f.blocks.len) {
+            f.rec_problem = stale;
+            return;
+        }
+        if (std.mem.eql(u8, line, "----")) {
+            if (plans.items.len != f.blocks[bi].queries.len) {
+                f.rec_problem = stale;
+                return;
+            }
+            rec[bi] = try plans.toOwnedSlice(arena);
+            bi += 1;
+            continue;
+        }
+        const n = plans.items.len;
+        if (line.len < 34 or line[16] != ' ' or line[33] != ' ' or n >= f.blocks[bi].queries.len or
+            !std.mem.eql(u8, line[34..], f.blocks[bi].queries[n]))
+        {
+            f.rec_problem = stale;
+            return;
+        }
+        try plans.append(arena, .{ .code = line[0..16].*, .eqp = line[17..33].* });
+    }
+    if (bi + 1 != f.blocks.len or plans.items.len != f.blocks[bi].queries.len) {
+        f.rec_problem = stale;
+        return;
+    }
+    rec[bi] = try plans.toOwnedSlice(arena);
+    f.rec = rec;
+}
+
+fn hashOf(text: []const u8) Hash {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(text, &digest, .{});
+    return std.fmt.bytesToHex(digest[0..8], .lower);
 }
 
 fn usageError(out: *Io.Writer) !u8 {
@@ -460,20 +612,25 @@ fn setupBlock(c: *Check, ctx: *const Ctx, b: *const Block) !void {
     try Io.Dir.cwd().createDirPath(c.io, b.dir);
     const args = b.setup orelse return;
     // Build the database once with the reference so both read the same file.
-    const argv = try c.arena.alloc([]const u8, args.len + 2);
+    // The same database in every run, whatever random() the setup calls:
+    // the recorded plans and the output of the statements after an
+    // EXPLAIN depend on it.
+    const argv = try c.arena.alloc([]const u8, args.len + 3);
     argv[0] = ctx.cfg.sq;
     argv[1] = try std.fs.path.join(c.arena, &.{ b.dir, "main.db" });
-    @memcpy(argv[2..], args);
+    argv[2] = ".testctrl prng_seed 1";
+    @memcpy(argv[3..], args);
     _ = try c.run(argv, .{ .cwd = b.dir });
 }
 
-const Engine = enum { xq, sq };
+const Engine = enum { xq, sq, base };
 
 fn runChunk(c: *Check, ctx: *const Ctx, ch: *Chunk) !void {
     const dir = try c.path("b");
     try Check.copyTree(c.io, c.arena, ch.block.dir, dir);
     const db = try std.fs.path.join(c.arena, &.{ dir, "main.db" });
     var failures: std.ArrayList(Failure) = .empty;
+    if (ctx.against == .record) ch.plans = try c.keep.alloc(Plan, ch.end - ch.start);
     for (ch.block.queries[ch.start..ch.end], ch.start..) |q, qi| {
         // Anything but a plain query may change the database: it runs
         // on a copy (the statements after the first of an EXPLAIN run
@@ -481,7 +638,25 @@ fn runChunk(c: *Check, ctx: *const Ctx, ch: *Chunk) !void {
         const writes = !isPlainQuery(q) or std.mem.indexOfScalar(u8, q, ';') != null;
         for (std.enums.values(Kind)) |kind| {
             if (!ctx.kinds.contains(kind)) continue;
-            if (try compare(c, ctx, ch.block, db, q, kind, writes)) |f| {
+            // What the recording has of this query; null if the file's
+            // recording is missing or stale, which is reported once.
+            var want: ?Hash = null;
+            if (kind != .res) switch (ctx.against) {
+                .recording => {
+                    const rec = ch.file.rec orelse continue;
+                    const plan = rec[ch.block.index][qi];
+                    want = if (kind == .code) plan.code else plan.eqp;
+                },
+                .record => {
+                    const got = try planText(c, ctx, .xq, ch.block, db, q, kind, writes);
+                    if (std.mem.eql(u8, got, "TIMEOUT")) return error.Timeout;
+                    const plan = &ch.plans[qi - ch.start];
+                    if (kind == .code) plan.code = hashOf(got) else plan.eqp = hashOf(got);
+                    continue;
+                },
+                .sqlite, .base => {},
+            };
+            if (try compare(c, ctx, ch.block, db, q, kind, writes, want)) |f| {
                 var copy = f;
                 copy.query = qi;
                 try failures.append(c.keep, copy);
@@ -492,38 +667,45 @@ fn runChunk(c: *Check, ctx: *const Ctx, ch: *Chunk) !void {
 }
 
 /// One comparison; a failure if the engines disagree.
-fn compare(c: *Check, ctx: *const Ctx, b: *const Block, db: []const u8, q: []const u8, kind: Kind, writes: bool) !?Failure {
+fn compare(c: *Check, ctx: *const Ctx, b: *const Block, db: []const u8, q: []const u8, kind: Kind, writes: bool, want: ?Hash) !?Failure {
     var detail: Io.Writer.Allocating = .init(c.keep);
     const w = &detail.writer;
+    if (want) |h| {
+        const got = try planText(c, ctx, .xq, b, db, q, kind, writes);
+        if (std.mem.eql(u8, &hashOf(got), &h)) return null;
+        if (ctx.cfg.verbose) {
+            try w.writeAll("  --- xqlite now (--base XQLITE or --vs-sqlite shows a difference)\n");
+            try indentLines(w, got);
+        }
+        return .{ .query = 0, .kind = kind, .order_only = false, .detail = detail.written() };
+    }
+    const other: Engine = if (ctx.against == .base) .base else .sq;
+    const other_name = if (other == .base) "base" else "sqlite3";
     switch (kind) {
         .res => {
             const post: []const []const u8 = if (writes) &.{ ".dump", "PRAGMA integrity_check" } else &.{};
             const a = try runEngine(c, ctx, .xq, db, q, b.each, &.{}, post, writes);
             const s = try runEngine(c, ctx, .sq, db, q, b.each, &.{}, post, writes);
             if (std.mem.eql(u8, a, s)) return null;
-            if (ctx.cfg.verbose) try showBoth(w, s, a);
+            if (ctx.cfg.verbose) try showBoth(w, "sqlite3", s, a);
             return .{ .query = 0, .kind = kind, .order_only = try sameLines(c.arena, a, s), .detail = detail.written() };
         },
         .eqp => {
-            const text = try std.fmt.allocPrint(c.arena, "EXPLAIN QUERY PLAN {s}", .{q});
-            const a = try eqpTree(c.arena, try runEngine(c, ctx, .xq, db, text, b.each, &.{".explain off"}, &.{}, writes));
-            const s = try eqpTree(c.arena, try runEngine(c, ctx, .sq, db, text, b.each, &.{".explain off"}, &.{}, writes));
+            const a = try planText(c, ctx, .xq, b, db, q, kind, writes);
+            const s = try planText(c, ctx, other, b, db, q, kind, writes);
             if (std.mem.eql(u8, a, s)) return null;
-            if (ctx.cfg.verbose) try showBoth(w, s, a);
+            if (ctx.cfg.verbose) try showBoth(w, other_name, s, a);
             return .{ .query = 0, .kind = kind, .order_only = false, .detail = detail.written() };
         },
         .code => {
-            const text = try std.fmt.allocPrint(c.arena, "EXPLAIN {s}", .{q});
-            const a = try codeNorm(c.arena, try runEngine(c, ctx, .xq, db, text, b.each, &.{".explain off"}, &.{}, writes));
-            const s = try codeNorm(c.arena, try runEngine(c, ctx, .sq, db, text, b.each, &.{".explain off"}, &.{}, writes));
-            if (a.len == s.len) {
-                for (a, s) |x, y| {
-                    if (!std.mem.eql(u8, x, y)) break;
-                } else return null;
-            }
+            const a_text = try planText(c, ctx, .xq, b, db, q, kind, writes);
+            const s_text = try planText(c, ctx, other, b, db, q, kind, writes);
+            if (std.mem.eql(u8, a_text, s_text)) return null;
             if (ctx.cfg.verbose) {
+                const a = try collectLines(c.arena, a_text);
+                const s = try collectLines(c.arena, s_text);
                 var d: Io.Writer.Allocating = .init(c.arena);
-                try xqt.diff.writeLines(&d.writer, c.arena, "sqlite3", "xqlite", s, a, .{ .context = 2, .max_lines = std.math.maxInt(usize) });
+                try xqt.diff.writeLines(&d.writer, c.arena, other_name, "xqlite", s, a, .{ .context = 2, .max_lines = std.math.maxInt(usize) });
                 try indent(w, d.written(), "    ");
             }
             return .{ .query = 0, .kind = kind, .order_only = false, .detail = detail.written() };
@@ -531,9 +713,25 @@ fn compare(c: *Check, ctx: *const Ctx, b: *const Block, db: []const u8, q: []con
     }
 }
 
+/// An engine's EXPLAIN QUERY PLAN of `q` as a tree (`kind` eqp), or its
+/// EXPLAIN as codeNorm() leaves it, a line per instruction (code).
+fn planText(c: *Check, ctx: *const Ctx, engine: Engine, b: *const Block, db: []const u8, q: []const u8, kind: Kind, writes: bool) ![]const u8 {
+    const text = try std.fmt.allocPrint(c.arena, "EXPLAIN {s}{s}", .{ if (kind == .eqp) "QUERY PLAN " else "", q });
+    var out = try runEngine(c, ctx, engine, db, text, b.each, &.{".explain off"}, &.{}, writes);
+    // The directory the engines ran in (PRAGMA database_list has file
+    // names): another one in every run.
+    const dir = std.fs.path.dirname(db).?;
+    for ([_][]const u8{ try std.fmt.allocPrint(c.arena, "{s}.work", .{dir}), dir }) |d| {
+        for ([_][]const u8{ Io.Dir.cwd().realPathFileAlloc(c.io, d, c.arena) catch d, d }) |name|
+            out = try std.mem.replaceOwned(u8, c.arena, out, name, "DIR");
+    }
+    if (kind == .eqp) return eqpTree(c.arena, out);
+    return std.mem.join(c.arena, "\n", try codeNorm(c.arena, out));
+}
+
 /// diff.py -v for results and plans: each side indented.
-fn showBoth(w: *Io.Writer, sq: []const u8, xq: []const u8) !void {
-    try w.writeAll("  --- sqlite3\n");
+fn showBoth(w: *Io.Writer, other: []const u8, sq: []const u8, xq: []const u8) !void {
+    try w.print("  --- {s}\n", .{other});
     try indentLines(w, sq);
     try w.writeAll("  --- xqlite\n");
     try indentLines(w, xq);
@@ -602,6 +800,7 @@ fn runEngine(
     switch (engine) {
         .xq => try argv.appendSlice(c.arena, &.{ ctx.cfg.xq, "sql" }),
         .sq => try argv.append(c.arena, ctx.cfg.sq),
+        .base => try argv.appendSlice(c.arena, &.{ ctx.against.base, "sql" }),
     }
     try argv.append(c.arena, db);
     if (sqpre) |p| try argv.append(c.arena, p);
@@ -784,4 +983,15 @@ test codeNorm {
     try std.testing.expectEqual(3, got.len);
     try std.testing.expectEqualStrings("0|Init|0|1|0||0", got[0]);
     try std.testing.expectEqualStrings("ERR:x", got[2]);
+}
+
+test recordingPath {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("tools/planner/expected/wal.plan", try recordingPath(arena.allocator(), "tools/planner/wal.txt"));
+}
+
+test hashOf {
+    // SHA-256 of the empty string.
+    try std.testing.expectEqualStrings("e3b0c44298fc1c14", &hashOf(""));
 }

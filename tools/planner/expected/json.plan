@@ -1,0 +1,1501 @@
+# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+# the next block of the case file.
+c2e40870e57cff60 e1a8d6c43abd0bf4 SELECT json_array(1,2.5,null,'hello')
+8927dc5f29f1cc77 e1a8d6c43abd0bf4 SELECT json_array(1,'{"abc":2.5,"def":null,"ghi":hello}',99)
+974693928deb5b22 e1a8d6c43abd0bf4 SELECT json_array(1,json('{"abc":2.5,"def":null,"ghi":"hello"}'),99)
+4392ca473a317daf e1a8d6c43abd0bf4 SELECT json_array(1,json_object('abc',2.5,'def',null,'ghi','hello'),99)
+dc46c22085a5ad18 e1a8d6c43abd0bf4 SELECT hex(json_array('String "\ Test'))
+0117fd7ecdf68772 e1a8d6c43abd0bf4 SELECT json_array(1,printf('%.1000c','x'),x'abcd',3)
+34426b6999144d05 e1a8d6c43abd0bf4 SELECT jsonb_array(1,printf('%.1000c','x'),x'abcd',3)
+d54c5ef3a2c7a2f5 e1a8d6c43abd0bf4 SELECT hex(jsonb_array(1,printf('%.1000c','x'),x'abcd',3))
+488a910de6219164 e1a8d6c43abd0bf4 SELECT json(jsonb_array(1,printf('%.1000c','x'),x'abcd',3))
+e42113e2803ee954 e1a8d6c43abd0bf4 SELECT json_array(-9223372036854775808,9223372036854775807,0,1,-1, 0.0, 1.0, -1.0, -1e99, +2e100, 'one','two','three', 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, NULL, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 99)
+3804afdffacb15a7 e1a8d6c43abd0bf4 SELECT json(jsonb_array(-9223372036854775808,9223372036854775807,0,1,-1, 0.0, 1.0, -1.0, -1e99, +2e100, 'one','two','three', 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, NULL, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 99))
+31509fd5e54a41c4 e1a8d6c43abd0bf4 SELECT hex(jsonb_array(-9223372036854775808,9223372036854775807,0,1,-1, 0.0, 1.0, -1.0, -1e99, +2e100, 'one','two','three', 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, NULL, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 99))
+7255fc6ffe60feac e1a8d6c43abd0bf4 SELECT json_object('a',1,'b',2.5,'c',null,'d','String Test')
+03e0a969f4b9e1e6 e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',1,'b',2.5,'c',null,'d','String Test'))
+41dca1a7dd1a5919 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',1,'b',2.5,'c',null,'d','String Test'))
+2933bfe1719c4703 e1a8d6c43abd0bf4 SELECT json_object('a',printf('%.1000c','x'),2,2.5)
+742c83478a5e03ba e1a8d6c43abd0bf4 SELECT jsonb_object('a',printf('%.1000c','x'),2,2.5)
+11ca1e109fda35f4 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',printf('%.1000c','x'),2,2.5))
+614c03cfedb021e7 e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',printf('%.1000c','x'),2,2.5))
+a972a19e35bb9708 e1a8d6c43abd0bf4 SELECT json_object('a',json_array('xyx',77,4.5),'x',2.5)
+75881a90b8bac1b5 e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',json_array('xyx',77,4.5),'x',2.5))
+38c91c22ab8a22fe e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',json_array('xyx',77,4.5),'x',2.5))
+12796a2d220a899b e1a8d6c43abd0bf4 SELECT json_object('a',jsonb_array('xyx',77,4.5),'x',2.5)
+0c8ac49b87e0e68f e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',jsonb_array('xyx',77,4.5),'x',2.5))
+6c691f2143936516 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',jsonb_array('xyx',77,4.5),'x',2.5))
+94660d09bc5a6dc6 e1a8d6c43abd0bf4 SELECT json_object('a',1,'b')
+a6121aed7a538029 e1a8d6c43abd0bf4 SELECT json_object('a',printf('%.1000c','x'),'b',x'abcd')
+f89585bd927c3660 e1a8d6c43abd0bf4 SELECT json_object('a',printf('%.10c','x'),'b',jsonb_array(1,2,3))
+4aca235f10caeb2c e1a8d6c43abd0bf4 SELECT json_replace('{"a":1,"b":2}','$.a','[3,4,5]')
+4c6e97503d2d53f3 e1a8d6c43abd0bf4 SELECT json(jsonb_replace('{"a":1,"b":2}','$.a','[3,4,5]'))
+84cc9f62f51febc2 e1a8d6c43abd0bf4 SELECT hex(jsonb_replace('{"a":1,"b":2}','$.a','[3,4,5]'))
+082e6652baf284c2 e1a8d6c43abd0bf4 SELECT json_replace('{"a":1,"b":2}','$.a',json('[3,4,5]'))
+a27aa0fc09271c21 e1a8d6c43abd0bf4 SELECT json_replace('{"a":1,"b":2}','$.a',jsonb('[3,4,5]'))
+a5db9f12bc4d4092 e1a8d6c43abd0bf4 SELECT json_type(json_set('{"a":1,"b":2}','$.b','{"x":3,"y":4}'),'$.b')
+29f875dfd1c00580 e1a8d6c43abd0bf4 SELECT json_type(jsonb_set('{"a":1,"b":2}','$.b','{"x":3,"y":4}'),'$.b')
+9e2fc90062ef3e3d e1a8d6c43abd0bf4 SELECT json_type(json_set('{"a":1,"b":2}','$.b',json('{"x":3,"y":4}')),'$.b')
+bcddb84727f7849b e1a8d6c43abd0bf4 SELECT json_type(jsonb_set('{"a":1,"b":2}','$.b',jsonb('{"x":3,"y":4}')),'$.b')
+----
+b3dcd4671423b000 3208993b8d2cffb5 SELECT * FROM j1 WHERE NOT json_valid(x)
+c946392e4fdca0c3 3208993b8d2cffb5 SELECT * FROM j1 WHERE NOT json_valid(char(0x20,0x09,0x0a,0x0d)||x)
+de03de75244828d4 3208993b8d2cffb5 SELECT * FROM j1 WHERE NOT json_valid(x||char(0x20,0x09,0x0a,0x0d))
+406c45c7dd7b001f e1a8d6c43abd0bf4 SELECT json_valid(''), json_valid(char(0x20,0x09,0x0a,0x0d))
+a98e15211dce349d 3208993b8d2cffb5 SELECT x FROM j1 WHERE json_remove(x)<>x
+0a9e7d321ae8ad70 3208993b8d2cffb5 SELECT x FROM j1 WHERE json_replace(x)<>x
+fd0d243a4481bdb3 3208993b8d2cffb5 SELECT x FROM j1 WHERE json_set(x)<>x
+2955a395847ae243 3208993b8d2cffb5 SELECT x FROM j1 WHERE json_insert(x)<>x
+eeea8db2b7cb1437 e1a8d6c43abd0bf4 SELECT json_insert('{"a":1}','$.b',CAST(x'0000' AS text))
+dd6d1999b7fa67f7 3208993b8d2cffb5 SELECT count(*) FROM j1 WHERE json_type(x) IN ('object','array')
+4f48e004c5071f90 3208993b8d2cffb5 SELECT x FROM j1 WHERE json_extract(x,'$')<>x AND json_type(x) IN ('object','array')
+----
+c900d23a25062599 6ca849a5cc91833c SELECT count(*) FROM j1b WHERE json_type(x) IN ('object','array')
+42b27efc28582308 6ca849a5cc91833c SELECT json(x) FROM j1b WHERE json_extract(x,'$')<>json(x) AND json_type(x) IN ('object','array')
+----
+ae9cba1a63fee00b 524cbc85f2cd303e SELECT count(*) FROM j2
+----
+936f76313ec2dd80 9b42a2ef58cab7db SELECT count(*) FROM j2b
+4c114ba96341b225 524cbc85f2cd303e SELECT id, json_valid(json), json_type(json), '|' FROM j2 ORDER BY id
+05a8c376d18d655d 9b42a2ef58cab7db SELECT id, json_valid(json,5), json_type(json), '|' FROM j2b ORDER BY id
+13fc592a658b2540 e1a8d6c43abd0bf4 SELECT json_valid('{"a":55,"b":72,}')
+2f11527d8c1b9ef4 e1a8d6c43abd0bf4 SELECT json_error_position('{"a":55,"b":72,}')
+459b19f405a810c7 e1a8d6c43abd0bf4 SELECT json_valid(json('{"a":55,"b":72,}'))
+fe47bfb978ea5009 e1a8d6c43abd0bf4 SELECT json_valid('{"a":55,"b":72 , }')
+e6b94fd382dea665 e1a8d6c43abd0bf4 SELECT json_error_position('{"a":55,"b":72 , }')
+c0a5f9122eeaa4ab e1a8d6c43abd0bf4 SELECT json_error_position('{"a":55,"b":72,,}')
+6701f29c72dd6c9c e1a8d6c43abd0bf4 SELECT json_valid('{"a":55,"b":72}')
+43e88af78f9a59a5 e1a8d6c43abd0bf4 SELECT json_error_position('["a",55,"b",72,]')
+506eecdb724af3a5 e1a8d6c43abd0bf4 SELECT json_error_position('["a",55,"b",72 , ]')
+7bde5c5f52d81223 e1a8d6c43abd0bf4 SELECT json_error_position('["a",55,"b",72,,]')
+f8bf787bb490af12 e1a8d6c43abd0bf4 SELECT json_valid('["a",55,"b",72]')
+92db2a42d3b98de2 e1a8d6c43abd0bf4 SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x20),char(0x20),char(0x20),char(0x20),char(0x20),char(0x20)))
+4d3fbcaa5710e523 e1a8d6c43abd0bf4 SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x09),char(0x09),char(0x09),char(0x09),char(0x09),char(0x09)))
+afeafaba83d446c5 e1a8d6c43abd0bf4 SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x0A),char(0x0A),char(0x0A),char(0x0A),char(0x0A),char(0x0A)))
+b5fec3ea2e16c82b e1a8d6c43abd0bf4 SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x0D),char(0x0D),char(0x0D),char(0x0D),char(0x0D),char(0x0D)))
+9bc7826bd3a8f157 e1a8d6c43abd0bf4 SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x0C),char(0x0C),char(0x0C),char(0x0C),char(0x0C),char(0x0C)))
+82738740719ef300 e1a8d6c43abd0bf4 SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20)))
+6e8c2fbd08b40a6d e1a8d6c43abd0bf4 SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20)))
+----
+9e111d033e9c6962 73635e4d7f8e5df5 SELECT b FROM t8
+----
+9f02851e2e472663 73635e4d7f8e5df5 SELECT json(b) FROM t8
+e9098814758ef490 73635e4d7f8e5df5 SELECT a=json_extract(b,'$[0]') FROM t8
+874c0d146529ac1a e1a8d6c43abd0bf4 SELECT json_valid(char(0x22,0xe4,0x22))
+453c1f3f076257d6 e1a8d6c43abd0bf4 SELECT unicode(json_extract(char(0x22,228,0x22),'$'))
+68a1e14cbe1038bd e1a8d6c43abd0bf4 SELECT json_quote('abc"xyz')
+b149b6181d81aca4 e1a8d6c43abd0bf4 SELECT json_quote(3.14159)
+f94db26009ea4f73 e1a8d6c43abd0bf4 SELECT json_quote(12345)
+dca8cfbdfabd1976 e1a8d6c43abd0bf4 SELECT json_quote(null)
+ea340c652c63210e e1a8d6c43abd0bf4 SELECT json_quote(x'3031323334')
+3f3ba6869d95a673 30a3be193f402919 SELECT json_quote(123,456)
+f2c8430b723a4091 adcaf9e5623bdda1 SELECT json_quote()
+7248f6a39067dcea e1a8d6c43abd0bf4 SELECT json_valid('" \ "')
+8fc617e8ada22f4b e1a8d6c43abd0bf4 SELECT json_valid('" \" "')
+4aa245641ebf1eb0 e1a8d6c43abd0bf4 SELECT json_valid('" \'' "')
+2d575cf0f9463f22 e1a8d6c43abd0bf4 SELECT json_valid('" \/ "')
+345a77c6e1625939 e1a8d6c43abd0bf4 SELECT json_valid('" \0 "')
+d694625bc21ed32f e1a8d6c43abd0bf4 SELECT json_valid('" \\ "')
+4539c7f2389cd7e5 e1a8d6c43abd0bf4 SELECT json_valid('" \a "')
+c8802de870e05d5d e1a8d6c43abd0bf4 SELECT json_valid('" \b "')
+ac2a61040b99d614 e1a8d6c43abd0bf4 SELECT json_valid('" \f "')
+0bfa0bb4050c994c e1a8d6c43abd0bf4 SELECT json_valid('" \n "')
+dad78dd0142ad79f e1a8d6c43abd0bf4 SELECT json_valid('" \q "')
+f96b559b0794c7e3 e1a8d6c43abd0bf4 SELECT json_valid('" \r "')
+8164e7a2d8d24322 e1a8d6c43abd0bf4 SELECT json_valid('" \t "')
+6d590d19180e9292 e1a8d6c43abd0bf4 SELECT json_valid('" \ua "')
+7ae31d224a55c95c e1a8d6c43abd0bf4 SELECT json_valid('" \uab "')
+10aa85ac8fcf3116 e1a8d6c43abd0bf4 SELECT json_valid('" \uabc "')
+9037f2c658276f94 e1a8d6c43abd0bf4 SELECT json_valid('" \uabcd "')
+3cd2481f53bc0a52 e1a8d6c43abd0bf4 SELECT json_valid('" \uFEDC "')
+1ffc3269891d68b1 e1a8d6c43abd0bf4 SELECT json_valid('" \u1234 "')
+4b6ff5ecd90cbc5b e1a8d6c43abd0bf4 SELECT json_valid('" \v "')
+fe111afba0056ab3 e1a8d6c43abd0bf4 SELECT json_valid('" \x "')
+7abb3b9a34033207 e1a8d6c43abd0bf4 SELECT json_valid('" \{ "')
+79937a0391302c91 e1a8d6c43abd0bf4 SELECT json_valid(printf('%.1000c0%.1000c','[',']'))
+e3310c3b23d7d113 e1a8d6c43abd0bf4 SELECT json_valid(printf('%.1001c0%.1001c','[',']'))
+4382aff339d0e7e4 e1a8d6c43abd0bf4 SELECT json_valid(replace(printf('%.1000c0%.1000c','[','}'),'[','{"a":'))
+34fa1f43f774ef44 e1a8d6c43abd0bf4 SELECT json_valid(replace(printf('%.1001c0%.1001c','[','}'),'[','{"a":'))
+----
+3b95d28a25de8dca 01d67d29a80942b8 SELECT json_remove(x, '$.settings.layer2."dis.legomenon".forceDisplay') FROM t12
+e7c2afd098408de1 01d67d29a80942b8 SELECT json_remove(jsonb(x), '$.settings.layer2."dis.legomenon".forceDisplay') FROM t12
+ff9d094e699ff2e0 01d67d29a80942b8 SELECT json_extract(x, '$.settings.layer2."tris.legomenon"."summary.report"') FROM t12
+fc7751bc2c403a8b 01d67d29a80942b8 SELECT json_extract(jsonb(x), '$.settings.layer2."tris.legomenon"."summary.report"') FROM t12
+----
+672dcfad5329d132 e1a8d6c43abd0bf4 SELECT length(json_extract('"abc\uD834\uDD1Exyz"','$'))
+6a3f7fe4a5b4dab7 e1a8d6c43abd0bf4 SELECT length(json_extract('"\uD834\uDD1E"','$'))
+a64510dc8dc8fcdc e1a8d6c43abd0bf4 SELECT unicode(json_extract('"\uD834\uDD1E"','$'))
+----
+db0b302aa0bdf506 e1a8d6c43abd0bf4 SELECT json_valid('{"":5}')
+364acac02a010342 e1a8d6c43abd0bf4 SELECT json_extract('{"":5}', '$.""')
+9f3dd39ad836518e e1a8d6c43abd0bf4 SELECT json_extract('[3,{"a":4,"":[5,{"hi":6},7]},8]', '$[1].""[1].hi')
+73b28c804269afef e1a8d6c43abd0bf4 SELECT json_extract('[3,{"a":4,"":[5,{"hi":6},7]},8]', '$[1].""[1]."hi"')
+5ff5aa2df9d1f7ab e1a8d6c43abd0bf4 SELECT json_extract('{"":8}', '$.')
+----
+9a038afc6ad8aafd f9d39680f4a9bea0 SELECT * FROM t1
+985f9adb14d33728 e1a8d6c43abd0bf4 SELECT json_object('a',2e370,'b',-3e380)
+955e7ca4f0c8d9e4 e1a8d6c43abd0bf4 SELECT json_object('a',2e370,'b',-3e380)->>'a'
+3d18066cbdbe59a0 e1a8d6c43abd0bf4 SELECT json_object('a',2e370,'b',-3e380)->>'b'
+7e4467a57f8645ec e1a8d6c43abd0bf4 SELECT json_valid(NULL)
+ed05555bdc5c2930 e1a8d6c43abd0bf4 SELECT json_error_position(NULL)
+5edcc5765f754382 e1a8d6c43abd0bf4 SELECT json(NULL)
+2541f61faa65ee43 e1a8d6c43abd0bf4 SELECT json_array(NULL)
+852fb71bdaa1b127 e1a8d6c43abd0bf4 SELECT json_extract(NULL)
+7422c9feb456a497 e1a8d6c43abd0bf4 SELECT json_insert(NULL,'$',123)
+47fd64afb8d6f532 e1a8d6c43abd0bf4 SELECT NULL->0
+ce6142fecda8e9fd e1a8d6c43abd0bf4 SELECT NULL->>0
+91a33d7486868094 e1a8d6c43abd0bf4 SELECT '{a:5}'->NULL
+887ed33f8d3f9788 e1a8d6c43abd0bf4 SELECT '{a:5}'->>NULL
+df702956f52054d6 e1a8d6c43abd0bf4 SELECT json_object(NULL,5)
+ea8056aabb84bddf e1a8d6c43abd0bf4 SELECT json_patch(NULL,'{a:5}')
+892303c4e856014f e1a8d6c43abd0bf4 SELECT json_patch('{a:5}',NULL)
+314b27da0fa367c3 e1a8d6c43abd0bf4 SELECT json_patch(NULL,NULL)
+473061cf4a2e9c6e e1a8d6c43abd0bf4 SELECT json_remove(NULL,'$')
+093154e714201ba5 e1a8d6c43abd0bf4 SELECT json_remove('{a:5,b:7}',NULL)
+b8d8ad719d7a4c80 e1a8d6c43abd0bf4 SELECT json_replace(NULL,'$.a',123)
+ea3b94ee5ab32660 e1a8d6c43abd0bf4 SELECT json_replace('{a:5,b:7}',NULL,NULL)
+2af93c20626279b5 e1a8d6c43abd0bf4 SELECT json_set(NULL,'$.a',123)
+e7a7fb312057fd06 e1a8d6c43abd0bf4 SELECT json_set('{a:5,b:7}',NULL,NULL)
+46aa084e20406fac e1a8d6c43abd0bf4 SELECT json_type(NULL)
+77acca0069bcd49e e1a8d6c43abd0bf4 SELECT json_type('{a:5,b:7}',NULL)
+dca8cfbdfabd1976 e1a8d6c43abd0bf4 SELECT json_quote(NULL)
+2394e32c496ea6c7 e59f7476b6872d63 WITH c(x) AS (VALUES(1),(2.0),(NULL),('three')) SELECT json_group_array(x) FROM c
+05050ba517b3d566 82fc61d11377d0c5 WITH c(x,y) AS (VALUES('a',1),('b',2.0),('c',NULL),(NULL,'three'),('e','four')) SELECT json_group_object(x,y) FROM c
+c8d68a1b0dc5af19 e1a8d6c43abd0bf4 SELECT json_set( '{}', '$.a', json('1'), '$.a', json('2'), '$.b', json('3'), '$.b', json('4'), '$.c', json('5'), '$.c', json('6') )
+54874e4656f11fad e1a8d6c43abd0bf4 SELECT json_replace( '{"a":7,"b":8,"c":9}', '$.a', json('1'), '$.a', json('2'), '$.b', json('3'), '$.b', json('4'), '$.c', json('5'), '$.c', json('6') )
+1c2da0a659e19d40 16706047a2fbebd9 SELECT j, j->>0, j->>1 FROM (SELECT json_set(json_set('[]','$[#]',0), '$[#]',1) AS j)
+503e01e35fccc20f 16706047a2fbebd9 SELECT j, j->>0, j->>1 FROM (SELECT json_set('[]','$[#]',0,'$[#]',1) AS j)
+f936ef7a1803b5ca e1a8d6c43abd0bf4 SELECT json_insert('{}','$.a.b.c',9)
+d708829780a84556 e1a8d6c43abd0bf4 SELECT json_set('{}','$.a.b.c',9)
+8ed1c11b85915d41 e1a8d6c43abd0bf4 SELECT json_replace('{}','$.a.b.c',9)
+8529a24f4849c831 e1a8d6c43abd0bf4 SELECT json_insert('{a:4}','$.a.b.c',9)
+f96f1a33043378fb e1a8d6c43abd0bf4 SELECT json_set('{a:4}','$.a.b.c',9)
+31df1cdea449a67e e1a8d6c43abd0bf4 SELECT json_replace('{a:4}','$.a.b.c',9)
+3b839d6425f3602c e1a8d6c43abd0bf4 SELECT json_insert('{a:{}}','$.a.b.c',9)
+72df048ca9197002 e1a8d6c43abd0bf4 SELECT json_set('{a:{}}','$.a.b.c',9)
+3eae9eca1e6b3965 e1a8d6c43abd0bf4 SELECT json_replace('{a:{}}','$.a.b.c',9)
+2eba204e06f62a3a e1a8d6c43abd0bf4 SELECT json_insert('[0,1,2]','$[3].a[0].b',9)
+2fe34540ab1d2873 e1a8d6c43abd0bf4 SELECT json_set('[0,1,2]','$[3].a[0].b',9)
+aa76ef061a5851df e1a8d6c43abd0bf4 SELECT json_replace('[0,1,2]','$[3].a[0].b',9)
+2a312f7428214149 e1a8d6c43abd0bf4 SELECT json_insert('[0,1,2]','$[1].a[0].b',9)
+c12000baa6c1b1b3 e1a8d6c43abd0bf4 SELECT json_set('[0,1,2]','$[1].a[0].b',9)
+248411f4e3c26416 e1a8d6c43abd0bf4 SELECT json_replace('[0,1,2]','$[1].a[0].b',9)
+142778bdcbd5c0b4 e1a8d6c43abd0bf4 SELECT json_insert('[0,{},2]','$[1].a[0].b',9)
+4cc435ece06ec70a e1a8d6c43abd0bf4 SELECT json_set('[0,{},2]','$[1].a[0].b',9)
+be66ade7441814c1 e1a8d6c43abd0bf4 SELECT json_replace('[0,{},2]','$[1].a[0].b',9)
+fc7bc1ddf9d7e5e8 e1a8d6c43abd0bf4 SELECT json_insert('[0,1,2]','$[3][0].b',9)
+ff265983c32409a3 e1a8d6c43abd0bf4 SELECT json_set('[0,1,2]','$[3][0].b',9)
+6f5e688a4298cd6f e1a8d6c43abd0bf4 SELECT json_replace('[0,1,2]','$[3][0].b',9)
+eac54efa4651e83e e1a8d6c43abd0bf4 SELECT json_insert('[0,1,2]','$[1][0].b',9)
+461d6778c7701a58 e1a8d6c43abd0bf4 SELECT json_set('[0,1,2]','$[1][0].b',9)
+09219fb20a8cb05e e1a8d6c43abd0bf4 SELECT json_replace('[0,1,2]','$[1][0].b',9)
+8c93139ac9fea3be e1a8d6c43abd0bf4 SELECT json_array(0.1234567890123456789)->>0 = 0.1234567890123456789
+30001ed7395b179e e1a8d6c43abd0bf4 SELECT json_valid(x'CC141761133117621332176313331764133437656565',8)
+----
+2c0194902a5248ae e1a8d6c43abd0bf4 SELECT json_object('ex','[52,3.14159]')
+f2e8e4a7a4fe4fcb e1a8d6c43abd0bf4 SELECT json(jsonb_object('ex','[52,3.14159]'))
+1f23179172b191ba e1a8d6c43abd0bf4 SELECT hex(jsonb_object('ex','[52,3.14159]'))
+41812b87f50509c8 e1a8d6c43abd0bf4 SELECT json_object('ex',json('[52,3.14159]'))
+cfbe91b3158ea5c6 e1a8d6c43abd0bf4 SELECT json(jsonb_object('ex',json('[52,3.14159]')))
+1ee16287059fe462 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('ex',json('[52,3.14159]')))
+084b41dcf39149c5 e1a8d6c43abd0bf4 SELECT json_object('ex',jsonb('[52,3.14159]'))
+8f9daaf33c3d5443 e1a8d6c43abd0bf4 SELECT json(jsonb_object('ex',jsonb('[52,3.14159]')))
+0fb7083d788be60f e1a8d6c43abd0bf4 SELECT hex(jsonb_object('ex',jsonb('[52,3.14159]')))
+543fbbe2dad66935 e1a8d6c43abd0bf4 SELECT json_object('ex',json_array(52,3.14159))
+e124bce8a04a4e6f e1a8d6c43abd0bf4 SELECT json(jsonb_object('ex',json_array(52,3.14159)))
+4ac484b25c622c75 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('ex',json_array(52,3.14159)))
+b65ec3389da68c78 e1a8d6c43abd0bf4 SELECT json_object('ex',jsonb_array(52,3.14159))
+37d0f28aea516f4e e1a8d6c43abd0bf4 SELECT json(jsonb_object('ex',jsonb_array(52,3.14159)))
+771835278b8e7504 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('ex',jsonb_array(52,3.14159)))
+052bf1419d2c8227 e1a8d6c43abd0bf4 SELECT json(' { "this" : "is", "a": [ "test" ] } ')
+c2f3f507e4e7ac00 e1a8d6c43abd0bf4 SELECT json(jsonb(' { "this" : "is", "a": [ "test" ] } '))
+ce15afc4782066e7 e1a8d6c43abd0bf4 SELECT hex(jsonb(' { "this" : "is", "a": [ "test" ] } '))
+dbcd9e8b291a8ee2 e1a8d6c43abd0bf4 SELECT json_array(1,2,'3',4)
+adfbebba3cba875a e1a8d6c43abd0bf4 SELECT json(jsonb_array(1,2,'3',4))
+45383c240e0e92db e1a8d6c43abd0bf4 SELECT hex(jsonb_array(1,2,'3',4))
+a1bb41de432b285f e1a8d6c43abd0bf4 SELECT json_array('[1,2]')
+c350b6cdb92fe7d3 e1a8d6c43abd0bf4 SELECT json(jsonb_array('[1,2]'))
+6019f09b0ac4304a e1a8d6c43abd0bf4 SELECT hex(jsonb_array('[1,2]'))
+6ce9f603b14a847b e1a8d6c43abd0bf4 SELECT json_array(json_array(1,2))
+f13f741cb4bca80d e1a8d6c43abd0bf4 SELECT json_array(jsonb_array(1,2))
+74162ecae8792469 e1a8d6c43abd0bf4 SELECT json(jsonb_array(json_array(1,2)))
+087dc0089561d34b e1a8d6c43abd0bf4 SELECT hex(jsonb_array(json_array(1,2)))
+2cd77df040a0c911 e1a8d6c43abd0bf4 SELECT json(jsonb_array(jsonb_array(1,2)))
+7e53a48890ea2249 e1a8d6c43abd0bf4 SELECT hex(jsonb_array(jsonb_array(1,2)))
+82171d4993f507b3 e1a8d6c43abd0bf4 SELECT json_array(1,null,'3','[4,5]','{"six":7.7}')
+07904dcf77d86e0c e1a8d6c43abd0bf4 SELECT json(jsonb_array(1,null,'3','[4,5]','{"six":7.7}'))
+cb1ff5a143e6af1e e1a8d6c43abd0bf4 SELECT hex(jsonb_array(1,null,'3','[4,5]','{"six":7.7}'))
+f1b17206a8795f18 e1a8d6c43abd0bf4 SELECT json_array(1,null,'3',json('[4,5]'),json('{"six":7.7}'))
+575798f81e2127b6 e1a8d6c43abd0bf4 SELECT json_array(1,null,'3',jsonb('[4,5]'),json('{"six":7.7}'))
+88a86395309f0603 e1a8d6c43abd0bf4 SELECT json(jsonb_array(1,null,'3',json('[4,5]'),json('{"six":7.7}')))
+72f577d105d6251f e1a8d6c43abd0bf4 SELECT hex(jsonb_array(1,null,'3',json('[4,5]'),json('{"six":7.7}')))
+f2619d8e76d162b5 e1a8d6c43abd0bf4 SELECT json(jsonb_array(1,null,'3',jsonb('[4,5]'),jsonb('{"six":7.7}')))
+4c208332f38418f7 e1a8d6c43abd0bf4 SELECT hex(jsonb_array(1,null,'3',jsonb('[4,5]'),jsonb('{"six":7.7}')))
+f15044cba667e1da e1a8d6c43abd0bf4 SELECT json_array_length('[1,2,3,4]')
+3db27aafa43a7e93 e1a8d6c43abd0bf4 SELECT json_array_length(jsonb('[1,2,3,4]'))
+ccb6041c32586ec5 e1a8d6c43abd0bf4 SELECT json_array_length( json_remove('[1,2,3,4]','$[2]') )
+e2fde6d95ea1dcc1 e1a8d6c43abd0bf4 SELECT json_array_length( jsonb_remove('[1,2,3,4]','$[2]') )
+a7ec18cac58f30fd e1a8d6c43abd0bf4 SELECT json_array_length('[1,2,3,4]', '$')
+c1b4103f6eac6923 e1a8d6c43abd0bf4 SELECT json_array_length(jsonb('[1,2,3,4]'), '$')
+61abc5b277416055 e1a8d6c43abd0bf4 SELECT json_array_length('[1,2,3,4]', '$[2]')
+3cf096a1679352cf e1a8d6c43abd0bf4 SELECT json_array_length(jsonb('[1,2,3,4]'), '$[2]')
+636c261caa06d38e e1a8d6c43abd0bf4 SELECT json_array_length('{"one":[1,2,3]}')
+8d82078110653f80 e1a8d6c43abd0bf4 SELECT json_array_length(jsonb('{"one":[1,2,3]}'), '$.one')
+7857f7fa252196e7 e1a8d6c43abd0bf4 SELECT json_array_length('{"one":[1,2,3]}', '$.two')
+6448be3d1ec0d352 e1a8d6c43abd0bf4 SELECT json_array_length(jsonb('{"one":[1,2,3]}'), '$.two')
+21e41773ee3ae6f1 e1a8d6c43abd0bf4 SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$')
+2b8d451de0392bda e1a8d6c43abd0bf4 SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$')
+45dc27ea130ee706 e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$'))
+5821012570add4eb e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$'))
+bf9887e7879d66f6 e1a8d6c43abd0bf4 SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$'))
+4e241fc386461801 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$'))
+7b869965e7221e35 e1a8d6c43abd0bf4 SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c')
+fbf823a093ecd299 e1a8d6c43abd0bf4 SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c')
+dd4e003546470440 e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c'))
+e82721adb0ad27bb e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c'))
+f6ae102b077b7847 e1a8d6c43abd0bf4 SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c'))
+636ff3a0235ada51 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c'))
+87449aa691a5a682 e1a8d6c43abd0bf4 SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2]')
+f811c84e87ea57d9 e1a8d6c43abd0bf4 SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c[2]')
+fd19b68157922273 e1a8d6c43abd0bf4 SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c[2]'))
+675eb2d1377b6fb7 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c[2]'))
+0e206058e421963a e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2]'))
+f736c4a7d57e834f e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2]'))
+ae19d20b7ff71ea8 e1a8d6c43abd0bf4 SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f')
+9d23a91f66300868 e1a8d6c43abd0bf4 SELECT jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f')
+8f3ccde3d496e669 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f'))
+1a78754e027066ba e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f'))
+333ab545d0ed8d75 e1a8d6c43abd0bf4 SELECT json_extract('{"a":2,"c":[4,5],"f":7}','$.c','$.a')
+a8a3c9b5cb4d6ec2 e1a8d6c43abd0bf4 SELECT json_extract(jsonb('{"a":2,"c":[4,5],"f":7}'),'$.c','$.a')
+eeaa56f900d146c1 e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":2,"c":[4,5],"f":7}','$.c','$.a'))
+facabccdfb738155 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":2,"c":[4,5],"f":7}','$.c','$.a'))
+b122c355e5986fcb e1a8d6c43abd0bf4 SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5],"f":7}'),'$.c','$.a'))
+912e40eb7c622000 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5],"f":7}'),'$.c','$.a'))
+4d6c1a4088135d16 e1a8d6c43abd0bf4 SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x')
+370e359abe2c1b8d e1a8d6c43abd0bf4 SELECT jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x')
+6479a0f8c2d25406 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x'))
+b186d7fa23fb9ff8 e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x'))
+d7d2b99fd2e6df13 e1a8d6c43abd0bf4 SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x', '$.a')
+b8ba6f1f0e3993c6 e1a8d6c43abd0bf4 SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.x', '$.a')
+4ced4a444d0bcbae e1a8d6c43abd0bf4 SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.x', '$.a'))
+3e374be0d1b91ce2 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.x', '$.a'))
+f84827379145bcfb e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x', '$.a'))
+c1063dfd1d2c6088 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x', '$.a'))
+f5316a4164fb2b08 e1a8d6c43abd0bf4 SELECT json_insert('{"a":2,"c":4}', '$.a', 99)
+601a0b6845041e2d e1a8d6c43abd0bf4 SELECT json_insert(jsonb('{"a":2,"c":4}'), '$.a', 99)
+d08504bad1501a51 e1a8d6c43abd0bf4 SELECT json(jsonb_insert('{"a":2,"c":4}', '$.a', 99))
+9235c2c6fc867ade e1a8d6c43abd0bf4 SELECT hex(jsonb_insert('{"a":2,"c":4}', '$.a', 99))
+e07ea14cc0a109a1 e1a8d6c43abd0bf4 SELECT json(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.a', 99))
+86043e03ecccfaef e1a8d6c43abd0bf4 SELECT hex(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.a', 99))
+6d7b793db849c6db e1a8d6c43abd0bf4 SELECT json_insert('{"a":2,"c":4}', '$.e', 99)
+078a4f0c92f73b37 e1a8d6c43abd0bf4 SELECT json_insert(jsonb('{"a":2,"c":4}'), '$.e', 99)
+8bf3d5fc4ccbf4bb e1a8d6c43abd0bf4 SELECT json(jsonb_insert('{"a":2,"c":4}', '$.e', 99))
+548b59b7fbc7bf67 e1a8d6c43abd0bf4 SELECT hex(jsonb_insert('{"a":2,"c":4}', '$.e', 99))
+938b039f25811a2e e1a8d6c43abd0bf4 SELECT json(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.e', 99))
+27835c1f4a0d1188 e1a8d6c43abd0bf4 SELECT hex(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.e', 99))
+e0565b962dd95c17 e1a8d6c43abd0bf4 SELECT json_replace('{"a":2,"c":4}', '$.a', 99)
+c8125e2ddb1fb206 e1a8d6c43abd0bf4 SELECT json_replace(jsonb('{"a":2,"c":4}'), '$.a', 99)
+4f3300d00420a5ff e1a8d6c43abd0bf4 SELECT json(jsonb_replace('{"a":2,"c":4}', '$.a', 99))
+4a1bcd45241fcda9 e1a8d6c43abd0bf4 SELECT hex(jsonb_replace('{"a":2,"c":4}', '$.a', 99))
+402656e46e2b8e6e e1a8d6c43abd0bf4 SELECT json(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.a', 99))
+67177f65acf078d3 e1a8d6c43abd0bf4 SELECT hex(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.a', 99))
+ca6ec57491d16817 e1a8d6c43abd0bf4 SELECT json_replace('{"a":2,"c":4}', '$.e', 99)
+340067f0aafe7068 e1a8d6c43abd0bf4 SELECT json_replace(jsonb('{"a":2,"c":4}'), '$.e', 99)
+9f7ada24204f08f9 e1a8d6c43abd0bf4 SELECT json(jsonb_replace('{"a":2,"c":4}', '$.e', 99))
+ce6043ed4ed306ba e1a8d6c43abd0bf4 SELECT hex(jsonb_replace('{"a":2,"c":4}', '$.e', 99))
+2a9f2f8a5c6fc836 e1a8d6c43abd0bf4 SELECT json(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.e', 99))
+85b789422969cfd8 e1a8d6c43abd0bf4 SELECT hex(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.e', 99))
+77a0c9eba3f96664 e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}', '$.a', 99)
+d428fbcdb2fadbae e1a8d6c43abd0bf4 SELECT json_set(jsonb('{"a":2,"c":4}'), '$.a', 99)
+912b1eaafedf34e0 e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}', '$.a', 99))
+69a3fe84cf4b7022 e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}', '$.a', 99))
+069f64e3ae5cb490 e1a8d6c43abd0bf4 SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.a', 99))
+9ea762cb3a8cfae0 e1a8d6c43abd0bf4 SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.a', 99))
+e2b9e7ef3ce9ac7f e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}', '$.e', 99)
+019b4b7fa659bf9f e1a8d6c43abd0bf4 SELECT json_set(jsonb('{"a":2,"c":4}'), '$.e', 99)
+b29de73739cf4bec e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}', '$.e', 99))
+92a3be344106ca3e e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}', '$.e', 99))
+77ea901bd6bf3ac8 e1a8d6c43abd0bf4 SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.e', 99))
+95259c236edccf4b e1a8d6c43abd0bf4 SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.e', 99))
+b3740490afee73d8 e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}', '$.c', '[97,96]')
+a380150cd028cb4c e1a8d6c43abd0bf4 SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', '[97,96]')
+992e31f9f26ae194 e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', '[97,96]'))
+bc363942dad0e05d e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', '[97,96]'))
+0d6e5884722479fe e1a8d6c43abd0bf4 SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', '[97,96]'))
+5e629ed052066019 e1a8d6c43abd0bf4 SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', '[97,96]'))
+188e1e7a993435a4 e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}', '$.c', json('[97,96]'))
+544c6f656c916e3f e1a8d6c43abd0bf4 SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', json('[97,96]'))
+aab83834f126b8e0 e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', json('[97,96]')))
+8b92f2efc4cd292a e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', json('[97,96]')))
+00a14f8e333c860d e1a8d6c43abd0bf4 SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json('[97,96]')))
+6b423df45b3def8f e1a8d6c43abd0bf4 SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json('[97,96]')))
+fcbfc791eb42be1c e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}', '$.c', jsonb('[97,96]'))
+e0c1a3d6a235f95a e1a8d6c43abd0bf4 SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb('[97,96]'))
+c5929d3fc07bedb1 e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', jsonb('[97,96]')))
+6c1052f01c8ded77 e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', jsonb('[97,96]')))
+313422316718ce45 e1a8d6c43abd0bf4 SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb('[97,96]')))
+931a460ec8043448 e1a8d6c43abd0bf4 SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb('[97,96]')))
+52914d18d661e9de e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}', '$.c', json_array(97,96))
+f8b569eb4f56d3ad e1a8d6c43abd0bf4 SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', json_array(97,96))
+77145fc7b8aa8daf e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', json_array(97,96)))
+bfc3875592a6b075 e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', json_array(97,96)))
+fbc7b02bb7974ed5 e1a8d6c43abd0bf4 SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json_array(97,96)))
+e98534d5950472e0 e1a8d6c43abd0bf4 SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json_array(97,96)))
+9d0977d39551c838 e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}', '$.c', jsonb_array(97,96))
+38023a4aebdec4bd e1a8d6c43abd0bf4 SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb_array(97,96))
+adc71f08e0a532a0 e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', jsonb_array(97,96)))
+29ec2f8fcfef8617 e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', jsonb_array(97,96)))
+2f29783c015301c9 e1a8d6c43abd0bf4 SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb_array(97,96)))
+0797ede8e5cb8637 e1a8d6c43abd0bf4 SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb_array(97,96)))
+88a6c888e7183261 e1a8d6c43abd0bf4 SELECT json_object('a',2,'c',4)
+f938ad921227823c e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',2,'c',4))
+f0bdf6195aa315b5 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',2,'c',4))
+79ebd16644321c18 e1a8d6c43abd0bf4 SELECT json_object('a',2,'c','{e:5}')
+bbb13b7e029d7e50 e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',2,'c','{e:5}'))
+dad0f45840dc826b e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',2,'c','{e:5}'))
+48b552eb0cc63258 e1a8d6c43abd0bf4 SELECT json_object('a',2,'c',json_object('e',5))
+10ea0722e77b164d e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',2,'c',json_object('e',5)))
+a0319b450bd7a719 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',2,'c',json_object('e',5)))
+c32bdc58781d4c4b e1a8d6c43abd0bf4 SELECT json_object('a',2,'c',jsonb_object('e',5))
+070cbd24fa6c72db e1a8d6c43abd0bf4 SELECT json(jsonb_object('a',2,'c',jsonb_object('e',5)))
+d604420f2a2fc4ae e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',2,'c',jsonb_object('e',5)))
+8fff9ac89969463a e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[2]')
+6ee5dde49a536181 e1a8d6c43abd0bf4 SELECT json_remove(jsonb('[0,1,2,3,4]'),'$[2]')
+dd17998b047cfcc7 e1a8d6c43abd0bf4 SELECT json(jsonb_remove('[0,1,2,3,4]','$[2]'))
+eb9042130ba95dd5 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('[0,1,2,3,4]','$[2]'))
+50f8cf59e2f06654 e1a8d6c43abd0bf4 SELECT json(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]'))
+9b1b85ddf6daabf8 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]'))
+2a7bb1b8ba230865 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[5]')
+0f130967a5bfeb94 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[6]')
+53a2aed85c1645d8 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[4294967295]')
+50d04859e67e80da e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[4294967296]')
+ff0b00d0ad426a04 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[4294967297]')
+d9f6e453c61f010b e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[42949672950]')
+0ff852021e8549ef e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[42949672960]')
+201d314d78988d29 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[2]','$[0]')
+7a9185202ac77b49 e1a8d6c43abd0bf4 SELECT json_remove(jsonb('[0,1,2,3,4]'),'$[2]','$[0]')
+a3aee8da97655836 e1a8d6c43abd0bf4 SELECT json(jsonb_remove('[0,1,2,3,4]','$[2]','$[0]'))
+8c984b003c459971 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('[0,1,2,3,4]','$[2]','$[0]'))
+85d9a0a085d106b4 e1a8d6c43abd0bf4 SELECT json(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]','$[0]'))
+5adce953a685afe3 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]','$[0]'))
+8e2a809a9abd74b9 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[0]','$[2]')
+332b472b536a94a8 e1a8d6c43abd0bf4 SELECT json_remove(jsonb('[0,1,2,3,4]'),'$[0]','$[2]')
+b22b1c5cdaecf73f e1a8d6c43abd0bf4 SELECT json(jsonb_remove('[0,1,2,3,4]','$[0]','$[2]'))
+3a272639d53baef6 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('[0,1,2,3,4]','$[0]','$[2]'))
+8ea55e58c9585131 e1a8d6c43abd0bf4 SELECT json(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[0]','$[2]'))
+03e635ec84874e9b e1a8d6c43abd0bf4 SELECT hex(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[0]','$[2]'))
+28cd9fa1c3bf79db e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}')
+9d1d102c3654f209 e1a8d6c43abd0bf4 SELECT json_remove(jsonb('{"x":25,"y":42}'))
+44f84865f76af6d4 e1a8d6c43abd0bf4 SELECT json(jsonb_remove('{"x":25,"y":42}'))
+41b8d81f3369c8f7 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('{"x":25,"y":42}'))
+9da9acb6b192de97 e1a8d6c43abd0bf4 SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}')))
+b3bb4516947b19e5 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}')))
+cbe45aa5c32156bd e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}','$.z')
+a00b5dc3889d926d e1a8d6c43abd0bf4 SELECT json_remove(jsonb('{"x":25,"y":42}'),'$.z')
+6c4ad605b1a72363 e1a8d6c43abd0bf4 SELECT json(jsonb_remove('{"x":25,"y":42}','$.z'))
+aa83bb6e93cfcdca e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('{"x":25,"y":42}','$.z'))
+88eb7373c42f8c7b e1a8d6c43abd0bf4 SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.z'))
+ae04fba2e4ff6eb0 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.z'))
+5c024593be9e08c2 e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}','$.y')
+a63ea0b128f21bee e1a8d6c43abd0bf4 SELECT json_remove(jsonb('{"x":25,"y":42}'),'$.y')
+89a745e3f99f0760 e1a8d6c43abd0bf4 SELECT json(jsonb_remove('{"x":25,"y":42}','$.y'))
+19aee4edf2bf2aa8 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('{"x":25,"y":42}','$.y'))
+9a7fcf19f314f883 e1a8d6c43abd0bf4 SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.y'))
+da95ec7d8e71d96d e1a8d6c43abd0bf4 SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.y'))
+e9e607f59a0c946f e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}','$')
+408118e8f0542530 e1a8d6c43abd0bf4 SELECT json_remove(jsonb('{"x":25,"y":42}'),'$')
+f99860a1488bb155 e1a8d6c43abd0bf4 SELECT json(jsonb_remove('{"x":25,"y":42}','$'))
+6fa7be6f3ac7f301 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('{"x":25,"y":42}','$'))
+936c35e9ca2cd71a e1a8d6c43abd0bf4 SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}'),'$'))
+96ceada4309d285c e1a8d6c43abd0bf4 SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}'),'$'))
+29de8a7b6634b716 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}')
+a8f13dae85539b6c e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778')
+c1d48a1e6f3e3a07 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$')
+edca0b86032743cb e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$')
+a7ecd112d3619670 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a')
+08e64b440c3a1f2c e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a')
+a8019277b7d28d13 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[0]')
+42cbdc4d12f4cac5 e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[0]')
+add406d66e707548 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[1]')
+3b8231beb9553a23 e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[1]')
+bc3c78fcbf34a0c5 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[2]')
+0205624969f228db e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[2]')
+c463ecc9f66182a4 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[3]')
+7ca405e698c277f7 e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[3]')
+a2fd3b9d6c3d2ab1 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[4]')
+e5b0c0b4cafc303e e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[4]')
+9bc0ccdd8aefc701 e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[5]')
+989948dac29ce9b1 e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[5]')
+1bdb09203f8d193d e1a8d6c43abd0bf4 SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[6]')
+d0bf948948a40a2d e1a8d6c43abd0bf4 SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[6]')
+e207b8cfbfc36372 e1a8d6c43abd0bf4 SELECT json_valid(char(123)||'"x":35'||char(125))
+210fc1bd85305f0b e1a8d6c43abd0bf4 SELECT json_valid(char(123)||'"x":35')
+----
+0f1f9430b5870a9c 277e6cfa1b522ce5 SELECT name, substr(phone,1,5) FROM user ORDER BY name
+----
+4911f0b7bccd449b e1a8d6c43abd0bf4 SELECT json_valid(char(32) || '"xyz"')
+df251d44425192ca e1a8d6c43abd0bf4 SELECT json_valid(char(200) || '"xyz"')
+f34382357d7d5bc0 e1a8d6c43abd0bf4 SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+c00ba2fc7079f33e e1a8d6c43abd0bf4 SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+76c1caa28d632fa7 e1a8d6c43abd0bf4 SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+26f5af0b64a4e7d4 e1a8d6c43abd0bf4 SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+4fbe6c7b03e66aca e1a8d6c43abd0bf4 SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+d44366a1a98d72cd e1a8d6c43abd0bf4 SELECT json_valid('{"x":01}'), NOT json_error_position('{"x":01}')
+1e8ba21b4cf7b4c3 e1a8d6c43abd0bf4 SELECT json_valid('{"x":-01}'), NOT json_error_position('{"x":-01}')
+b0bdf8107b55e147 e1a8d6c43abd0bf4 SELECT json_valid('{"x":0}'), NOT json_error_position('{"x":0}')
+e4c459f55825d950 e1a8d6c43abd0bf4 SELECT json_valid('{"x":-0}'), NOT json_error_position('{"x":-0}')
+e78a726ecab06167 e1a8d6c43abd0bf4 SELECT json_valid('{"x":0.1}'), NOT json_error_position('{"x":0.1}')
+8fed968412e6493f e1a8d6c43abd0bf4 SELECT json_valid('{"x":-0.1}'), NOT json_error_position('{"x":-0.1}')
+ad111dd5ace23938 e1a8d6c43abd0bf4 SELECT json_valid('{"x":0.0000}'), NOT json_error_position('{"x":0.0000}')
+f1a0b5763a384a55 e1a8d6c43abd0bf4 SELECT json_valid('{"x":-0.0000}'), NOT json_error_position('{"x":-0.0000}')
+9546fbb6d16282de e1a8d6c43abd0bf4 SELECT json_valid('{"x":01.5}'), NOT json_error_position('{"x":01.5}')
+c3ae2e9045ce5cea e1a8d6c43abd0bf4 SELECT json_valid('{"x":-01.5}'), NOT json_error_position('{"x":-01.5}')
+1bb6bdb2af290e0e e1a8d6c43abd0bf4 SELECT json_valid('{"x":00}'), NOT json_error_position('{"x":00}')
+3a54e06dceff9132 e1a8d6c43abd0bf4 SELECT json_valid('{"x":-00}'), NOT json_error_position('{"x":-00}')
+226b8da5fa8fd790 e1a8d6c43abd0bf4 SELECT json_valid('{"x":+0}'), NOT json_error_position('{"x":+0}')
+7b87c485c624bbcf e1a8d6c43abd0bf4 SELECT json_valid('{"x":+5}'), NOT json_error_position('{"x":+5}')
+90a4e2c8a289c433 e1a8d6c43abd0bf4 SELECT json_valid('{"x":+5.5}'), NOT json_error_position('{"x":+5.5}')
+63f1a153f856753c 3fb1a2a6722acd48 WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x20) SELECT x FROM c WHERE json_valid(printf('{"a":"x%sz"}', char(x))) ORDER BY x
+fa367c272a8a2f1a 0bb333a196f128ff WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x1f) SELECT sum(json_valid(json_quote('a'||char(x)||'z'))) FROM c ORDER BY x
+----
+df3f4a010a19004d f9d39680f4a9bea0 SELECT id, x->'a' AS '->', CASE WHEN subtype(x->'a') THEN 'json' ELSE typeof(x->'a') END AS 'type', x->>'a' AS '->>', CASE WHEN subtype(x->>'a') THEN 'json' ELSE typeof(x->>'a') END AS 'type', json_extract(x,'$.a') AS 'json_extract', CASE WHEN subtype(json_extract(x,'$.a')) THEN 'json' ELSE typeof(json_extract(x,'$.a')) END AS 'type' FROM t1 ORDER BY id
+----
+f0fb4cd504da1cc4 28474feaf974e4ec WITH c(y) AS (VALUES(0),(1),(2),(3),(4),(5),(6)) SELECT y, x->y AS '->', CASE WHEN subtype(x->y) THEN 'json' ELSE typeof(x->y) END AS 'type', x->>y AS '->>', CASE WHEN subtype(x->>y) THEN 'json' ELSE typeof(x->>y) END AS 'type', json_extract(x,format('$[%d]',y)) AS 'json_extract', CASE WHEN subtype(json_extract(x,format('$[%d]',y))) THEN 'json' ELSE typeof(json_extract(x,format('$[%d]',y))) END AS 'type' FROM c, t1 ORDER BY y
+----
+9df7574a8dc21b4e 28474feaf974e4ec WITH c(y) AS (VALUES(0),(1),(2),(3),(4),(5),(6)) SELECT y, x->y AS '->', CASE WHEN subtype(if(json_valid(x),x->y)) THEN 'json' ELSE typeof(x->y) END AS 'type', x->>y AS '->>', CASE WHEN subtype(x->>y) THEN 'json' ELSE typeof(x->>y) END AS 'type', json_extract(x,format('$[%d]',y)) AS 'json_extract', CASE WHEN subtype(json_extract(x,format('$[%d]',y))) THEN 'json' ELSE typeof(json_extract(x,format('$[%d]',y))) END AS 'type' FROM c, t1 ORDER BY y
+----
+6f2e70e75e3b3178 f9d39680f4a9bea0 SELECT * FROM t1
+----
+6f2e70e75e3b3178 f9d39680f4a9bea0 SELECT * FROM t1
+9eb662c681d4b428 e1a8d6c43abd0bf4 SELECT '{"1":"one","2":"two","3":"three"}'->>'2'
+e918bbf4bafe7244 e1a8d6c43abd0bf4 SELECT '{"1":"one","2":"two","3":"three"}'->>2
+449a14b3b85327b9 e1a8d6c43abd0bf4 SELECT '["zero","one","two"]'->>'1'
+ef0fe5802cd27cdc e1a8d6c43abd0bf4 SELECT '["zero","one","two"]'->>1
+e7b61ba932c96eaf e1a8d6c43abd0bf4 SELECT '{"1":"one","2":"two","3":"three"}'->'2'
+72aece5f5ec616f0 e1a8d6c43abd0bf4 SELECT '{"1":"one","2":"two","3":"three"}'->2
+3118f4285cfd6e12 e1a8d6c43abd0bf4 SELECT '["zero","one","two"]'->'1'
+80f32d52ec65471a e1a8d6c43abd0bf4 SELECT '["zero","one","two"]'->1
+29764ae48f06b8bb e1a8d6c43abd0bf4 SELECT json_set('[0x1F]', '$[1]', 2), json_valid(json_set('[0x1F]', '$[1]', 2))
+c397facf8ec8da7c e1a8d6c43abd0bf4 SELECT typeof(jsonb_set('[0x1F]', '$[1]', 2)), json_valid(jsonb_set('[0x1F]', '$[1]', 2),6)
+f64fe11f6ee2aaa1 e1a8d6c43abd0bf4 SELECT json_set('[0x1F]', '$[1]', 2), json_valid(' '||json_set('[0x1F]', '$[1]', 2))
+cc818848b40c029b e1a8d6c43abd0bf4 SELECT json_set('[0x1F]', '$[1]', 2), json_valid('[31,2]')
+642285d491e68c70 e1a8d6c43abd0bf4 SELECT json_valid('[31,2]'), json_set('[0x1F]', '$[1]', 2)
+73fadc5d9e2b428d e1a8d6c43abd0bf4 SELECT json_valid(json_set('{k:1}','$.v', printf('%.*c',120,'x')))
+570c977bac2baac3 e1a8d6c43abd0bf4 SELECT json_valid(jsonb_set('{k:1}','$.v', printf('%.*c',120,'x')),6)
+12ca5d3499254b6b e1a8d6c43abd0bf4 SELECT json_valid(json_set('{k:1}','$.v', printf('%.*c',120,'x'))||' ')
+----
+23161f50e2b124f8 f9d39680f4a9bea0 SELECT json_group_array(a) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+128e0eb79e37eb58 f9d39680f4a9bea0 SELECT json_group_array(a) FROM t1
+ca20f0366dec3764 f9d39680f4a9bea0 SELECT quote(jsonb_group_array(a)) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+a8bba50dac02f436 5339b9678ffc3c4a SELECT json_group_array(a) FROM t1 WHERE rowid BETWEEN 31 AND 39
+4f9ef073699ea967 5339b9678ffc3c4a SELECT json_array_length(json_group_array(a)) FROM t1 WHERE rowid BETWEEN 31 AND 39
+e9725f25e161fa9b 1759e77a920b606c SELECT b, json_group_array(a) FROM t1 WHERE rowid<10 GROUP BY b ORDER BY b
+403b8895d06a615e f9d39680f4a9bea0 SELECT json_group_object(c,a) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+e10d68639b0d9161 f9d39680f4a9bea0 SELECT json_group_object(c,a) FROM t1
+e21d05e103c28eb6 f9d39680f4a9bea0 SELECT quote(jsonb_group_object(c,a)) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+7151c63461e6778e 5339b9678ffc3c4a SELECT json_group_object(c,a) FROM t1 WHERE rowid BETWEEN 31 AND 39 AND rowid%2==1
+8ce4ca2bcd933aa3 1759e77a920b606c SELECT b, json_group_object(c,a) FROM t1 WHERE rowid<7 GROUP BY b ORDER BY b
+----
+d6df1727f473d49e f9d39680f4a9bea0 SELECT json_group_array(x), json_group_array(json_object('x',x)) FROM t1
+----
+78892e4e762ed529 5d10f5f4d2603eac SELECT json_group_array(x) OVER (ROWS 2 PRECEDING) FROM t4
+706ef87c29861ce7 5d10f5f4d2603eac SELECT json_group_object(rowid, x) OVER (ROWS 2 PRECEDING) FROM t4
+----
+d4226f471399e6ec e1a8d6c43abd0bf4 SELECT json_patch(('{'||char(10)||' "a": "b",'||char(10)||' "c": {'||char(10)||' "d": "e",'||char(10)||' "f": "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' "a":"z",'||char(10)||' "c": {'||char(10)||' "f": null'||char(10)||' }'||char(10)||' }'))
+3df4987862bc0447 e1a8d6c43abd0bf4 SELECT json_patch(('{'||char(10)||' "a": "b",'||char(10)||' "c": {'||char(10)||' "d": "e",'||char(10)||' "f": "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' a:"z",'||char(10)||' c: {'||char(10)||' f: null'||char(10)||' }'||char(10)||' }'))
+744a706e44eba500 e1a8d6c43abd0bf4 SELECT json_patch(('{'||char(10)||' a: "b",'||char(10)||' c: {'||char(10)||' d: "e",'||char(10)||' f: "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' "a":"z",'||char(10)||' "c": {'||char(10)||' "f": null'||char(10)||' }'||char(10)||' }'))
+ededb3b927e08edf e1a8d6c43abd0bf4 SELECT json_patch(('{'||char(10)||' a: "b",'||char(10)||' c: {'||char(10)||' d: "e",'||char(10)||' f: "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' a:"z",'||char(10)||' c: {'||char(10)||' f: null'||char(10)||' }'||char(10)||' }'))
+b7625fd8acc0a766 e1a8d6c43abd0bf4 SELECT json_patch(('{'||char(10)||' "title": "Goodbye!",'||char(10)||' "author" : {'||char(10)||' "givenName" : "John",'||char(10)||' "familyName" : "Doe"'||char(10)||' },'||char(10)||' "tags":[ "example", "sample" ],'||char(10)||' "content": "This will be unchanged"'||char(10)||' }'),('{'||char(10)||' "title": "Hello!",'||char(10)||' "phoneNumber": "+01-123-456-7890",'||char(10)||' "author": {'||char(10)||' "familyName": null'||char(10)||' },'||char(10)||' "tags": [ "example" ]'||char(10)||' }'))
+0090ee4538726741 e1a8d6c43abd0bf4 SELECT json_patch('[1,2,3]','{"x":null}')
+4626fd68df75b9b3 e1a8d6c43abd0bf4 SELECT json_patch('[1,2,3]','{"x":null,"y":1,"z":null}')
+18e02a2f27afa972 e1a8d6c43abd0bf4 SELECT json_patch('{}','{"a":{"bb":{"ccc":null}}}')
+3cb06d7a2e815973 e1a8d6c43abd0bf4 SELECT json_patch('{}','{"a":{"bb":{"ccc":[1,null,3]}}}')
+e8dfeb1548738023 e1a8d6c43abd0bf4 SELECT json_patch('{}','{"a":{"bb":{"ccc":[1,{"dddd":null},3]}}}')
+cb11ec5a38cb0873 e1a8d6c43abd0bf4 SELECT json_patch('{"a":"b"}','{"a":"c"}')
+5c79d4cb9ac978c2 e1a8d6c43abd0bf4 SELECT coalesce(json_patch(null,'{"a":"c"}'), 'real-null')
+73952e27742a6779 e1a8d6c43abd0bf4 SELECT json_patch('{"a":"b"}','{"b":"c"}')
+523502bf42f2044d e1a8d6c43abd0bf4 SELECT json_patch('{"a":"b"}','{"a":null}')
+a5507581af6fcc12 e1a8d6c43abd0bf4 SELECT json_patch('{"a":"b","b":"c"}','{"a":null}')
+2ceb8d390ecfd743 e1a8d6c43abd0bf4 SELECT json_patch('{"a":["b"]}','{"a":"c"}')
+89a90d654d194252 e1a8d6c43abd0bf4 SELECT json_patch('{"a":"c"}','{"a":["b"]}')
+ae8f6076dd02317f e1a8d6c43abd0bf4 SELECT json_patch('{"a":{"b":"c"}}','{"a":{"b":"d","c":null}}')
+e057d0d3bf128ae9 e1a8d6c43abd0bf4 SELECT json_patch('{"a":[{"b":"c"}]}','{"a":[1]}')
+5b579a12303cd584 e1a8d6c43abd0bf4 SELECT json_patch('["a","b"]','["c","d"]')
+480e069b950496ab e1a8d6c43abd0bf4 SELECT json_patch('{"a":"b"}','["c"]')
+710ba3b93e9fbd09 e1a8d6c43abd0bf4 SELECT json_patch('{"a":"foo"}','null')
+bd83a57d91927a74 e1a8d6c43abd0bf4 SELECT coalesce(json_patch('{"a":"foo"}',null), 'real-null')
+ffc11c2c1725b6a6 e1a8d6c43abd0bf4 SELECT json_patch('{"a":"foo"}','"bar"')
+ace6266ca56cd96e e1a8d6c43abd0bf4 SELECT json_patch('{"e":null}','{"a":1}')
+0f1a865632fd7397 e1a8d6c43abd0bf4 SELECT json_patch('[1,2]','{"a":"b","c":null}')
+ebf4f7a081e588bd e1a8d6c43abd0bf4 SELECT json_patch('{"x":{"one":1}}','{"x":{"two":2},"x":"three"}')
+----
+5f482363e0b4080d 124f09d091ccd488 SELECT * FROM obj
+----
+5f482363e0b4080d 124f09d091ccd488 SELECT * FROM obj
+439cc591a60bcd6c 124f09d091ccd488 SELECT json_extract(x, '$.b') FROM obj
+a881398cf198d695 124f09d091ccd488 SELECT json_extract(x, '$."b"') FROM obj
+----
+439cc591a60bcd6c 124f09d091ccd488 SELECT json_extract(x, '$.b') FROM obj
+a881398cf198d695 124f09d091ccd488 SELECT json_extract(x, '$."b"') FROM obj
+----
+6136961430671c08 124f09d091ccd488 SELECT json_extract(x, '$."d"') FROM obj
+----
+a2fa92c9dd3cfcab f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#]')) FROM t1
+4825c4f177b2257f f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-1]')) FROM t1
+d39fcaeb07dfc3b6 f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-2]')) FROM t1
+b71ca197f534a11d f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-02]')) FROM t1
+9f1f956ba9c1f4c1 f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-3]')) FROM t1
+96329de128f5ba2d f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-4]')) FROM t1
+b4e9630edc07b62e f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-4296967295]')) FROM t1
+ef505c752159685e f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-4296967296]')) FROM t1
+9d61f4a4bdfdbd78 f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-4296967297]')) FROM t1
+668f20c0b6f8760e f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-42969672950]')) FROM t1
+08af826911871ff2 f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-42969672960]')) FROM t1
+90e5535d170868dd f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-2][#-1]')) FROM t1
+484b937021ac31b1 f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[0]','$.b[#-1]')) FROM t1
+c384642e24ab1969 f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.a[#-1]')) FROM t1
+38a3451712090339 f9d39680f4a9bea0 SELECT quote(json_extract(j,'$.b[#-000001]')) FROM t1
+d105ca1436140f64 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#]')) FROM t1
+269ae3c21a21ad2b f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-0]')) FROM t1
+6f28d64f2b67b303 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-1]')) FROM t1
+a29de9a86ec74992 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-2]')) FROM t1
+2f1e6f7f61144a33 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-3]')) FROM t1
+0af0dbe6e4f27f44 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-4]')) FROM t1
+b38ba33d54529f62 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-2][#-1]')) FROM t1
+631d218b78c20b6d f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[0]','$.b[#-1]')) FROM t1
+3659e13b76a37be5 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-1]','$.b[0]')) FROM t1
+4e0d2dfe5bf2b31f f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-1]','$.b[#-2]')) FROM t1
+ba523a4b07d12ad9 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-1]','$.b[#-1]')) FROM t1
+2d11d40a2ad65563 f9d39680f4a9bea0 SELECT quote(json_remove(j,'$.b[#-2]','$.b[#-1]')) FROM t1
+348646905b215a79 f9d39680f4a9bea0 SELECT quote(json_insert(j,'$.b[#]','AAA')) FROM t1
+2da07b6e4d2389fd f9d39680f4a9bea0 SELECT quote(json_insert(j,'$.b[1][#]','AAA')) FROM t1
+adc72756db4050ed f9d39680f4a9bea0 SELECT quote(json_insert(j,'$.b[1][#]','AAA','$.b[#]','BBB')) FROM t1
+5f893f2f4e8f703d f9d39680f4a9bea0 SELECT quote(json_insert(j,'$.b[#]','AAA','$.b[#]','BBB')) FROM t1
+f4259c8de79faf42 f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[#]','AAA')) FROM t1
+dd726a8a5ed51340 f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[1][#]','AAA')) FROM t1
+151c6218fadab24c f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[1][#]','AAA','$.b[#]','BBB')) FROM t1
+cd03d82d2aa54a40 f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[#]','AAA','$.b[#]','BBB')) FROM t1
+6bd2adf12d3becb3 f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[#-1]','AAA')) FROM t1
+92c326892188eee4 f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[1][#-1]','AAA')) FROM t1
+5330f0ddf4ed77ba f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[1][#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+f2219f84672aaf83 f9d39680f4a9bea0 SELECT quote(json_set(j,'$.b[#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+dbe5ef9a74a0e021 f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[#]','AAA')) FROM t1
+78fb25f90d51709b f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[1][#]','AAA')) FROM t1
+4cd8ba793217d716 f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[1][#]','AAA','$.b[#]','BBB')) FROM t1
+d356ce0bbb8d06ce f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[#]','AAA','$.b[#]','BBB')) FROM t1
+b21861f1e7360b20 f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[#-1]','AAA')) FROM t1
+982fd03136fc618c f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[1][#-1]','AAA')) FROM t1
+2a2cb454786eb0b0 f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[1][#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+4e064fd67a20fccc f9d39680f4a9bea0 SELECT quote(json_replace(j,'$.b[#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+7ef12b029d000e11 f9d39680f4a9bea0 SELECT json_extract(j, '$.b[#-]') FROM t1
+9296dc65236d142c f9d39680f4a9bea0 SELECT json_extract(j, '$.b[#9]') FROM t1
+a5f69a0dffdfe46a f9d39680f4a9bea0 SELECT json_extract(j, '$.b[#+2]') FROM t1
+ed58abfe34aab267 f9d39680f4a9bea0 SELECT json_extract(j, '$.b[#-1') FROM t1
+ba4e62faf9878608 f9d39680f4a9bea0 SELECT json_extract(j, '$.b[#-1x]') FROM t1
+----
+22ab351af18da902 e1a8d6c43abd0bf4 SELECT json_valid( CAST('{"a":1}' AS BLOB) )
+630ab9a266e84d26 e1a8d6c43abd0bf4 SELECT json_valid( CAST('{"a":1}' AS BLOB), 1)
+ee996b0f3e4eec19 e1a8d6c43abd0bf4 SELECT json_valid( CAST('{"a":1}' AS BLOB), 2)
+61d89a0e9260ff16 e1a8d6c43abd0bf4 SELECT json_valid( CAST('{"a":1}' AS BLOB), 4)
+56c2e07973a2d731 e1a8d6c43abd0bf4 SELECT json_valid( CAST('{"a":1}' AS BLOB), 8)
+fe9ac1ca086d7659 e1a8d6c43abd0bf4 SELECT CAST('{"a":123}' AS blob) -> 'a'
+804ad64c9acd074e e1a8d6c43abd0bf4 SELECT CAST('{"a":123}' AS blob) ->> 'a'
+e7297a0f45acf506 e1a8d6c43abd0bf4 SELECT json_extract(CAST('{"a":123}' AS blob), '$.a')
+a4cad3a0860f5d3c e1a8d6c43abd0bf4 SELECT json_insert(CAST('{"a":123}' AS blob),'$.b',456)
+b50b8b9b3e6ef99b e1a8d6c43abd0bf4 SELECT json_remove(CAST('{"a":123,"b":456}' AS blob),'$.a')
+3f9687695e5d5ce6 e1a8d6c43abd0bf4 SELECT json_set(CAST('{"a":123,"b":456}' AS blob),'$.a',789)
+eb9231fd948266f1 e1a8d6c43abd0bf4 SELECT json_replace(CAST('{"a":123,"b":456}' AS blob),'$.a',789)
+99bce380bdb6388c e1a8d6c43abd0bf4 SELECT json_type(CAST('{"a":123,"b":456}' AS blob))
+3dde2d15a9d814a9 e1a8d6c43abd0bf4 SELECT json(CAST('{"a":123,"b":456}' AS blob))
+----
+c448903c9c417c4b e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[0]',999,'$[0]',888)
+9175c6b38bcbc5bc e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[0]',999,'$[#]',888)
+a805c5eaeb7b63de e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[1]',888)
+5f8bfd25e52de6f9 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[2]',888)
+b5a48c236dbcd1c9 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[3]',888)
+afac928ad77c56d1 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[#-1]',888)
+83fd49045200c551 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[#-2]',888)
+9875a5ad6368daf8 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[#-3]',888)
+4c65328e42a682fa e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[#-4]',888)
+dd15dab222b0c3c6 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$.a',888)
+27749476e2244962 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$.b',888)
+6e8d3d3de0898fa6 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$.b[0]',888)
+76ff21094ea64a68 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$.b.c.d[0]',888)
+053dccc0742afa21 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$.b.c.d[0',888)
+23c88f0bc52786d8 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$.b.c.d',888)
+cc4f74ece7430ee4 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$[0]',888)
+0a592f9d3ae79423 e1a8d6c43abd0bf4 SELECT json_array_insert('{a:[1,2,3]}','$.b[0]',888,'$.a[1]','999','$.c',0)
+----
+db0ffc4bfd98bd54 efb3ee3d36853e31 WITH c(x) AS (VALUES('{a:5,b:6}')) SELECT x->>'a', json(x), json_valid(x), NOT json_error_position(x) FROM c
+ea8fbffbd9aa1bed e1a8d6c43abd0bf4 SELECT '[7,null,{a:5,b:6},[8,9]]'->>'$[2].b'
+fac1557c94d13739 e1a8d6c43abd0bf4 SELECT '{ $123 : 789 }'->>'$."$123"'
+fbe947b47947890c e1a8d6c43abd0bf4 SELECT '{ _123$xyz : 789 }'->>'$."_123$xyz"'
+9488ff3903e54b8c e1a8d6c43abd0bf4 SELECT '{ MNO_123$xyz : 789 }'->>'$."MNO_123$xyz"'
+39fb4445245ead23 e1a8d6c43abd0bf4 SELECT json('{ MNO_123$xyz : 789 }')
+3750a4b890aeebb1 e1a8d6c43abd0bf4 SELECT json('{ MNO_123/xyz : 789 }')
+f54c58081f05c1e7 e1a8d6c43abd0bf4 SELECT '{ MNO_123æxyz : 789 }'->>'MNO_123æxyz'
+b0e819c64f670d5d efb3ee3d36853e31 WITH c(x) AS (VALUES('{"a":5, "b":6, }')) SELECT x->>'b', json(x), json_valid(x), NOT json_error_position(x) FROM c
+43745454bd6ce59d e1a8d6c43abd0bf4 SELECT '{a:5, b:6 , }'->>'b'
+2042e733e3694d3a e1a8d6c43abd0bf4 SELECT '{a:5, b:6 ,, }'->>'b'
+5443e7740195cfa2 e1a8d6c43abd0bf4 SELECT '{a:5, b:6, ,}'->>'b'
+97608319d5628a4a efb3ee3d36853e31 WITH c(x) AS (VALUES('[5, 6,]')) SELECT x->>1, json(x), json_valid(x), NOT json_error_position(x) FROM c
+b5710dfbf7079710 e1a8d6c43abd0bf4 SELECT '[5, 6 , ]'->>1
+ad27c8219ac3e573 e1a8d6c43abd0bf4 SELECT '[5, 6,,]'->>1
+cda4809f900c6cbd e1a8d6c43abd0bf4 SELECT '[5, 6 , , ]'->>1
+eb48ed7d2327ae5d efb3ee3d36853e31 WITH c(x) AS (VALUES('{"a": ''abcd''}')) SELECT x->>'a', json(x), json_valid(x), NOT json_error_position(x) FROM c
+60be9f1dff6e3e54 e1a8d6c43abd0bf4 SELECT '{b: 123, ''a'': ''ab\''cd''}'->>'a'
+e771c6c4b81c613b efb3ee3d36853e31 WITH c(x) AS (VALUES('{a: "abc'||char(0x5c,0x0a)||'xyz"}')) SELECT x->>'a', json(x), json_valid(x), NOT json_error_position(x) FROM c
+6664c50cd218f367 e1a8d6c43abd0bf4 SELECT ('{a: "abc'||char(0x5c,0x0d)||'xyz"}')->>'a'
+7892c12e0be83f30 e1a8d6c43abd0bf4 SELECT ('{a: "abc'||char(0x5c,0x0d,0x0a)||'xyz"}')->>'a'
+61df659c721e0cd7 e1a8d6c43abd0bf4 SELECT ('{a: "abc'||char(0x5c,0x2028)||'xyz"}')->>'a'
+2d2472d790e3c34c e1a8d6c43abd0bf4 SELECT ('{a: "abc'||char(0x5c,0x2029)||'xyz"}')->>'a'
+bdf41981b8971174 e1a8d6c43abd0bf4 SELECT ('{a: "abc'||char(0x5c,0x27)||'xyz"}')->>'a'
+7eddb5498a722ab5 e1a8d6c43abd0bf4 SELECT ('{a: "abc'||char(0x5c,0x22)||'xyz"}')->>'a'
+363ce873976e6375 e1a8d6c43abd0bf4 SELECT ('{a: "abc'||char(0x5c,0x5c)||'xyz"}')->>'a'
+ec7153529970a39b e1a8d6c43abd0bf4 SELECT hex(('{a: "abc\bxyz"}')->>'a')
+0a6bb710ed62c8f9 e1a8d6c43abd0bf4 SELECT hex(('{a: "abc\f\n\r\t\vxyz"}')->>'a')
+f1376273d2a3d0a7 e1a8d6c43abd0bf4 SELECT hex(('{a: "abc\0xyz"}')->>'a')
+1acae7e9820d02e0 e1a8d6c43abd0bf4 SELECT '{a: "abc\x35\x4f\x6Exyz"}'->>'a'
+13bc8b9a264540a5 e1a8d6c43abd0bf4 SELECT '{a: "\x6a\x6A\x6b\x6B\x6c\x6C\x6d\x6D\x6e\x6E\x6f\x6F"}'->>'a'
+e9c4ae25fa4d8b75 e1a8d6c43abd0bf4 SELECT '{a: 0x0}'->>'a'
+80569a92c47d3030 e1a8d6c43abd0bf4 SELECT '{a: -0x0}'->>'a'
+4ad3bd31ab33c9be e1a8d6c43abd0bf4 SELECT '{a: +0x0}'->>'a'
+42468a70a877ef09 e1a8d6c43abd0bf4 SELECT '{a: 0xabcdef}'->>'a'
+3a5b4e4b81899afb e1a8d6c43abd0bf4 SELECT '{a: -0xaBcDeF}'->>'a'
+407abedac22e5d29 e1a8d6c43abd0bf4 SELECT '{a: +0xABCDEF}'->>'a'
+03404c5b5450dd8f efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: 4.}')) SELECT x->>'x', json(x) FROM c
+4dc339f232898663 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: +4.}')) SELECT x->>'x', json(x) FROM c
+3b0334d97a239adb efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: -4.}')) SELECT x->>'x', json(x) FROM c
+3cca1a4a791df2be efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: .5}')) SELECT x->>'x', json(x) FROM c
+dc03c9b8d3d893ba efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: -.5}')) SELECT x->>'x', json(x) FROM c
+87877292030d25e6 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: +.5}')) SELECT x->>'x', json(x) FROM c
+38f737384e1800b1 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: 4.e0}')) SELECT x->>'x', json(x) FROM c
+0368fea2f6acc866 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: +4.e1}')) SELECT x->>'x', json(x) FROM c
+ea5b701c529fa074 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: -4.e2}')) SELECT x->>'x', json(x) FROM c
+a8f1476561cb5396 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: .5e3}')) SELECT x->>'x', json(x) FROM c
+276b5ff2a2240812 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: -.5e-1}')) SELECT x->>'x', json(x) FROM c
+d39b1ada7dbbaaa6 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: +.5e-2}')) SELECT x->>'x', json(x) FROM c
+e4b80ce351eeefdd efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: +Infinity}')) SELECT x->>'x', json(x) FROM c
+6be56d1bb4c94cbd efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: -Infinity}')) SELECT x->>'x', json(x) FROM c
+ef258602f068551e efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: Infinity}')) SELECT x->>'x', json(x) FROM c
+7e0cde766948e076 efb3ee3d36853e31 WITH c(x) AS (VALUES('{x: NaN}')) SELECT x->>'x', json(x) FROM c
+91786c0d76e966c3 e1a8d6c43abd0bf4 SELECT '{a: +123}'->'a'
+f0aa1cd4cd3121b2 e1a8d6c43abd0bf4 SELECT (' /* abc */ { /*def*/ aaa /* xyz */ : // to the end of line'||char(10)||' 123 /* xyz */ , /* 123 */ }')->>'aaa'
+793ecf1a27b5c3d4 e1a8d6c43abd0bf4 SELECT (char(0x09,0x0a,0x0b,0x0c,0x0d,0x20,0xa0,0x2028,0x2029) || '{a: "xyz"}')->>'a'
+9dbfa0f8f0701aa7 e1a8d6c43abd0bf4 SELECT ('{a:' || char(0x09,0x0a,0x0b,0x0c,0x0d,0x20,0xa0,0x2028,0x2029) || '"xyz"}')->>'a'
+873422df0d1cb8c4 e1a8d6c43abd0bf4 SELECT (char(0x1680,0x2000,0x2001,0x2002,0x2003,0x2004,0x2005, 0x2006,0x2007,0x2008,0x2009,0x200a,0x3000,0xfeff) || '{a: "xyz"}')->>'a'
+fb066190e5e655b2 e1a8d6c43abd0bf4 SELECT ('{a: ' ||char(0x1680,0x2000,0x2001,0x2002,0x2003,0x2004,0x2005, 0x2006,0x2007,0x2008,0x2009,0x200a,0x3000,0xfeff) || ' "xyz"}')->>'a'
+2e06b446b66811dd e1a8d6c43abd0bf4 SELECT json('{x:''a "b" c''}')
+232d82fb0893e5fb e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(1) || 'xyz"')
+a508c2c43c334bb6 e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(1) || 'xyz"', 2)
+522b97fc51ec6ee2 e1a8d6c43abd0bf4 SELECT json('{label:"abc' || char(1) || 'xyz"}')
+3acaa044ff003fd0 e1a8d6c43abd0bf4 SELECT jsonb('{label:"abc' || char(1) || 'xyz"}') -> '$'
+b2a4680ccf7ea00b e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(8) || 'xyz"')
+4c1456cde49126ec e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(8) || 'xyz"', 2)
+bdbba1eadbd03745 e1a8d6c43abd0bf4 SELECT json('{label:"abc' || char(8) || 'xyz"}')
+0bda74f77e9b3ed7 e1a8d6c43abd0bf4 SELECT jsonb('{label:"abc' || char(8) || 'xyz"}') -> '$'
+f05ec95db4992356 e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(9) || 'xyz"')
+9d73898cb0737e97 e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(9) || 'xyz"', 2)
+18f9b978e3785e50 e1a8d6c43abd0bf4 SELECT json('{label:"abc' || char(9) || 'xyz"}')
+11bed3703eb58d84 e1a8d6c43abd0bf4 SELECT jsonb('{label:"abc' || char(9) || 'xyz"}') -> '$'
+7d7b932f35e4c41e e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(10) || 'xyz"')
+b27a1935683881df e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(10) || 'xyz"', 2)
+6e92799721cfbbfd e1a8d6c43abd0bf4 SELECT json('{label:"abc' || char(10) || 'xyz"}')
+fe319a52162ae172 e1a8d6c43abd0bf4 SELECT jsonb('{label:"abc' || char(10) || 'xyz"}') -> '$'
+32106b188e410ca4 e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(12) || 'xyz"')
+134704b9b261a8ba e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(12) || 'xyz"', 2)
+e875eaf3af778ed2 e1a8d6c43abd0bf4 SELECT json('{label:"abc' || char(12) || 'xyz"}')
+cb46bca3f0974a79 e1a8d6c43abd0bf4 SELECT jsonb('{label:"abc' || char(12) || 'xyz"}') -> '$'
+cd8a4d9a8c9c01c4 e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(13) || 'xyz"')
+427565b54e94991c e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(13) || 'xyz"', 2)
+fb323205eb1df05c e1a8d6c43abd0bf4 SELECT json('{label:"abc' || char(13) || 'xyz"}')
+7a41dd00dac322b1 e1a8d6c43abd0bf4 SELECT jsonb('{label:"abc' || char(13) || 'xyz"}') -> '$'
+07feebb05fade072 e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(31) || 'xyz"')
+29a9cd2b1cc60205 e1a8d6c43abd0bf4 SELECT json_valid('"abc' || char(31) || 'xyz"', 2)
+bacf5b4620fc1b0f e1a8d6c43abd0bf4 SELECT json('{label:"abc' || char(31) || 'xyz"}')
+f8b6d70465a41fe0 e1a8d6c43abd0bf4 SELECT jsonb('{label:"abc' || char(31) || 'xyz"}') -> '$'
+----
+4d8f068f4757b622 e1a8d6c43abd0bf4 SELECT json_error_position('{a:null,{"h":[1,[1,2,3]],"j":"abc"}:true}')
+971396f60c4b03b8 e1a8d6c43abd0bf4 SELECT json('{a:null,{"h":[1,[1,2,3]],"j":"abc"}:true}')
+7728a7579b7c9acc e1a8d6c43abd0bf4 SELECT '{a:null,{"h":[1,[1,2,3]],"j":"abc"}:true}'->'$h[#-1]'
+72e35d396aa7c349 e1a8d6c43abd0bf4 SELECT '{"a\x62c":123}' ->> 'abc'
+c4e6fe2481f1f926 e1a8d6c43abd0bf4 SELECT '{"abc":123}' ->> 'a\x62c'
+----
+01eba1ba64737693 f9d39680f4a9bea0 SELECT x->'$.a\', x->'$.a\\', x->'$."a\\"', x->'$."b\\"' FROM t1
+d1640d3ade4d445b e1a8d6c43abd0bf4 SELECT json_patch('{"a\x62c":123}','{"ab\x63":456}') ->> 'abc'
+6981a6e141384e5b e1a8d6c43abd0bf4 SELECT json_extract('{"A\"Key":1}', '$.A"Key')
+6ef48cd7ceca40be e1a8d6c43abd0bf4 SELECT json_extract('{"A\"Key":1}', '$."A\"Key"')
+5afcc8061d2b040f e1a8d6c43abd0bf4 SELECT JSON_SET('{}', '$."\"Key"', 1)
+----
+01d7166d6ab3a860 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.a')) FROM t1
+89a885e7456dd3dc f9d39680f4a9bea0 SELECT json_remove(x,'$.a') FROM t1
+1d61ed24e85925d4 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.b')) FROM t1
+ae3bea8f59d3a8d1 f9d39680f4a9bea0 SELECT json_remove(x,'$.b') FROM t1
+02e45018d6802062 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c')) FROM t1
+8c40d869436e176b f9d39680f4a9bea0 SELECT json_remove(x,'$.c') FROM t1
+2adce7e86c6b0966 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.d')) FROM t1
+f36065b6f0971e5f f9d39680f4a9bea0 SELECT json_remove(x,'$.d') FROM t1
+55fbea2ee4dc8577 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.b.x')) FROM t1
+9950247c5c4ee12f f9d39680f4a9bea0 SELECT json_remove(x,'$.b.x') FROM t1
+45398ca583ad0114 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.b.y')) FROM t1
+f844b4d08b6d7b29 f9d39680f4a9bea0 SELECT json_remove(x,'$.b.y') FROM t1
+81b73ff523e74e6d f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[0]')) FROM t1
+5599217945ce9128 f9d39680f4a9bea0 SELECT json_remove(x,'$.c[0]') FROM t1
+3235f71d3d828d4d f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[1]')) FROM t1
+e726c40fb6b1cb05 f9d39680f4a9bea0 SELECT json_remove(x,'$.c[1]') FROM t1
+5e2a6cb33d9deb6d f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[2]')) FROM t1
+27b5ab10230822fa f9d39680f4a9bea0 SELECT json_remove(x,'$.c[2]') FROM t1
+a81226e41a8df89d f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[3]')) FROM t1
+d1faf7d177d3eded f9d39680f4a9bea0 SELECT json_remove(x,'$.c[3]') FROM t1
+5453c7662f03b940 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[4]')) FROM t1
+e43fc7e12db6bf62 f9d39680f4a9bea0 SELECT json_remove(x,'$.c[4]') FROM t1
+35f68f05c75ea8f6 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[#]')) FROM t1
+ee005de45f1dc40e f9d39680f4a9bea0 SELECT json_remove(x,'$.c[#]') FROM t1
+937abb8d748a5486 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[#-1]')) FROM t1
+35e5b59e16ddee60 f9d39680f4a9bea0 SELECT json_remove(x,'$.c[#-1]') FROM t1
+0c9ccf02fe6a0eb1 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[#-2]')) FROM t1
+1c512f2fa98a7d31 f9d39680f4a9bea0 SELECT json_remove(x,'$.c[#-2]') FROM t1
+4a72f6a84cb97615 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[#-3]')) FROM t1
+3733dd49238b0f1e f9d39680f4a9bea0 SELECT json_remove(x,'$.c[#-3]') FROM t1
+b8d0cbd18c25d1bd f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[#-4]')) FROM t1
+e7ef6e7282e86418 f9d39680f4a9bea0 SELECT json_remove(x,'$.c[#-4]') FROM t1
+faafd401be81eff9 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[#-5]')) FROM t1
+3fa9568bb33c2b0d f9d39680f4a9bea0 SELECT json_remove(x,'$.c[#-5]') FROM t1
+bbc670f115a2a181 f9d39680f4a9bea0 SELECT json(jsonb_remove(x,'$.c[#-6]')) FROM t1
+0e5730e838eb5700 f9d39680f4a9bea0 SELECT json_remove(x,'$.c[#-6]') FROM t1
+1d2e2adfadbaf97b e1a8d6c43abd0bf4 SELECT x'8ce6ffffffff171333' -> '$'
+7b7e116156e91e2f e1a8d6c43abd0bf4 SELECT json(x'6B37616263162d')
+----
+e2eeb2db6f26ff38 e1a8d6c43abd0bf4 SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}')
+9c235ca3c2ab1b33 e1a8d6c43abd0bf4 SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}','  ')
+ae9916a2c6c2bf21 e1a8d6c43abd0bf4 SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}','')
+938f1fa8b34d2051 e1a8d6c43abd0bf4 SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}',NULL)
+59639f31d2efc7f0 e1a8d6c43abd0bf4 SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}','--')
+f78abd742ca728af e1a8d6c43abd0bf4 SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}',char(9))
+8dd18d67e61140e9 e1a8d6c43abd0bf4 SELECT json_pretty('[]')
+d0e1402367c4073f e1a8d6c43abd0bf4 SELECT json_pretty('{}')
+f58e18630cba6587 e1a8d6c43abd0bf4 SELECT json_pretty('[[],{},[[]]]')
+e2fd041ef4f68d5d e1a8d6c43abd0bf4 SELECT json_pretty('123')
+5b5c936dd47e3c40 e1a8d6c43abd0bf4 SELECT json_pretty('"abc"')
+916e63d4d180aaef e1a8d6c43abd0bf4 SELECT json_pretty(NULL)
+41762ae174f6b169 e1a8d6c43abd0bf4 SELECT json_pretty('{a:1,b:[2,3,],/*c*/}')
+f1289fe29d054430 e1a8d6c43abd0bf4 SELECT json_pretty(jsonb('{"x":[1,{"y":null}]}'))
+f8589b9193f19862 e1a8d6c43abd0bf4 SELECT json_pretty('{"a":')
+2011322b809a33d1 76b148f976c29457 SELECT json_pretty()
+9f21f8633f6e31e2 d6bd5a27934266e0 SELECT json_pretty('[1]','a','b')
+c7a0fdfe271639c9 e1a8d6c43abd0bf4 SELECT json_pretty('[1,2]',5)
+6b827dd74ec03c0f e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',1)
+950738b80e4e606f e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',2)
+5f6b8f9134b10e35 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',3)
+c6a6042b4c6a3bf0 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',4)
+21e32ce380772f00 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',5)
+99c1206936165e7b e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',6)
+5e1c86ba42f76154 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',7)
+b51e560cec19cd54 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',8)
+d8d85d9969aecc18 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',9)
+58e0dc3ec1c50470 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',10)
+d1def6e0b1718e20 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',11)
+6e1724f907f32500 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',12)
+7ac1057083cbc9ed e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',13)
+7857dfb829fe6a54 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',14)
+bf363709b313913f e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',15)
+def447f7f9e73e91 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',0)
+b6bc7d7af92b1a54 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',16)
+bb2ff64e87bc379c e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',-1)
+72901abc88d29cbc e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}',NULL)
+e7bd92c3391e26c8 e1a8d6c43abd0bf4 SELECT json_valid('{"a":1}','abc')
+63d7c2bd5780054d e1a8d6c43abd0bf4 SELECT json_valid('{a:1}',1)
+269c6a6733a1f244 e1a8d6c43abd0bf4 SELECT json_valid('{a:1}',2)
+b6fe04602e26b5d3 e1a8d6c43abd0bf4 SELECT json_valid('{a:1}',3)
+26fa5b300121d642 e1a8d6c43abd0bf4 SELECT json_valid('{a:1}',6)
+15a33ad5de59f1f6 e1a8d6c43abd0bf4 SELECT json_valid(jsonb('{a:1}'),1)
+26fe192a2ed7c2ee e1a8d6c43abd0bf4 SELECT json_valid(jsonb('{a:1}'),4)
+be62600f0a7ef2fd e1a8d6c43abd0bf4 SELECT json_valid(jsonb('{a:1}'),8)
+ceb7c284de5f4d6c e1a8d6c43abd0bf4 SELECT json_valid(jsonb('{a:1}'),12)
+b0eaa426f19fc3d7 e1a8d6c43abd0bf4 SELECT json_valid(jsonb('{a:1}'),9)
+365d70c048c3aa00 e1a8d6c43abd0bf4 SELECT json_valid(x'00',4)
+0bc98f6879d0b2a9 e1a8d6c43abd0bf4 SELECT json_valid(x'00',8)
+8bcc27388748619b e1a8d6c43abd0bf4 SELECT json_valid(x'0c',8)
+81446aa36ed7a637 e1a8d6c43abd0bf4 SELECT json_valid(x'13',4)
+18134b61eaadd4e3 e1a8d6c43abd0bf4 SELECT json_valid(x'13',8)
+6523353ccc5433aa e1a8d6c43abd0bf4 SELECT json_valid(x'1a61',8)
+09f5c08e953c8298 e1a8d6c43abd0bf4 SELECT json_valid(x'',8)
+140cd6d353918c89 e1a8d6c43abd0bf4 SELECT json_valid(x'',1)
+9a8d940b2269a538 e1a8d6c43abd0bf4 SELECT json_valid(123)
+fb46f01c48b66390 e1a8d6c43abd0bf4 SELECT json_valid(12.5,1)
+aa5214b83275b4a6 e1a8d6c43abd0bf4 SELECT json_valid('',1)
+04e5453aead353a6 e1a8d6c43abd0bf4 SELECT json_valid('  ',2)
+780e64a660cba5fe e1a8d6c43abd0bf4 SELECT json_valid('[1,2,]',1)
+68beb6a4244e2571 e1a8d6c43abd0bf4 SELECT json_valid('[1,2,]',2)
+67016d05a30d7587 e1a8d6c43abd0bf4 SELECT json_valid(char(0xfeff)||'[1]',2)
+4153205df719efa7 520488f770f69bd9 SELECT json_valid()
+caec39a5bdc9298d 9e6ba7d34e620fd9 SELECT json_valid('1',1,2)
+e37a31431518ce54 e1a8d6c43abd0bf4 SELECT json_error_position('{"a":1}')
+56e060cb63278dc2 e1a8d6c43abd0bf4 SELECT json_error_position('{"a":1')
+dcb45ecc1f92498a e1a8d6c43abd0bf4 SELECT json_error_position('{"a":1,}')
+6e9941b0528e4c96 e1a8d6c43abd0bf4 SELECT json_error_position('[1,2,3')
+0fe84ef46a718a1c e1a8d6c43abd0bf4 SELECT json_error_position('[1,2,3]x')
+00251302cfa2f130 e1a8d6c43abd0bf4 SELECT json_error_position('')
+950fb0118aae4cf7 e1a8d6c43abd0bf4 SELECT json_error_position('   ')
+5248161045af67b3 e1a8d6c43abd0bf4 SELECT json_error_position('{a:1}')
+c959c010e8cdf9ba e1a8d6c43abd0bf4 SELECT json_error_position('{"a":01}')
+f50577bf90280ea7 e1a8d6c43abd0bf4 SELECT json_error_position('"abc')
+1f137dc9caeff208 e1a8d6c43abd0bf4 SELECT json_error_position('"\q"')
+1fdb13bb26f7ccf8 e1a8d6c43abd0bf4 SELECT json_error_position('[1,/*x*/2]')
+40885f2dc6bff036 e1a8d6c43abd0bf4 SELECT json_error_position('[1,/*x 2]')
+138f6cd28402b5be e1a8d6c43abd0bf4 SELECT json_error_position(x'0c')
+54550fa295f24662 e1a8d6c43abd0bf4 SELECT json_error_position(jsonb('[1,2]'))
+75d2579d55034729 e1a8d6c43abd0bf4 SELECT json_error_position(x'8c')
+366664b65dcbf11f e1a8d6c43abd0bf4 SELECT json_error_position(123)
+ed05555bdc5c2930 e1a8d6c43abd0bf4 SELECT json_error_position(NULL)
+c4f703f3258224c7 e1a8d6c43abd0bf4 SELECT json_error_position('{"é":1,')
+beae936f1034001d e5a205fa4d334051 SELECT json_error_position()
+79dab35f7700ac84 e1a8d6c43abd0bf4 SELECT json('{a:1, b:2,}')
+5fbd35b99fad41b2 e1a8d6c43abd0bf4 SELECT json('[1,2,3,]')
+84521586a1e5938b e1a8d6c43abd0bf4 SELECT json('{''a'':''b''}')
+e17cab2559df36d0 e1a8d6c43abd0bf4 SELECT json('{"a":0x1F}')
+d7da39a2c66c3d53 e1a8d6c43abd0bf4 SELECT json('[0xff,-0x10,0X0]')
+cb4481cc80aff991 e1a8d6c43abd0bf4 SELECT json('[Infinity,-Infinity,+Infinity]')
+b21e88de23c34d7d e1a8d6c43abd0bf4 SELECT json('[NaN,-NaN]')
+76ec57254b89dea2 e1a8d6c43abd0bf4 SELECT json('[.5,5.,+5,-.5e3]')
+30c62b5260eb4a62 e1a8d6c43abd0bf4 SELECT json('// line comment' || char(10) || '[1,2]')
+8e4b64ed0cdf5a88 e1a8d6c43abd0bf4 SELECT json('/* block */ {x: /* in */ 1}')
+dae903c42da0f419 e1a8d6c43abd0bf4 SELECT json('{x:"line1\' || char(10) || 'line2"}')
+5536425ced30576b e1a8d6c43abd0bf4 SELECT json('"\x41B\v\0"')
+0d1c3d96038625f6 e1a8d6c43abd0bf4 SELECT json('{$a_b:1, _c:2, d$:3}')
+60a59fd339995875 e1a8d6c43abd0bf4 SELECT json('[1' || char(0x2028) || ',2]')
+333e8535573c6b8e e1a8d6c43abd0bf4 SELECT json('[1' || char(0xa0) || ',2]')
+638975e3c52ff149 e1a8d6c43abd0bf4 SELECT jsonb('{a:Infinity}') -> '$.a'
+c550204cc1b6fab8 e1a8d6c43abd0bf4 SELECT jsonb('{a:NaN}') ->> '$.a'
+1e050fdfaf842a17 e1a8d6c43abd0bf4 SELECT hex(jsonb('{a:0x10, b:''x'', c:[1,],}'))
+009e0a395bfc215b e1a8d6c43abd0bf4 SELECT json(jsonb('{a:0x10, b:''x'', c:[1,],}'))
+2cb1c254ad061a2c e1a8d6c43abd0bf4 SELECT json('[1,2,,]')
+9284452e512b09e2 e1a8d6c43abd0bf4 SELECT json('{a:1 b:2}')
+8a3d68b358da581d e1a8d6c43abd0bf4 SELECT json('[0x]')
+1e060c7356fce66f e1a8d6c43abd0bf4 SELECT json('[Inf]')
+1532d775148e5c2e e1a8d6c43abd0bf4 SELECT json('[-NaN]')
+8297e8f59ce7d4bd e1a8d6c43abd0bf4 SELECT json('{"a":1}/*')
+b1c2abf3856a2c7d e1a8d6c43abd0bf4 SELECT '{"a":{"b":[10,20,30]}}' -> 'a'
+8d070247b9363de6 e1a8d6c43abd0bf4 SELECT '{"a":{"b":[10,20,30]}}' -> '$.a.b'
+80b85249aeebb255 e1a8d6c43abd0bf4 SELECT '{"a":{"b":[10,20,30]}}' -> '$.a.b[1]'
+d18efb2e6127e11d e1a8d6c43abd0bf4 SELECT '{"a":{"b":[10,20,30]}}' ->> '$.a.b[1]'
+a3609f4c22a67430 e1a8d6c43abd0bf4 SELECT '{"a":{"b":[10,20,30]}}' -> 'a' -> 'b' -> 2
+ee9928ae030c9c5d e1a8d6c43abd0bf4 SELECT '{"a":{"b":[10,20,30]}}' -> 'a' -> 'b' ->> -1
+4b2717e617e37173 e1a8d6c43abd0bf4 SELECT '[10,20,30]' -> 0
+97b590872e8b961d e1a8d6c43abd0bf4 SELECT '[10,20,30]' ->> 2
+017c105fd6de3fe7 e1a8d6c43abd0bf4 SELECT '[10,20,30]' -> 3
+a57c636925320436 e1a8d6c43abd0bf4 SELECT '[10,20,30]' -> -1
+7356af8ba7a9d7b3 e1a8d6c43abd0bf4 SELECT '[10,20,30]' ->> '$[#-1]'
+e1dd829757a31ca3 e1a8d6c43abd0bf4 SELECT '{"a":"xyz"}' -> 'a'
+7c930f86fbe5eae4 e1a8d6c43abd0bf4 SELECT '{"a":"xyz"}' ->> 'a'
+b711365b3c62e3b4 e1a8d6c43abd0bf4 SELECT '{"a":null}' -> 'a'
+4f6e3ae5026bd606 e1a8d6c43abd0bf4 SELECT typeof('{"a":null}' ->> 'a')
+777a2eb5132e0def e1a8d6c43abd0bf4 SELECT typeof('{"a":1.5}' ->> 'a')
+d27c43a13c9191e7 e1a8d6c43abd0bf4 SELECT typeof('{"a":15}' ->> 'a')
+a1099d6fa8d7a752 e1a8d6c43abd0bf4 SELECT typeof('{"a":true}' ->> 'a')
+44fb8bc849cb78f8 e1a8d6c43abd0bf4 SELECT typeof('{"a":[1]}' -> 'a')
+746447107faec477 e1a8d6c43abd0bf4 SELECT '{"a":1}' -> 1.5
+6562420d6f9e5e9d e1a8d6c43abd0bf4 SELECT '{"1":"one"}' -> 1
+60bf730901178c72 e1a8d6c43abd0bf4 SELECT '{"1":"one"}' -> '1'
+47e4778c5bf238bb e1a8d6c43abd0bf4 SELECT '{"a b":5}' -> 'a b'
+b37c02fe27a06676 e1a8d6c43abd0bf4 SELECT '{"a b":5}' -> '$."a b"'
+b8d49a60d30110ca e1a8d6c43abd0bf4 SELECT '{a:5}' -> 'a'
+451d87f182557e94 e1a8d6c43abd0bf4 SELECT jsonb('{"a":[1,2]}') -> 'a'
+e21cfa816a57b1be e1a8d6c43abd0bf4 SELECT hex(jsonb('{"a":[1,2]}') -> 'a')
+258a0d0a22ad9e1d e1a8d6c43abd0bf4 SELECT jsonb('{"a":[1,2]}') ->> '$.a[1]'
+39dcc02cab4d312f e1a8d6c43abd0bf4 SELECT 'not json' -> 'a'
+652131a79002ba7e e1a8d6c43abd0bf4 SELECT '{"a":1}' -> '$.'
+bb551d8dde911bee e1a8d6c43abd0bf4 SELECT '{"a":1}' -> 'a' -> NULL
+3d07ab0dcc58a5cf e1a8d6c43abd0bf4 SELECT 5 -> '$'
+46039dfa0ee8f93a e1a8d6c43abd0bf4 SELECT x'0c' -> '$'
+9a5ccc23fd9d86a5 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}')
+232562e162983ad7 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a')
+aa758da484faf920 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[0]')
+f8f2a76177706a01 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[1]')
+5be5f83b5f6f0ce3 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[2]')
+c51e0f73e78708f0 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[3]')
+db8cf3975ffc202d e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[4]')
+f676b8671cea1271 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[5]')
+28e3c2efaf5f2879 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[6]')
+ec82fbde6a1e4af0 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[7]')
+6899bdd08f8014e1 e1a8d6c43abd0bf4 SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.b')
+4d193ce80c06043e e1a8d6c43abd0bf4 SELECT json_type('{"a":1}','a')
+55da4c0e3802af83 e1a8d6c43abd0bf4 SELECT json_type('[0x10, Infinity, NaN]','$[0]')
+04729c5e7f7bed34 e1a8d6c43abd0bf4 SELECT json_type('[0x10, Infinity, NaN]','$[1]')
+ee0c0613dccc905a e1a8d6c43abd0bf4 SELECT json_type('[0x10, Infinity, NaN]','$[2]')
+57458fbca9830352 e1a8d6c43abd0bf4 SELECT json_type(jsonb('[1e5]'),'$[0]')
+46aa084e20406fac e1a8d6c43abd0bf4 SELECT json_type(NULL)
+b4760ec601665a9b e1a8d6c43abd0bf4 SELECT json_type('bad')
+a3f66f4903739046 1d2ac578cd0f469a SELECT json_type()
+d00d35a2b4dd5fa1 320e48e664dfa30d SELECT json_type('1','$','$')
+e4a5522fad30e361 e1a8d6c43abd0bf4 SELECT json_quote('abc')
+5bc8877bba077b10 e1a8d6c43abd0bf4 SELECT json_quote('a"b\c')
+7e301a853065538b e1a8d6c43abd0bf4 SELECT json_quote('tab' || char(9) || 'nl' || char(10) || 'ctl' || char(1))
+7d9e0e8b52f7070c e1a8d6c43abd0bf4 SELECT json_quote(123)
+68053558eb89a736 e1a8d6c43abd0bf4 SELECT json_quote(-1.5e300)
+0934423f2c60bf6a e1a8d6c43abd0bf4 SELECT json_quote(9e999)
+dca8cfbdfabd1976 e1a8d6c43abd0bf4 SELECT json_quote(NULL)
+e2c31c55d059c813 e1a8d6c43abd0bf4 SELECT json_quote(json('[1,2]'))
+f5c1b2fca200f362 e1a8d6c43abd0bf4 SELECT json_quote(jsonb('[1,2]'))
+613457f9b8d78fe3 e1a8d6c43abd0bf4 SELECT json_quote('[1,2]')
+808528383797f20d e1a8d6c43abd0bf4 SELECT json_quote('é' || char(0x1f600))
+5b975450883db30c e1a8d6c43abd0bf4 SELECT json_quote(char(0x7f,0x80,0x2028))
+3455818f8a43aa43 e1a8d6c43abd0bf4 SELECT json_array_length('[]')
+4f5a5ddc57f71077 e1a8d6c43abd0bf4 SELECT json_array_length('[1,[2,3],{}]')
+91a2d32d481abcdc e1a8d6c43abd0bf4 SELECT json_array_length('{"a":1}')
+d38d2e572222424e e1a8d6c43abd0bf4 SELECT json_array_length('5')
+7f9b01fe59ebbd02 e1a8d6c43abd0bf4 SELECT json_array_length('[1,[2,3],{}]','$[1]')
+102756ae213149e1 e1a8d6c43abd0bf4 SELECT json_array_length('[1,[2,3],{}]','$[2]')
+da6db7d7a3002dbc e1a8d6c43abd0bf4 SELECT json_array_length('[1,[2,3],{}]','$[9]')
+2df1bfa8cdcdfa7b e1a8d6c43abd0bf4 SELECT json_array_length('[1,[2,3],{}]','bad')
+3d5b600434e62401 e1a8d6c43abd0bf4 SELECT json_array_length('[1,2')
+6cbfa9dc1d922ab7 e1a8d6c43abd0bf4 SELECT json_array_length(NULL)
+e946dd7b17920535 e1a8d6c43abd0bf4 SELECT json_array_length('[1]', NULL)
+a84a750657697b2f e1a8d6c43abd0bf4 SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.a','$.b','$.c')
+e68442b1e8976805 e1a8d6c43abd0bf4 SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.a','$.zz')
+d85898ac81b4718c e1a8d6c43abd0bf4 SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.c.d','$.b[1]','$.b[#-1]')
+ca29eb596ae01149 e1a8d6c43abd0bf4 SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.c.d')
+d526a1c6de5e4d7a e1a8d6c43abd0bf4 SELECT typeof(json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.a','$.b'))
+b397a28d3a3d441d e1a8d6c43abd0bf4 SELECT json_extract('{"a":1}','$.a','bad')
+14267bf8c66c8937 e1a8d6c43abd0bf4 SELECT json_extract('{"a":1}')
+b71c9c2f8d69fa48 e1a8d6c43abd0bf4 SELECT json_extract('{"a":1}',NULL)
+d798779a93c4fe51 e1a8d6c43abd0bf4 SELECT json_extract('{"a":1}','$',NULL)
+0a8db072f59567ae e1a8d6c43abd0bf4 SELECT json_extract('[1,2,3]','$[1]','$[0]','$[2]','$[3]')
+f34f4cc6c3451a87 e1a8d6c43abd0bf4 SELECT json(jsonb_extract('{"a":1,"b":[2,3]}','$.b','$.a'))
+cc146278cb2e69e6 e1a8d6c43abd0bf4 SELECT hex(jsonb_extract('{"a":1,"b":[2,3]}','$.b','$.a'))
+eb9621ef7e4d62b6 e1a8d6c43abd0bf4 SELECT jsonb_extract('{"a":"x"}','$.a')
+aa5cf991a07d26bd e1a8d6c43abd0bf4 SELECT json_extract('{"a":"A\n"}','$.a')
+bea37535320067c3 e1a8d6c43abd0bf4 SELECT json_extract('{"a":9223372036854775808}','$.a')
+d7c65d5ba77e15c8 e1a8d6c43abd0bf4 SELECT json_extract('{"a":-9223372036854775809}','$.a')
+1f21901adb43f67e e1a8d6c43abd0bf4 SELECT json_extract('{"a":1e400}','$.a')
+973ce9d841818806 e1a8d6c43abd0bf4 SELECT json_extract('{"a":0x7fffffffffffffffff}','$.a')
+a7e9dc52e9f30309 e1a8d6c43abd0bf4 SELECT json_patch('{"a":1,"b":2}','{"b":3,"c":4}')
+c94032d97df0f70d e1a8d6c43abd0bf4 SELECT json_patch('{"a":1,"b":2}','{"b":null}')
+0d2d588206eb9721 e1a8d6c43abd0bf4 SELECT json_patch('{"a":{"x":1,"y":2}}','{"a":{"y":null,"z":3}}')
+5726a91d7d39610f e1a8d6c43abd0bf4 SELECT json_patch('{"a":1}','[1,2]')
+596470cfc00bba41 e1a8d6c43abd0bf4 SELECT json_patch('[1,2]','{"a":1}')
+c34d4a9537f93e10 e1a8d6c43abd0bf4 SELECT json_patch('{"a":1}','5')
+cc85754acd670df1 e1a8d6c43abd0bf4 SELECT json_patch('{"a":1}','null')
+b56a7eddc96e5ff3 e1a8d6c43abd0bf4 SELECT json_patch('{}','{"a":{"b":null}}')
+6d25a13819b673e6 e1a8d6c43abd0bf4 SELECT json_patch('{a:1}','{b:2,}')
+15e82c3407aa122e e1a8d6c43abd0bf4 SELECT json(jsonb_patch('{"a":1,"b":2}','{"b":3,"c":4}'))
+be6d667ae11639b4 e1a8d6c43abd0bf4 SELECT hex(jsonb_patch('{"a":1,"b":2}','{"b":3,"c":4}'))
+e383fed6c34db514 e1a8d6c43abd0bf4 SELECT json_patch('{"a":1}','bad')
+52c0b7084c9d6469 e1a8d6c43abd0bf4 SELECT json_patch(NULL,'{}')
+2dfd8fd8c89025a6 e1a8d6c43abd0bf4 SELECT json_patch('{}',NULL)
+938cce47909d20c6 46a1f9a215e9c71f SELECT json_patch('{}')
+8fff9ac89969463a e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[2]')
+201d314d78988d29 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[2]','$[0]')
+8e2a809a9abd74b9 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[0]','$[2]')
+b04790c3bc076ca8 e1a8d6c43abd0bf4 SELECT json_remove('[0,1,2,3,4]','$[#-1]','$[0]')
+5c024593be9e08c2 e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}','$.y')
+cbe45aa5c32156bd e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}','$.z')
+28cd9fa1c3bf79db e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}')
+e9e607f59a0c946f e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}','$')
+98a9308807bbdfe7 e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}','x')
+0cf40b540b490a55 e1a8d6c43abd0bf4 SELECT json_remove('{"x":25,"y":42}',NULL)
+f868a048e1d8d258 e1a8d6c43abd0bf4 SELECT json(jsonb_remove('{"x":25,"y":42}','$.x'))
+bd963008751340e5 e1a8d6c43abd0bf4 SELECT hex(jsonb_remove('{"x":25,"y":42}','$.x'))
+9b3fa6584953396a e1a8d6c43abd0bf4 SELECT json_remove()
+90603afe260f10f9 e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}','$.a',99,'$.e','[5]')
+126a27751c514de0 e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}','$.a',99,'$.e',json('[5]'))
+77d24985ee7ae08a e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}','$.c[0]',1)
+cad338cd5281b159 e1a8d6c43abd0bf4 SELECT json_set('{"a":2,"c":4}','$.d.e.f',1)
+2e0aad41ce89cef3 e1a8d6c43abd0bf4 SELECT json_set('[1,2]','$[#]',3,'$[#]',4)
+b8a28066ebe6eb43 e1a8d6c43abd0bf4 SELECT json_set('[1,2]','$[5]',3)
+9b6ea9b8be232f25 e1a8d6c43abd0bf4 SELECT json_set('{"a":1}','$',json('[0]'))
+3ca564b5898c5b13 e1a8d6c43abd0bf4 SELECT json_set('{"a":1}','$.a')
+2ba6681a8f5d107e e1a8d6c43abd0bf4 SELECT json_set('{"a":1}','$.a',x'00')
+d9439afbd103fa22 e1a8d6c43abd0bf4 SELECT json_set('{"a":1}','bad',1)
+269bdeb6b7efefe5 e1a8d6c43abd0bf4 SELECT json_insert('{"a":2,"c":4}','$.a',99,'$.e',5)
+d81d1a951371806e e1a8d6c43abd0bf4 SELECT json_insert('[1,2]','$[#]',3)
+111852ca7007b4b4 e1a8d6c43abd0bf4 SELECT json_insert('[1,2]','$[1]',3)
+24ef1c43ba5eaf90 e1a8d6c43abd0bf4 SELECT json_insert('{}','$.a.b',1)
+7965d8586798797b e1a8d6c43abd0bf4 SELECT json_replace('{"a":2,"c":4}','$.a',99,'$.e',5)
+a1c3fedf6a3ba9d7 e1a8d6c43abd0bf4 SELECT json_replace('{"a":2,"c":4}','$.a',NULL)
+cf33c1a2c1875e5b e1a8d6c43abd0bf4 SELECT json_replace('[1,2]','$[#]',3)
+ca1cec8e2161ce5c e1a8d6c43abd0bf4 SELECT json_replace('[1,2]','$[#-1]',3)
+364142f6797c298a e1a8d6c43abd0bf4 SELECT json_replace('{"a":2}','$',3)
+4e38c3ef74dafe26 e1a8d6c43abd0bf4 SELECT json(jsonb_set('{"a":2,"c":4}','$.a',99,'$.e',5))
+76e29859334e6001 e1a8d6c43abd0bf4 SELECT hex(jsonb_set('{"a":2,"c":4}','$.a',99,'$.e',5))
+94684eeb6a453a1d e1a8d6c43abd0bf4 SELECT json(jsonb_insert('{"a":2,"c":4}','$.a',99,'$.e',5))
+727d1929b9971fd0 e1a8d6c43abd0bf4 SELECT hex(jsonb_insert('{"a":2,"c":4}','$.a',99,'$.e',5))
+6f5a90e6e411f22f e1a8d6c43abd0bf4 SELECT json(jsonb_replace('{"a":2,"c":4}','$.a',99,'$.e',5))
+090da803c3ec4baa e1a8d6c43abd0bf4 SELECT hex(jsonb_replace('{"a":2,"c":4}','$.a',99,'$.e',5))
+e9c618931dd0a7f5 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[0]',0)
+ee2db0713089c097 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[1]','x')
+7ffb29b7e18a733d e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[#]',4)
+4badcd1d0a0cc110 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[#-1]',4)
+d81ee420837940d7 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[9]',4)
+44171ea5b406459f e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[0]',json('{"a":1}'))
+310d4d757ead7094 e1a8d6c43abd0bf4 SELECT json_array_insert('{"a":[1,2]}','$.a[1]',9,'$.a[0]',8)
+002ab1833e1983bd e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$',4)
+021b9eeaf5ea729a e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]')
+91c5b44f7a862cf4 e1a8d6c43abd0bf4 SELECT json_array_insert('[1,2,3]','$[0]')
+600727ad0fd4e270 e1a8d6c43abd0bf4 SELECT json(jsonb_array_insert('[1,2,3]','$[1]',9))
+8f86372b79dea427 e1a8d6c43abd0bf4 SELECT hex(jsonb_array_insert('[1,2,3]','$[1]',9))
+4de303b5e7e39e4f e1a8d6c43abd0bf4 SELECT json_array()
+006eb1bad219817f e1a8d6c43abd0bf4 SELECT json_object()
+2c7c1861ee59aa2e e1a8d6c43abd0bf4 SELECT json_array(1,2.0,'3',NULL,json('true'),json('[4]'))
+4747183f7d15be0e e1a8d6c43abd0bf4 SELECT json_object('a',1,'b',json('{"c":2}'),'d','{"e":3}')
+93746b2d8ec3fb1b e1a8d6c43abd0bf4 SELECT json_object('a',1,'a',2)
+a8748c8aa01e1162 e1a8d6c43abd0bf4 SELECT json_array(1e400,-1e400)
+fab07e8e1642855c e1a8d6c43abd0bf4 SELECT json_array(9223372036854775807,-9223372036854775808)
+2f78fef4652e7ec2 e1a8d6c43abd0bf4 SELECT json_array(0.1,1e-7,123456789012345678901234567890.0)
+046f71f43db104c4 e1a8d6c43abd0bf4 SELECT json(' [ 1 , 2 ] ')
+7195e6a5640805da e1a8d6c43abd0bf4 SELECT json('{"a":1,"a":2}')
+6dc271305a8fd934 e1a8d6c43abd0bf4 SELECT json('"é😀"')
+6c4d57bd0863a463 e1a8d6c43abd0bf4 SELECT json('"\ud800"')
+d1cf0c1431914fcd e1a8d6c43abd0bf4 SELECT json('1.50')
+c148fc786482c6a8 e1a8d6c43abd0bf4 SELECT json('-0')
+9c0045f9c8631d3f e1a8d6c43abd0bf4 SELECT json('1E+2')
+532010dfa2f80b90 e1a8d6c43abd0bf4 SELECT json(x'0c')
+f51a3d50accbd759 e1a8d6c43abd0bf4 SELECT json(x'1f')
+eb27278da1fc0ba0 e1a8d6c43abd0bf4 SELECT hex(jsonb('[1,"a",null,true,false,1.5,{"k":[]}]'))
+bd4f43299c9024ab e1a8d6c43abd0bf4 SELECT hex(jsonb('"A"'))
+52a6723c61d5590d e1a8d6c43abd0bf4 SELECT hex(jsonb('''x'''))
+5f85cc74aac98451 e1a8d6c43abd0bf4 SELECT hex(jsonb('0x1A'))
+9a9597d0cba10896 e1a8d6c43abd0bf4 SELECT hex(jsonb('Infinity'))
+2b2ebf33ce9a6fb8 e1a8d6c43abd0bf4 SELECT hex(jsonb('.5'))
+8d98b2db331dd579 e1a8d6c43abd0bf4 SELECT hex(jsonb('"' || printf('%.20c','a') || '"'))
+f5b936af102f3875 e1a8d6c43abd0bf4 SELECT hex(jsonb('"' || printf('%.300c','a') || '"'))
+356e3a7cfcf366e4 e1a8d6c43abd0bf4 SELECT hex(jsonb_array(1,'a',NULL,2.5))
+01fa711910d91bd9 e1a8d6c43abd0bf4 SELECT hex(jsonb_object('a',1,'b','x'))
+405b6479eebb576a e1a8d6c43abd0bf4 SELECT jsonb('bad')
+5824fc404433ca1d e1a8d6c43abd0bf4 SELECT json(jsonb(x'0c'))
+----
+40a3181c6b3eac2b 5819a3bc2d52c300 SELECT json_group_array(v) FROM g
+be553367305e9191 0ba74a54408c76d2 SELECT json_group_array(v) FROM g GROUP BY grp ORDER BY grp
+07a8b6f9cc3f9152 0ba74a54408c76d2 SELECT grp, json_group_object(k,v) FROM g GROUP BY grp ORDER BY grp
+4d105460cadb6486 5819a3bc2d52c300 SELECT json_group_object(k,v) FROM g
+176b3e6d994d4c1e 5819a3bc2d52c300 SELECT hex(jsonb_group_array(v)) FROM g
+40d4ee080317f091 5819a3bc2d52c300 SELECT json(jsonb_group_array(v)) FROM g
+efe83b1bde669bdb 5819a3bc2d52c300 SELECT hex(jsonb_group_object(k,v)) FROM g
+2bcd3e36db870f78 5819a3bc2d52c300 SELECT json(jsonb_group_object(k,v)) FROM g
+ca4b554ffd7b4f58 5819a3bc2d52c300 SELECT json_group_array(v) FROM g WHERE 0
+2fe9d5c457aeb4eb 5819a3bc2d52c300 SELECT json_group_object(k,v) FROM g WHERE 0
+867e71fbefd80e18 5819a3bc2d52c300 SELECT jsonb_group_array(v) FROM g WHERE 0
+8e431450b56b9b35 9cc4421813bcbcee SELECT json_group_array(DISTINCT grp) FROM g
+0a0417cf1f082744 c9c65b84ca32e1bb SELECT json_group_array(v ORDER BY k DESC) FROM g
+a4a4c50232cc90e7 5819a3bc2d52c300 SELECT json_group_array(v) FILTER (WHERE grp='x') FROM g
+bdbeeb8656dc9f99 5819a3bc2d52c300 SELECT json_group_object(NULL,v) FROM g
+77c3089abf15079f 5819a3bc2d52c300 SELECT json_group_array(x'00') FROM g
+313f9a3da3611675 b8a533c8d08d8fe5 SELECT json_group_object(k) FROM g
+cbf7e87544783ccb 1d4b9079623ebe39 SELECT id, json_group_array(v) OVER (ORDER BY id) FROM g
+0ea8a60534575558 1d4b9079623ebe39 SELECT id, json_group_array(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM g
+1c4efee13aae6805 1d4b9079623ebe39 SELECT id, json_group_array(id) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM g
+82b680d5986b45b7 1d4b9079623ebe39 SELECT id, json_group_array(id) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM g
+df5c29fa0e88a67e 1d4b9079623ebe39 SELECT id, json_group_object(k,id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM g
+3c47e8ea137ab436 16b4e07bdb7f6bee SELECT id, json_group_object(k,v) OVER (PARTITION BY grp ORDER BY id) FROM g ORDER BY id
+cb284486e0744d7b 1d4b9079623ebe39 SELECT id, hex(jsonb_group_array(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)) FROM g
+80790a3eb1369726 1d4b9079623ebe39 SELECT id, json(jsonb_group_object(k,id) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)) FROM g
+6fd78424bb19e909 1d4b9079623ebe39 SELECT id, json_group_array(id) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM g
+8054400d76d7fe25 1d4b9079623ebe39 SELECT id, json_group_array(id) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM g
+0fa1dfb428a1258b 1d4b9079623ebe39 SELECT id, json_group_array(k) OVER w FROM g WINDOW w AS (ORDER BY id DESC ROWS 2 PRECEDING)
+124497f069c39ed5 a1fe04d7d3d249b2 SELECT json_object('items', (SELECT json_group_array(k) FROM g))
+ba0d6a1b3cdbe845 5819a3bc2d52c300 SELECT json_group_array(json_object('k',k,'v',v)) FROM g
+294cc70b304a147f 5819a3bc2d52c300 SELECT k, v -> '$' FROM g ORDER BY id
+730adb1486202a34 5819a3bc2d52c300 SELECT k, json_type(v) FROM g ORDER BY id
+9f357286d2054e52 5819a3bc2d52c300 SELECT k, json_valid(v) FROM g ORDER BY id
+551a2ae952b6533e 5819a3bc2d52c300 SELECT k, json_quote(v) FROM g ORDER BY id
+532f0b2f5c6f7126 5819a3bc2d52c300 SELECT id FROM g WHERE v ->> '$[1]' = 2
+----
+2bb56b72cb33ebb2 94471c2ad354c671 SELECT id, j->>'name' FROM doc WHERE json_valid(j) ORDER BY id
+eaec41fa735f3e5c 94471c2ad354c671 SELECT id, j->>'name' FROM doc WHERE json_valid(j,2) ORDER BY id
+a51094818e25ebdf 94471c2ad354c671 SELECT id, b->>'name', b->'tags' FROM doc ORDER BY id
+d170e2eb41f134b3 94471c2ad354c671 SELECT id, hex(b) FROM doc ORDER BY id
+894d8132aca8f060 94471c2ad354c671 SELECT id, json_array_length(b,'$.tags') FROM doc ORDER BY id
+c203330a7a6b0b7e 94471c2ad354c671 SELECT id, json_error_position(j) FROM doc ORDER BY id
+7cc68bd3b6b858a9 94471c2ad354c671 SELECT id, json_type(b) FROM doc ORDER BY id
+4ec71e2c6db39aa2 94471c2ad354c671 SELECT id, json(b) FROM doc ORDER BY id
+15d2adf01fefce45 2a1ffcaf576a2c9e SELECT id, json_pretty(b) FROM doc WHERE id<=2 ORDER BY id
+7af5e8223043ffd3 94471c2ad354c671 SELECT json_group_array(b->>'n') FROM doc
+7784370d7b0a9e5a 94471c2ad354c671 SELECT sum(b->>'n') FROM doc
+8aae646706cc7c34 2a1ffcaf576a2c9e SELECT id, json_set(b,'$.n',99) FROM doc WHERE id<=3 ORDER BY id
+0450a9e2fe39e51d 2a1ffcaf576a2c9e SELECT id, hex(jsonb_set(b,'$.n',99)) FROM doc WHERE id<=3 ORDER BY id
+9f7d8db78298b5ea 94471c2ad354c671 SELECT id, json_remove(b,'$.tags[0]') FROM doc ORDER BY id
+7d4806e7228b87f3 94471c2ad354c671 SELECT j->>'name' FROM doc
+c6f8e4bfb57cbacf 94471c2ad354c671 UPDATE doc SET j=json_set(j,'$.extra',id) WHERE json_valid(j)
+32024af414d5175f 94471c2ad354c671 UPDATE doc SET b=jsonb_insert(b,'$.tags[#]','new') WHERE b IS NOT NULL
+----
+83cb9cc008b72b45 46376557c1836f2e SELECT fullkey, atom, '|' FROM json_tree(json_set('{}','$.x',123,'$.x',456))
+5097f450b39c3d9d 46376557c1836f2e SELECT fullkey, atom, '|' FROM json_tree(jsonb_set('{}','$.x',123,'$.x',456))
+0949c0689a40f2eb 46376557c1836f2e SELECT json_insert('{}','$.a',value) FROM json_tree('[1,2,3]') WHERE atom IS NULL
+879b450c0c14bbb4 46376557c1836f2e SELECT json_insert('{}','$.a',value) FROM json_tree('"[1,2,3]"')
+0b9a05b845b88b1d ac2b79f9fe6d7702 SELECT fullkey FROM json_each('123')
+5e9862011fd8425b ac2b79f9fe6d7702 SELECT fullkey FROM json_each('123.56')
+1e3c784fbcd4f967 ac2b79f9fe6d7702 SELECT fullkey FROM json_each('"hello"')
+d1508ee87dbccdf1 ac2b79f9fe6d7702 SELECT fullkey FROM json_each('null')
+0b9a05b845b88b1d 46376557c1836f2e SELECT fullkey FROM json_tree('123')
+5e9862011fd8425b 46376557c1836f2e SELECT fullkey FROM json_tree('123.56')
+1e3c784fbcd4f967 46376557c1836f2e SELECT fullkey FROM json_tree('"hello"')
+d1508ee87dbccdf1 46376557c1836f2e SELECT fullkey FROM json_tree('null')
+80b6e3efb809bd1b 656658f158f278f6 SELECT * FROM JSON_EACH('{"a":1, "b":2}')
+80b6e3efb809bd1b 51b6417b01b118e2 SELECT xyz.* FROM JSON_EACH('{"a":1, "b":2}') AS xyz
+80b6e3efb809bd1b 656658f158f278f6 SELECT * FROM (JSON_EACH('{"a":1, "b":2}'))
+80b6e3efb809bd1b 51b6417b01b118e2 SELECT xyz.* FROM (JSON_EACH('{"a":1, "b":2}')) AS xyz
+49b0cad7164fa19d ac2b79f9fe6d7702 SELECT count(*) FROM json_each(NULL)
+49b0cad7164fa19d 46376557c1836f2e SELECT count(*) FROM json_tree(NULL)
+2d517efe80a2e315 ac2b79f9fe6d7702 SELECT value FROM json_each(x'CC141761133117621332176313331764133437656565') WHERE key='eee'
+79db90ac7cb0a324 ac2b79f9fe6d7702 SELECT * FROM json_each(x'CC141761133117621332176313331764133437656565')
+79db90ac7cb0a324 46376557c1836f2e SELECT * FROM json_tree(x'CC141761133117621332176313331764133437656565')
+----
+9f2404c250fad57a 97a7e45940bff231 SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_tree(j2.json) AS jx WHERE fullkey!=(path || CASE WHEN typeof(key)=='integer' THEN '['||key||']' ELSE '.'||key END)
+69058a9fdb1f6f31 5129195ab6a8cdce SELECT j2b.rowid, jx.rowid, fullkey, path, key FROM j2b, json_tree(j2b.json) AS jx WHERE fullkey!=(path || CASE WHEN typeof(key)=='integer' THEN '['||key||']' ELSE '.'||key END)
+9f2404c250fad57a 97a7e45940bff231 SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_each(j2.json) AS jx WHERE fullkey!=(path || CASE WHEN typeof(key)=='integer' THEN '['||key||']' ELSE '.'||key END)
+d0e7b6641f42f600 97a7e45940bff231 SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_each(j2.json) AS jx WHERE jx.json<>j2.json
+d0e7b6641f42f600 97a7e45940bff231 SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_tree(j2.json) AS jx WHERE jx.json<>j2.json
+f97f61903fc5227d 97a7e45940bff231 SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_each(j2.json) AS jx WHERE jx.value<>jx.atom AND type NOT IN ('array','object')
+f97f61903fc5227d 97a7e45940bff231 SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_tree(j2.json) AS jx WHERE jx.value<>jx.atom AND type NOT IN ('array','object')
+7afa52fd6ba28046 e2c9f6e32976ff59 SELECT j2.id, jx.* FROM j2, json_tree(j2.json) AS jx ORDER BY j2.id, jx.id
+72716f18f3a504b4 b80b0205fa80c94a SELECT j2b.id, jx.key, jx.value, jx.type, jx.atom, jx.id, jx.parent, jx.fullkey, jx.path FROM j2b, json_tree(j2b.json) AS jx ORDER BY j2b.id, jx.id
+2c1d04e3b2ef1b3e 97a7e45940bff231 SELECT j2.id, jx.* FROM j2, json_each(j2.json) AS jx
+bac932a5d0941888 97a7e45940bff231 SELECT j2.id, count(*), max(jx.id) FROM j2, json_tree(j2.json) AS jx GROUP BY j2.id
+2005e501834b16d8 37c2c386254ef81f SELECT j2.id, jx.fullkey, jx.value FROM j2, json_tree(j2.json, '$.address') AS jx
+2103ca1917ba709c 37c2c386254ef81f SELECT j2.id, jx.fullkey, jx.value FROM j2, json_tree(j2.json, '$[0].batters') AS jx
+a41a6b7379bf163f 37c2c386254ef81f SELECT j2.id, jx.key, jx.type FROM j2, json_each(j2.json, '$.phoneNumbers') AS jx
+af2b6a2c5f4713d8 37c2c386254ef81f SELECT j2.id, jx.key, jx.type FROM j2b AS j2, jsonb_each(j2.json, '$[1]') AS jx
+73b7dd1d8f6c4277 97a7e45940bff231 SELECT j2.id, typeof(jx.value), hex(jx.value) FROM j2b AS j2, jsonb_each(j2.json) AS jx WHERE jx.type IN ('array','object')
+0dacfbebcf3aeaee 97a7e45940bff231 SELECT j2.id, typeof(jx.json) FROM j2b AS j2, json_each(j2.json) AS jx LIMIT 3
+435980dc4384f373 e2c9f6e32976ff59 SELECT j2.id, jx.fullkey FROM j2, json_tree(j2.json) AS jx WHERE jx.key = 'type' ORDER BY 1, 2
+df81e880afb3cf3d d8b090e5cc968c06 SELECT DISTINCT jx.type FROM j2, json_tree(j2.json) AS jx ORDER BY 1
+----
+b238548dbad22ca3 4f1b9848e53fa46c SELECT *, 'NL' FROM t1 CROSS JOIN t2 WHERE EXISTS(SELECT 1 FROM json_each(t1.json,'$.items') AS Z WHERE Z.value==t2.id)
+82a7a6f3e3f522b3 ffae502ea797ad6b SELECT *, 'NL' FROM t2 CROSS JOIN t1 WHERE EXISTS(SELECT 1 FROM json_each(t1.json,'$.items') AS Z WHERE Z.value==t2.id)
+c67d0483c14d75f8 3568d2c99771aa97 SELECT t2.id FROM t1, json_each(t1.json,'$.items') AS Z, t2 WHERE Z.value=t2.id
+17ef65aaf678c1b7 7f66e46a85cfd24b SELECT t2.id FROM t2 WHERE t2.id IN (SELECT value FROM t1, json_each(t1.json,'$.items'))
+f066e26357ad11af 62165c0fa7a76a88 SELECT t2.id, (SELECT count(*) FROM json_each(t2.json)) FROM t2
+0bc0d7d4c67f08b2 62165c0fa7a76a88 SELECT t2.id, (SELECT key FROM json_each(t2.json)) FROM t2
+af070dacd9a6f218 9beccb167ae1741e SELECT t2.id FROM t2 JOIN json_each((SELECT json FROM t1),'$.items') AS z ON z.value=t2.id
+----
+8f49f3f476e74dae 4366250dfaea3f14 SELECT * FROM t1 LEFT JOIN t2 ON (SELECT b FROM json_each ORDER BY 1)
+----
+c2c073ddc973265c c4411cde8908e7e2 SELECT DISTINCT user.name FROM user, json_each(user.phone) WHERE json_each.value LIKE '704-%' ORDER BY 1
+76b9189a8696c52f c4411cde8908e7e2 SELECT DISTINCT user.name FROM user, json_each(user.phoneb) WHERE json_each.value LIKE '704-%' ORDER BY 1
+b00a5741ca47a405 48d626c9fec9024b SELECT user.name, json_each.key, json_each.value FROM user, json_each(user.phone) ORDER BY 1, 2
+97e20b9a3339a0c1 ceb30061cc02c955 SELECT user.name, count(*) FROM user, json_each(user.phoneb) GROUP BY 1
+----
+9530544c35628cc0 7c1e8bd0251b2250 SELECT name FROM user WHERE phone LIKE '704-%' UNION SELECT user.name FROM user, json_each(user.phone) WHERE json_valid(user.phone) AND json_each.value LIKE '704-%'
+bd061f252a26dabe f3771a896aa2e39f SELECT user.name, json_each.* FROM user, json_each(user.phone) ORDER BY user.rowid
+----
+e034f8c484183431 fabba5f42ec7a38c SELECT big.rowid, fullkey, value FROM big, json_tree(big.json) WHERE json_tree.type NOT IN ('object','array') ORDER BY +big.rowid, +json_tree.id
+81afeaa34c4c8223 fabba5f42ec7a38c SELECT big.rowid, fullkey, value FROM big, json_tree(jsonb(big.json)) WHERE json_tree.type NOT IN ('object','array') ORDER BY +big.rowid, +json_tree.id
+7421b20c900cba00 fabba5f42ec7a38c SELECT big.rowid, fullkey, atom FROM big, json_tree(big.json) WHERE atom IS NOT NULL ORDER BY +big.rowid, +json_tree.id
+7cf191fce8287ccb 49d56a007b10d856 SELECT DISTINCT json_extract(big.json,'$.id') FROM big, json_tree(big.json,'$.partlist') WHERE json_tree.key='uuid' AND json_tree.value='6fa5181e-5721-11e5-a04e-57f3d7b32808'
+5e7ede0141e6965e 49d56a007b10d856 SELECT DISTINCT json_extract(big.json,'$.id') FROM big, json_tree(big.json,'$') WHERE json_tree.key='uuid' AND json_tree.value='6fa5181e-5721-11e5-a04e-57f3d7b32808'
+8ace6a830c662759 f120d36395d21723 SELECT DISTINCT json_extract(big.json,'$.id') FROM big, json_tree(big.json) WHERE json_tree.key='uuid' AND json_tree.value='6fa5181e-5721-11e5-a04e-57f3d7b32808'
+4e9d153753af0176 0a90eabff1bffeec SELECT big.rowid, json_tree.* FROM big, json_tree(big.json,'$.partlist')
+1bdd9d8cce5ad84b 0a90eabff1bffeec SELECT big.rowid, json_tree.* FROM big, json_tree(big.json,'$.partlist[2]')
+180c6838ff594825 0a90eabff1bffeec SELECT big.rowid, json_tree.* FROM big, json_tree(big.json,'$.partlist[2].subassembly')
+39928322efd4cec5 41907719bcc3065c SELECT big.rowid, json_each.* FROM big, json_each(big.json,'$.stuff')
+c6761c0f6b8f046c c6761c0f6b8f046c SELECT big.rowid, json_each.* FROM big, jsonb_each(big.json,'$.partlist')
+87454b3bb24c61d1 88a405bfbef95c20 SELECT big.rowid, key, path, fullkey, parent FROM big, jsonb_tree(jsonb(big.json)) ORDER BY 1, id
+----
+a85b2a1647be8ee3 a85b2a1647be8ee3 SELECT count(*) FROM t1, json_tree(j0) AS rt WHERE rt.type NOT IN ('object','array') AND rt.atom IS NOT (j0 ->> rt.fullkey)
+a85b2a1647be8ee3 a85b2a1647be8ee3 SELECT count(*) FROM t1, json_tree(j5) AS rt WHERE rt.type NOT IN ('object','array') AND rt.atom IS NOT (j0 ->> rt.fullkey)
+a85b2a1647be8ee3 a85b2a1647be8ee3 SELECT count(*) FROM t1, kv WHERE key NOT LIKE '%]' AND json_remove(j5,key)->>key IS NOT NULL
+a85b2a1647be8ee3 a85b2a1647be8ee3 SELECT count(*) FROM t1, kv WHERE json_set(j0,key,'xyzzy')->>key IS NOT 'xyzzy'
+a85b2a1647be8ee3 a85b2a1647be8ee3 SELECT rt.* FROM t1, json_tree(j0) AS rt
+a85b2a1647be8ee3 a85b2a1647be8ee3 SELECT rt.* FROM t1, json_tree(j5) AS rt
+34def7a0a2d27c2a 34def7a0a2d27c2a SELECT * FROM kv
+----
+19f19a09ae142140 46376557c1836f2e SELECT key, value FROM json_tree( CAST('{"a":123,"b":456}' AS blob) ) WHERE atom
+778c06d53c8be225 ac2b79f9fe6d7702 SELECT * FROM json_each( CAST('[1,{"a":2}]' AS blob) )
+----
+c1cf1ce6e2dcba19 0530a740b23b2946 SELECT key, value FROM json_tree(obj.x) JOIN obj
+dc26ae58a9d6e16b dc26ae58a9d6e16b SELECT key, value FROM json_tree(obj.x) LEFT JOIN obj
+dc26ae58a9d6e16b dc26ae58a9d6e16b SELECT key, value FROM json_tree(obj.x) LEFT JOIN obj WHERE obj.x!=''
+dc26ae58a9d6e16b dc26ae58a9d6e16b SELECT key, value FROM json_tree(obj.x), one LEFT JOIN obj WHERE obj.x!=''
+861bd4872ae17d90 4c77ce3dcfa96361 SELECT key, value FROM json_tree(obj.x), obj LEFT JOIN one
+95bcd0be4d0ef662 4c77ce3dcfa96361 SELECT key, value FROM obj, json_tree(obj.x) LEFT JOIN one
+0482a5b7798a79c3 7e7cc99bdb0f461c SELECT key, value FROM one LEFT JOIN json_tree(obj.x), obj
+184a01f1d840b28c 1634a58fc5ea24ec SELECT key, value FROM one LEFT JOIN obj, json_tree(obj.x)
+1a9f0a294b8d748c 0aada7f78808866a SELECT key, value FROM zero LEFT JOIN obj, json_tree(obj.x)
+9df86447b5cffc65 4d9a7d03d005d773 SELECT key, value FROM obj LEFT JOIN json_tree(obj.x)
+9b1d4d6ad661a277 2c9ab6622e07df74 SELECT key, value FROM obj LEFT JOIN zero, json_tree(obj.x)
+----
+f52709d1318df42b 49aa3dbdc992028d SELECT fullkey FROM t1, json_tree(x)
+a3ffbd5aa427e931 49aa3dbdc992028d SELECT * FROM t1, json_tree(x)
+304fe39ea3f66bad 414bc323388d8716 SELECT * FROM t1, json_each(x, '$.a.b')
+----
+66fba0177a0928ce 4f4fba653d92b858 SELECT * FROM json_tree('{"\u0017":1}','$."\x17"')
+6192d20257095283 ac2b79f9fe6d7702 SELECT * FROM json_each('{"\u0017":1}')
+50f66f5b7dd29462 46376557c1836f2e SELECT * FROM json_tree('{"a\"b":{"c.d":[1]}}')
+----
+3d7755259d3c9fb9 631e295612096a30 SELECT a.value, b.value FROM a RIGHT JOIN b ON a.value = b.value
+185ec5bda83c654e c22f73a82369df9c SELECT a.value, b.value FROM json_each('["a", "c", null]') AS b LEFT JOIN json_each('["a", "b", null]') AS a ON a.value = b.value
+b73c65289f585f22 7cdde5915dffcaf0 SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+a9d92b2bbac00577 ec124652e9b9d1ed SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN b ON a.value = b.value
+db49641aa5b5c7b1 651d0a967c8062a7 SELECT a.value, b.value FROM a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+e49f77b8cb50ee72 301c609b7f0250bd SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a FULL JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+----
+f1dfc3b0860eb906 d77557c577480144 SELECT value, t1.* FROM json_each('7') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT a, b FROM t1)
+----
+9cd5accfe642757b 1fc517b67b906cd1 SELECT value, t1.* FROM json_each('17') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
+36041d1d6c65b61e 1fc517b67b906cd1 SELECT value, t1.* FROM json_each('null') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
+02a6e89d161a2467 651d0a967c8062a7 SELECT quote(a.key), b.value FROM a RIGHT JOIN json_each('["a","c"]') AS b ON a.key=b.value
+----
+c67fb8bd13be80ae db2177ef4e4a8db5 SELECT * FROM t6 WHERE 1 IN (SELECT value FROM json_each(x))
+----
+64bede02e3e17bcb 48f80d613ac01d26 SELECT * FROM t6 WHERE (EXISTS (SELECT 1 FROM json_each(t6.c) AS x WHERE x.value=1))
+89c6ffa0d62e8875 a9db0ccd24fb6c7e SELECT * FROM t WHERE(EXISTS(SELECT 1 FROM json_each(t.json,'$.foo') j WHERE j.value = 'meep'))
+2adcf09183887530 b5934b7172c5f8c5 SELECT * FROM t6 WHERE 4 IN (SELECT value FROM json_each(t6.c, '$.b'))
+fa7cedac077c25ed 640b39fb9b876229 SELECT a, (SELECT sum(value) FROM json_each(c, '$.b')) FROM t6
+43d11220cb02f308 924c525dab01e666 SELECT a, (SELECT group_concat(key) FROM json_tree(c)) FROM t6
+----
+8e1df5441ddcd37e ebb08381cd2365e8 SELECT value FROM json_each(t0.c0), t0
+dc26ae58a9d6e16b dc26ae58a9d6e16b SELECT value FROM json_each(t0.c0), t0 RIGHT JOIN (SELECT 1) WHERE t0.c0 != 400
+dc26ae58a9d6e16b dc26ae58a9d6e16b SELECT value FROM json_each(t0.c0), t0 RIGHT JOIN (SELECT 1)
+----
+442c3b0e30503f02 442c3b0e30503f02 ALTER TABLE json_each RENAME TO t4
+4c685b0ac6e69d4e e3b0c44298fc1c14 INSERT INTO t1(x) VALUES('{"a":1}'); SELECT * FROM t2
+ed552ef6f74097f4 e3b0c44298fc1c14 INSERT INTO t1(x) VALUES('[1,[2],{"c":3}]'); SELECT * FROM t2
+483b5c4789ee83a5 483b5c4789ee83a5 DROP TABLE json_each
+b0b785ca42dc263c b0b785ca42dc263c CREATE INDEX i1 ON json_each(key)
+54d822e4702b7075 54d822e4702b7075 INSERT INTO json_each(key) VALUES(1)
+8cf0d91e639c30c8 8cf0d91e639c30c8 DELETE FROM json_tree
+54d822e4702b7075 54d822e4702b7075 UPDATE json_each SET key=1
+d7e3db77562ce5be e3b0c44298fc1c14 CREATE VIRTUAL TABLE v1 USING json_each
+----
+5021e2d6eea6834c ac2b79f9fe6d7702 SELECT * FROM json_each('[1]')
+cec8baa99b9cf62f ac2b79f9fe6d7702 SELECT value FROM json_each('[1,2,3]')
+bc02b5b2f2867835 ac2b79f9fe6d7702 SELECT value FROM json_each('[4,5]')
+----
+8f86be29e4d5d890 ac2b79f9fe6d7702 SELECT * FROM json_each('{"a":1,"b":[2,3],"c":{"d":"x"}}')
+e0f9fe9c79698a20 46376557c1836f2e SELECT * FROM json_tree('{"a":1,"b":[2,3],"c":{"d":"x","e f":null}}')
+8f86be29e4d5d890 8c28b36912773877 SELECT * FROM jsonb_each('{"a":1,"b":[2,3],"c":{"d":"x"}}')
+81be61ba3bde3e6d 0e247b36def60652 SELECT key, hex(value), type, atom, id, parent, fullkey, path FROM jsonb_tree('{"a":1,"b":[2,3],"c":{"d":"x"}}')
+0e0aede61d556e9c ac2b79f9fe6d7702 SELECT rowid, * FROM json_each('[10,20,30]')
+4f2f58c2c615cb3e 46376557c1836f2e SELECT rowid, * FROM json_tree('[10,[20,[30]]]')
+2e68e1b718539766 ac2b79f9fe6d7702 SELECT key, value, json, root FROM json_each('[1,2]')
+ba1698e66ca89bbc 4f4fba653d92b858 SELECT key, value, json, root FROM json_tree('{"a":[1]}', '$.a')
+c7258228999cecfc 46376557c1836f2e SELECT typeof(key), typeof(value), typeof(atom), typeof(id), typeof(parent) FROM json_tree('[1,"a",2.5,null,true,false,[],{}]')
+24c4e338daac8c71 ac2b79f9fe6d7702 SELECT type FROM json_each('[1,"a",2.5,null,true,false,[],{},-1e400,0x10]')
+858d69f88cb12e16 ac2b79f9fe6d7702 SELECT value, atom FROM json_each('[1e999,-1e999,0x1F,.5,+3,''s'',"\u00e9"]')
+3cbb7454a271cec6 ac2b79f9fe6d7702 SELECT * FROM json_each('[]')
+353aef7a149db2b7 ac2b79f9fe6d7702 SELECT * FROM json_each('{}')
+3cbb7454a271cec6 46376557c1836f2e SELECT * FROM json_tree('[]')
+353aef7a149db2b7 46376557c1836f2e SELECT * FROM json_tree('{}')
+fbed9153695831c3 ac2b79f9fe6d7702 SELECT * FROM json_each('5')
+0c0b352bb8fb5bbe 46376557c1836f2e SELECT * FROM json_tree('"str"')
+f896554a0f6fe012 ac2b79f9fe6d7702 SELECT * FROM json_each('')
+99849ac616820a4d ac2b79f9fe6d7702 SELECT * FROM json_each(' [1, 2] ')
+44317580eef986b1 ac2b79f9fe6d7702 SELECT * FROM json_each('[1,[2,[3,[4,[5]]]]]')
+44317580eef986b1 46376557c1836f2e SELECT * FROM json_tree('[1,[2,[3,[4,[5]]]]]')
+b27213f5e4a1c8c4 46376557c1836f2e SELECT * FROM json_tree('{"a":{"b":{"c":{"d":{}}}}}')
+9ca1e3062ec50360 46376557c1836f2e SELECT * FROM json_tree('[[[],[]],[{}],{"a":[]}]')
+21ab03ac713cce72 ac2b79f9fe6d7702 SELECT * FROM json_each(json_object('k1', 1, 'k 2', 2, '3k', 3, '', 4, 'a.b', 5))
+e042fb9ff2a58c7c 46376557c1836f2e SELECT fullkey, path FROM json_tree(json_object('k1', json_array(1), 'k 2', json_object('x"y', 2), '3k', 3, '', 4))
+175ed3e56e60543d ac2b79f9fe6d7702 SELECT * FROM json_each('{"a":1,"a":2}')
+6cbbb07ca328d627 ac2b79f9fe6d7702 SELECT * FROM json_each(json('{a:1, b:[2,], /* c */ c:''x''}'))
+86385d5fc319d307 46376557c1836f2e SELECT * FROM json_tree('{a:1, b:[2,], /* c */ c:''x''}')
+4dffe36274bf89ad ac2b79f9fe6d7702 SELECT value FROM json_each('["\u0000x", "a\nb", "\t"]')
+714563f415acf69e ac2b79f9fe6d7702 SELECT length(value), hex(value) FROM json_each('["\u0000x", "a\"b"]')
+553695f8246b2567 ac2b79f9fe6d7702 SELECT * FROM json_each(json_array(1, 2.5, 'x', NULL, x'00'))
+708255cb149339e0 ac2b79f9fe6d7702 SELECT key, value FROM json_each('[' || printf('%.200c', '1') || ']')
+9f83e6c50be2b606 9f83e6c50be2b606 SELECT count(*) FROM json_each(json_group_array(1))
+c422a5dbdf766377 279406d77f9534e4 SELECT count(*), sum(value) FROM json_each((SELECT json_group_array(value) FROM generate_series(1,500)))
+a0fb855f27f6ff31 598bc59cbdf40fdb SELECT count(*), max(id) FROM json_tree((SELECT json_group_array(json_array(value, json_object('v', value))) FROM generate_series(1,100)))
+----
+0a709edd4029e154 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$')
+5d0a58d5ee1f6ec6 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a')
+b5e1ba90a0a7c0af 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b')
+5be6b838b30f9103 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b[1]')
+8899e0c9d2ccf979 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.c')
+e14bee90aaa5b826 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.x.y.z')
+bb05f7e13d0e3ac9 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b[5]')
+f6df49d15722812e 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b[#-1]')
+0a709edd4029e154 4f4fba653d92b858 SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$')
+5d0a58d5ee1f6ec6 4f4fba653d92b858 SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a')
+b5e1ba90a0a7c0af 4f4fba653d92b858 SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a.b')
+5be6b838b30f9103 4f4fba653d92b858 SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a.b[1]')
+eeb618d6cecdb5a4 4f4fba653d92b858 SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a.b[#-2]')
+ad3adec442049a85 4f4fba653d92b858 SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.zz')
+4fe39465912fabe1 4f4fba653d92b858 SELECT * FROM json_tree('[[1,[2,3]],[4]]', '$[0][1]')
+79a89c5adf2ee4cc 4f4fba653d92b858 SELECT * FROM json_tree('[[1,[2,3]],[4]]', '$[0][1][0]')
+146d02861d39eaf4 4f4fba653d92b858 SELECT * FROM json_tree('{"x y":{"z":[7]}}', '$."x y"')
+9fcf368e4d09c366 4f4fba653d92b858 SELECT * FROM json_tree('{"x y":{"z":[7]}}', '$."x y".z')
+146d02861d39eaf4 18f2a7e0d10b1ebd SELECT * FROM json_each('{"x y":{"z":[7]}}', '$."x y"')
+5340c92093d55606 18f2a7e0d10b1ebd SELECT * FROM json_each('{"x y":{"z":[7]}}', '$."x y".z[0]')
+91c668d0afa7aeac 18f2a7e0d10b1ebd SELECT * FROM json_each('[1,2,3]', NULL)
+91c668d0afa7aeac 4f4fba653d92b858 SELECT * FROM json_tree('[1,2,3]', NULL)
+1c9bd93ce0ea8a68 18f2a7e0d10b1ebd SELECT * FROM json_each(NULL, '$')
+f74670ad490ab60d 18f2a7e0d10b1ebd SELECT * FROM json_each('[1,2,3]', '$[1]')
+51ad952b320701ff 404ff757ee6fea06 SELECT * FROM jsonb_each('{"a":[1,{"b":2}]}', '$.a')
+6f07314ca38561c4 1ca68c2976cb6902 SELECT key, hex(value), fullkey FROM jsonb_tree('{"a":[1,{"b":2}]}', '$.a')
+5a0899cbfbe3209e 18f2a7e0d10b1ebd SELECT * FROM json_each(jsonb('{"a":[1,{"b":2}]}'), '$.a[1]')
+78477d9ee4a0f4c1 4f4fba653d92b858 SELECT * FROM json_tree(jsonb('{"a":[1,{"b":2}]}'), '$.a[1].b')
+1f52eec265bfcca4 4f4fba653d92b858 SELECT * FROM json_tree('{"a":{"a":{"a":1}}}', '$.a.a')
+5e680acaacebb0af 4f4fba653d92b858 SELECT * FROM json_tree('[{"a":[{"a":1}]}]', '$[0].a[0]')
+----
+59f7772b87b61a36 ac2b79f9fe6d7702 SELECT * FROM json_each('[1,2')
+8f7b0b002496afae 46376557c1836f2e SELECT * FROM json_tree('{"a":')
+e2d037183ad679fd ac2b79f9fe6d7702 SELECT * FROM json_each('{"a":1}x')
+95011a795cd93838 18f2a7e0d10b1ebd SELECT * FROM json_each('[1]', 'x')
+95011a795cd93838 4f4fba653d92b858 SELECT * FROM json_tree('[1]', 'x')
+831effc34dd1f946 18f2a7e0d10b1ebd SELECT * FROM json_each('[1]', '$[')
+936c0558e7af64d6 18f2a7e0d10b1ebd SELECT * FROM json_each('[1]', '$.a[')
+0ce1fdc656b338b7 18f2a7e0d10b1ebd SELECT * FROM json_each('[1]', '')
+431589ab36d61670 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":[1]}', '$.a[x]')
+7b4e4a34f38cad6a ac2b79f9fe6d7702 SELECT * FROM json_each(x'0b01')
+195400235b2c895e ac2b79f9fe6d7702 SELECT * FROM json_each(x'00')
+156cc45be1747372 ac2b79f9fe6d7702 SELECT * FROM json_each(x'1b31')
+ec8dcf9e4332f729 46376557c1836f2e SELECT * FROM json_tree(x'cb02133113')
+a10aed97dfca9289 ac2b79f9fe6d7702 SELECT * FROM json_each(x'cb021331')
+ec0d030539031368 18f2a7e0d10b1ebd SELECT * FROM json_each('[1,2]', 5)
+47a250a640b40a6f ac2b79f9fe6d7702 SELECT * FROM json_each(123)
+81fcfd32e3aeeec2 ac2b79f9fe6d7702 SELECT * FROM json_each(12.5)
+b698e89de6ad2637 fbf15f879e5ec8aa SELECT * FROM json_each()
+2f3d00dbdd3afa8b 2f3d00dbdd3afa8b SELECT * FROM json_each('[1]', '$', 3)
+b698e89de6ad2637 234a655eed33bd16 SELECT * FROM json_tree
+b698e89de6ad2637 fbf15f879e5ec8aa SELECT * FROM json_each
+9ba24dd74b01e329 9ba24dd74b01e329 SELECT * FROM jsonx_each('[1]')
+e26934939e4c9568 e26934939e4c9568 SELECT * FROM json_eachx('[1]')
+78e0b9d9f017f97d 45b9c76591fe541b SELECT * FROM main.json_each('[1]')
+78e0b9d9f017f97d cd1fe8577917c2d1 SELECT * FROM temp.json_each('[1]')
+7c9671b5e8654269 ac2b79f9fe6d7702 SELECT json_each.value FROM json_each('[1]')
+f1249c6887007f7a ac2b79f9fe6d7702 SELECT * FROM json_each('[1]') WHERE json = '[2]'
+99e02a2461c86c99 ac2b79f9fe6d7702 SELECT * FROM json_each WHERE json = '[1,2]'
+d88c5288f96723ab 18f2a7e0d10b1ebd SELECT * FROM json_each WHERE json = '{"a":[1]}' AND root = '$.a'
+e6fa973963f9cc88 fbf15f879e5ec8aa SELECT * FROM json_each WHERE json > '[1]'
+a289182a0236a523 fbf15f879e5ec8aa SELECT * FROM json_each WHERE root = '$'
+1017eb4490f3ef88 46376557c1836f2e SELECT * FROM json_tree WHERE json IN ('[1]', '[2,3]')
+caa2b81f5395e368 97ac0e769293d0b3 SELECT * FROM json_each('[1]') AS j, json_each(j.value)
+4dbf864550fe2a6f fbf15f879e5ec8aa SELECT * FROM json_each(json_each.value)
+----
+8800fa4edff86642 1752f99007e846d8 SELECT doc.id, j.value FROM doc, json_each(doc.body, '$.tags') AS j
+17208298e5184163 1752f99007e846d8 SELECT doc.id, j.value FROM doc, json_each(doc.b, '$.tags') AS j
+f8c9a925b8be37b0 abf49028c8d850de SELECT doc.id, j.value, tag.w FROM doc, json_each(doc.body, '$.tags') AS j JOIN tag ON tag.name = j.value
+3b26dc244607d6b7 ceb477523f8af38e SELECT doc.id, j.value, tag.w FROM doc, json_each(doc.body, '$.tags') AS j LEFT JOIN tag ON tag.name = j.value
+845018b116ba12cd 24565f70da8cb291 SELECT doc.id, j.value FROM doc LEFT JOIN json_each(doc.body, '$.tags') AS j
+7b00e47647e7407e 24565f70da8cb291 SELECT doc.id, j.value FROM doc LEFT JOIN json_each(doc.body, '$.tags') AS j ON j.value <> 'y'
+be4170f959ade9bd 24565f70da8cb291 SELECT doc.id, count(j.key) FROM doc LEFT JOIN json_each(doc.body, '$.tags') AS j GROUP BY doc.id
+882b06b7e5c14e9f e2383a36f4cb8505 SELECT doc.id, j.fullkey, j.atom FROM doc, json_tree(doc.body) AS j WHERE j.atom IS NOT NULL ORDER BY doc.id, j.id
+ab0f235ad9d22466 70cb84279064acad SELECT doc.id, j.fullkey, j.atom FROM doc, json_tree(doc.b, '$.n') AS j ORDER BY doc.id, j.id
+548165db77fe2353 c91840e64af33a66 SELECT doc.id, paths.p, j.key, j.value FROM doc, paths, json_each(doc.body, paths.p) AS j
+2c22982e43095b5f 80d6849cb6b18bd2 SELECT doc.id, paths.p, j.fullkey FROM paths, doc, json_tree(doc.body, paths.p) AS j
+177471a6b35ee011 34501072271fc2af SELECT tag.name, (SELECT group_concat(doc.id) FROM doc, json_each(doc.body, '$.tags') AS j WHERE j.value = tag.name) FROM tag
+1ed27b8ed8904812 ad7dd211e3640a57 SELECT tag.name FROM tag WHERE EXISTS (SELECT 1 FROM doc, json_each(doc.body, '$.tags') AS j WHERE j.value = tag.name AND doc.id = 2)
+19e7620842c6e160 4abbe136aa3e8105 SELECT doc.id FROM doc WHERE 'z' IN (SELECT value FROM json_each(doc.body, '$.tags'))
+b7c0a04d57b35415 c71697a4d9a4a87d SELECT doc.id FROM doc WHERE (SELECT count(*) FROM json_each(doc.body, '$.tags')) >= 2
+8800fa4edff86642 1752f99007e846d8 SELECT doc.id, j.value FROM doc CROSS JOIN json_each(doc.body, '$.tags') AS j
+22b1a3f17f342711 1752f99007e846d8 SELECT doc.id, j.value FROM json_each(doc.body, '$.tags') AS j, doc
+22b1a3f17f342711 1752f99007e846d8 SELECT doc.id, j.value FROM json_each(doc.body, '$.tags') AS j JOIN doc
+2e5abb3469cc1595 8c939eaf7b9d3011 SELECT a.value, b.value FROM json_each('[1,2,3]') AS a, json_each('[10,20]') AS b
+1d44f022d21459da 8c939eaf7b9d3011 SELECT a.value, b.value FROM json_each('[[1,2],[3]]') AS a, json_each(a.value) AS b
+ebf3dcaf3ebe115d 557304895ea39fc1 SELECT a.key, b.key, c.key FROM json_each('{"p":{"q":{"r":1}}}') AS a, json_each(a.value) AS b, json_each(b.value) AS c
+06be540ad2579845 8c939eaf7b9d3011 SELECT a.value, b.value FROM json_each('[1,2,3]') AS a JOIN json_each('[2,3,4]') AS b ON a.value = b.value
+ce6fdd01ed578865 1b1249c024407ce3 SELECT a.value FROM json_each('[1,2,3]') AS a WHERE a.value NOT IN (SELECT value FROM json_each('[2]'))
+8a885dbdc492ac7d 893ef43e7f78e20a SELECT j.value, t.w FROM tag AS t JOIN json_each('["z","x","q"]') AS j ON j.value = t.name
+f4ad864239fa852d f3532bc19e385804 SELECT j.value, t.w FROM json_each('["z","x","q"]') AS j LEFT JOIN tag AS t ON j.value = t.name
+70d0ac6814e02e06 49271f34e059fda2 SELECT j.value, t.w FROM tag AS t RIGHT JOIN json_each('["z","x","q"]') AS j ON j.value = t.name
+b1c16aedd724e5d1 d98408e695ac22e5 SELECT j.key, j.value FROM doc, json_each(doc.body) AS j WHERE doc.id = 5
+02a514181f57e440 d98408e695ac22e5 SELECT j.key, j.value FROM doc, json_each(doc.body) AS j WHERE doc.id = 1 AND j.key = 'n'
+a23f658f0cf15f9a 1752f99007e846d8 SELECT doc.id, json_group_array(j.value) FROM doc, json_each(doc.body, '$.tags') AS j GROUP BY doc.id
+74b3dd940de29001 dc31dfba3ef56fba SELECT j.value, count(*) FROM doc, json_each(doc.body, '$.tags') AS j GROUP BY j.value ORDER BY 2 DESC, 1
+8a356e6e780cc18d f457f6a17df5e92b SELECT DISTINCT j.value FROM doc, json_each(doc.body, '$.tags') AS j ORDER BY 1
+c1b7049961bf8ec3 37098dd5cb724a43 SELECT doc.id, j.value FROM doc, json_each(doc.body, '$.tags') AS j WHERE j.value > 'x' ORDER BY j.value, doc.id
+87336adfb95bcd69 8e6870a0033a8c56 SELECT doc.id, j.* FROM doc, json_each(doc.body) AS j WHERE j.type = 'object'
+6e390bd2f572e3d0 8e6870a0033a8c56 SELECT doc.id, j.* FROM doc, json_tree(doc.body) AS j WHERE j.parent IS NULL
+c77d1dd29d536329 8e6870a0033a8c56 SELECT doc.id, j.key FROM doc, json_each(json_extract(doc.body, '$.n')) AS j
+734d27b4718f4f0b 8e6870a0033a8c56 SELECT doc.id, j.key FROM doc, json_each(doc.body -> '$.n') AS j
+ee1601ddabd5387c 8e6870a0033a8c56 SELECT doc.id, j.key FROM doc, json_each(doc.body ->> '$.n') AS j
+fec67e2baa95f6fd 98180a7fc6e269fd SELECT * FROM doc WHERE id IN (SELECT value FROM json_each('[1,3,5]'))
+b68fdcb5080a0409 98180a7fc6e269fd SELECT * FROM doc WHERE id IN (SELECT value FROM json_each('[1,3,5]')) ORDER BY id DESC
+48ad9d575a220281 f0740ecb6b8bac6e SELECT * FROM doc JOIN json_each('[1,3,5]') AS j ON doc.id = j.value
+d104d7bacd557d1f f0740ecb6b8bac6e SELECT * FROM json_each('[5,1,3]') AS j JOIN doc ON doc.id = j.value
+6bde24f145c8ae3b f0740ecb6b8bac6e SELECT * FROM json_each('[5,1,3]') AS j, doc WHERE doc.id = j.value + 0
+cfc995e1eaa7abbc 6bcaac8088077cec SELECT * FROM doc WHERE id = (SELECT max(value) FROM json_each('[1,3,5]'))
+9388d398dd239c0b c71697a4d9a4a87d SELECT doc.id, (SELECT json_group_array(value) FROM json_each(doc.body, '$.tags') ORDER BY value DESC) FROM doc
+10ded8f074ad3bb7 75e68fbe6845dc6f WITH x AS (SELECT value AS v FROM json_each('[1,2,3,4]')) SELECT * FROM x, doc WHERE doc.id = x.v
+36fceab9942f7330 d382d7c17de4d85f WITH RECURSIVE r(n, j) AS (SELECT 1, '[[1],[2,[3]]]' UNION ALL SELECT n+1, value FROM r, json_each(r.j) WHERE type = 'array') SELECT * FROM r
+e1e0080a36393eb4 7c1f4cbeb701335e SELECT * FROM (SELECT * FROM json_each('[3,1,2]') ORDER BY value) LIMIT 2
+179a4a27d1173db1 30db5367e09473fd SELECT * FROM json_each('[3,1,2]') UNION ALL SELECT * FROM json_each('[4]')
+10e7865eae92fded b58bf941c29c1eea SELECT value FROM json_each('[3,1,2]') UNION SELECT value FROM json_each('[2,4]')
+2b39e2e108877834 868daebe00733b2d SELECT value FROM json_each('[3,1,2]') INTERSECT SELECT value FROM json_each('[2,3,4]')
+efb5b8db98a2b573 bebda31cd53e9cf7 SELECT value FROM json_each('[3,1,2]') EXCEPT SELECT value FROM json_each('[2,4]')
+----
+8eac0fd1b44fbf46 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') ORDER BY rowid
+2846259e89b70e63 7c1f4cbeb701335e SELECT * FROM json_each('[3,1,2]') ORDER BY rowid DESC
+3eedf565ada4d973 7c1f4cbeb701335e SELECT * FROM json_each('[3,1,2]') ORDER BY value
+aab6cb30e52b9c93 7c1f4cbeb701335e SELECT * FROM json_each('[3,1,2]') ORDER BY key DESC
+916793a403ca99ce 7c1f4cbeb701335e SELECT * FROM json_each('[3,1,2]') ORDER BY id
+0cdb020a352527cd 46376557c1836f2e SELECT * FROM json_tree('[3,[1],2]') ORDER BY rowid
+81d5dad7b83b07a8 46376557c1836f2e SELECT * FROM json_tree('[3,[1],2]') ORDER BY rowid, value
+07b2a4c18e9b1051 50803ff9b762bb15 SELECT * FROM json_tree('[3,[1],2]') ORDER BY fullkey
+1d8df9c970951dc1 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') LIMIT 2
+fc7c197b8d5bd63a ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') LIMIT 1 OFFSET 1
+bc2d9392bbc57396 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') ORDER BY rowid LIMIT 2
+c1eb350cf8110eca 7c1f4cbeb701335e SELECT * FROM json_each('[3,1,2]') ORDER BY value LIMIT 2
+a16e943815e196ec 46376557c1836f2e SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') LIMIT 3
+17e09df4c832b337 50803ff9b762bb15 SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') ORDER BY id DESC LIMIT 3
+ed711fed8c1ccb25 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') WHERE value > 1
+df171ec7b409b819 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') WHERE key = 1
+fb2f1d4c0178eb01 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') WHERE rowid = 1
+c7d08d20c937f43b ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') WHERE rowid IN (0, 2)
+4955acff975d0776 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') WHERE value IN (1, 3)
+8ec4945eb6ec2b90 ac2b79f9fe6d7702 SELECT * FROM json_each('[3,1,2]') WHERE value BETWEEN 2 AND 3
+ddb177329a5214a9 46376557c1836f2e SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE type = 'integer'
+26d6b6cecf184e69 46376557c1836f2e SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE parent = 0
+eabd1290e33a32ce 46376557c1836f2e SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE path = '$.a'
+a80a796ba17763a0 46376557c1836f2e SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE fullkey LIKE '$.b%'
+1331782669556530 46376557c1836f2e SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE key IS NULL
+d986fcd4128ddfa6 ac2b79f9fe6d7702 SELECT * FROM json_each('{"a":1,"b":2}') WHERE key = 'b'
+eab451ba78e588f2 ac2b79f9fe6d7702 SELECT * FROM json_each('{"a":1,"b":2}') WHERE json = '{"a":1,"b":2}'
+6663f52079832a0d 18f2a7e0d10b1ebd SELECT * FROM json_each('{"a":1,"b":2}') WHERE root = '$'
+f4050a9642d9f514 7c1f4cbeb701335e SELECT key FROM json_each('{"c":1,"a":2,"b":3}') ORDER BY key
+7d6da698acdbb2c8 7c1f4cbeb701335e SELECT key FROM json_each('{"c":1,"a":2,"b":3}') ORDER BY 1 DESC LIMIT 2
+dc74bf80ecb6c0a5 ac2b79f9fe6d7702 SELECT count(*) FROM json_each('[1,2,3]')
+78ea0513e94d2b12 ac2b79f9fe6d7702 SELECT sum(value), avg(value), min(value), max(value) FROM json_each('[1,2,3,4.5]')
+afa2a528ba5f9e00 ac2b79f9fe6d7702 SELECT group_concat(key, ',') FROM json_each('{"z":1,"y":2}')
+9582a413c397f8a7 ac2b79f9fe6d7702 SELECT json_group_array(value) FROM json_each('[1,[2],{"a":3}]')
+d21faf6060e5c750 ac2b79f9fe6d7702 SELECT json_group_object(key, value) FROM json_each('{"a":[1],"b":{"c":2}}')
+66216dc5078ab4c1 46376557c1836f2e SELECT json_group_array(value) FROM json_tree('[1,[2],{"a":3}]') WHERE atom IS NOT NULL
+a47619bd226bcb9d 6ff02cf69ad35a21 SELECT type, count(*) FROM json_tree('[1,[2,"x"],{"a":3,"b":null}]') GROUP BY type ORDER BY type
+f217b425fd03108e 0b815bd05f707731 SELECT value FROM json_each('[1,2,3]') WHERE value = (SELECT max(value) FROM json_each('[1,2,3]'))
+a935fa3a03ee7857 59ce7b954da1d9e9 SELECT value, row_number() OVER (ORDER BY value DESC) FROM json_each('[3,1,2]')
+fc85611624edd491 59ce7b954da1d9e9 SELECT key, value, sum(value) OVER (ORDER BY key) FROM json_each('{"b":2,"a":1,"c":3}')
+198a3c753164a36e 67fd6b98a4e40769 SELECT value, lag(value) OVER (), lead(value) OVER () FROM json_each('[3,1,2]')
+----
+4a7aa8e4b7d152d5 e7f494829cff0c92 SELECT jb.id, j.* FROM jb, json_each(jb.j) AS j
+4a7aa8e4b7d152d5 e7f494829cff0c92 SELECT jb.id, j.* FROM jb, json_tree(jb.j) AS j
+619a919aa88dfeb4 e7f494829cff0c92 SELECT jb.id, j.key, hex(j.value), j.type, quote(j.atom), j.fullkey, typeof(j.json) FROM jb, jsonb_each(jb.j) AS j
+df2238fe5374be07 e7f494829cff0c92 SELECT jb.id, j.key, hex(j.value), j.type, j.path FROM jb, jsonb_tree(jb.j) AS j
+6a414905b5bed7c2 ebbf8e323d6d35a0 SELECT jb.id, j.* FROM jb, json_each(jb.j, '$.a') AS j
+ed79e5417852e0be ebbf8e323d6d35a0 SELECT jb.id, j.* FROM jb, json_tree(jb.j, '$.a[2]') AS j
+e7366c2df4d1c651 e7f494829cff0c92 SELECT jb.id, hex(j.json) FROM jb, json_each(jb.j) AS j WHERE j.key = 'c'
+f2469dc8f607f926 ac2b79f9fe6d7702 SELECT * FROM json_each(jsonb_array(1, jsonb_object('a', 2)))
+f2469dc8f607f926 46376557c1836f2e SELECT * FROM json_tree(jsonb_array(1, jsonb_object('a', 2)))
+ba0be6fea0f79a7f 8c28b36912773877 SELECT * FROM jsonb_each('[1,[2],{"a":3}]')
+e618c784894f3877 8c28b36912773877 SELECT key, value FROM jsonb_each('[1,[2],{"a":3}]') WHERE type = 'text'
+daf6f8e46e01ca7e 0e247b36def60652 SELECT key, json(value) FROM jsonb_tree('[1,[2],{"a":3}]')
+99294b251b360bc2 ac2b79f9fe6d7702 SELECT * FROM json_each(x'8c176113317162')
+c0205e56ec61a68b ac2b79f9fe6d7702 SELECT * FROM json_each(CAST('[1,2]' AS BLOB))
+7c03912d35373b7e ac2b79f9fe6d7702 SELECT * FROM json_each(x'5b315d')
+76fc656f89b9dea6 46376557c1836f2e SELECT * FROM json_tree(jsonb('"x"'))
+dce665cf82a0bf63 ac2b79f9fe6d7702 SELECT * FROM json_each(jsonb('null'))
+4e526e44ebda9d67 8c28b36912773877 SELECT json_insert('{}', '$.v', value) FROM jsonb_each('[[1],{"a":2},3]')
+4e526e44ebda9d67 ac2b79f9fe6d7702 SELECT json_insert('{}', '$.v', value) FROM json_each('[[1],{"a":2},3]')
+b7d1382f64006dfe 46376557c1836f2e SELECT json_array(value) FROM json_tree('{"a":[1,{"b":2}]}')
+----
+b9b25f14b80e18d1 78511fbfcd5da8a9 SELECT * FROM flat
+04e25a6f2bf1e9b5 8834d214205d7154 SELECT * FROM flat WHERE id = 2
+96bf8e74a8539a7a 78511fbfcd5da8a9 SELECT id, count(*) FROM flat GROUP BY id
+7a5bffeec2130636 78511fbfcd5da8a9 INSERT INTO dst SELECT src.id, j.key, j.value, j.type FROM src, json_each(src.j) AS j; SELECT * FROM dst
+eca891dde90109fd 78511fbfcd5da8a9 INSERT INTO dst SELECT src.id, j.fullkey, j.value, j.type FROM src, json_tree(src.j) AS j; SELECT * FROM dst ORDER BY rowid
+aae811bd01168e33 c70232c347101a1e UPDATE src SET j = (SELECT json_group_array(value) FROM json_each(src.j)); SELECT * FROM src
+3b83b65c1b52d722 c70232c347101a1e DELETE FROM src WHERE EXISTS (SELECT 1 FROM json_each(src.j) WHERE value = 6); SELECT * FROM src
+7c23cd41cdd439dc e85b6fd73f5028bb CREATE TABLE ctas AS SELECT * FROM json_tree('{"a":[1,2]}'); SELECT * FROM ctas
+3c569af34734bd95 ac2b79f9fe6d7702 INSERT INTO dst(id, k) SELECT key, value FROM json_each('{"x":1,"y":2}') RETURNING *
+edd23cd16969e7fc b6399ad617a8262e UPDATE src SET j = json_set(j, '$.n', (SELECT count(*) FROM json_tree(src.j))) RETURNING *
+----
+61051a0577f7b433 ac2b79f9fe6d7702 SELECT * FROM v
+3ed0abe405a03ddd ac2b79f9fe6d7702 SELECT * FROM v WHERE value > 7
+98da4f4928756529 e3b0c44298fc1c14 INSERT INTO t VALUES('[4,5,6]'); SELECT * FROM t2
+6f1f53e3bb552f9a eee229dffe83feec SELECT * FROM json_each('[1]'); SELECT name FROM pragma_module_list WHERE name LIKE 'json%' ORDER BY 1
+613e878cf7672a74 6481aba5be276b14 SELECT * FROM jsonb_tree('[1]'); SELECT 'n=' || count(*) FROM JSON_TREE('[2]'); SELECT name FROM pragma_module_list WHERE name LIKE 'json%' ORDER BY 1
+34433e869148877e 9508c3ee79c95458 SELECT name FROM pragma_module_list WHERE name LIKE 'json%' ORDER BY 1
+d725ce2f0f0d1e1b b35f31ff5fe46901 SELECT * FROM json_tree('[1]') AS a, jsonb_each('[2]') AS b, jsonb_tree('[3]') AS c, JSON_EACH('[4]') AS d
+5bb67c442e2b46b0 9cdafca725c07f82 SELECT * FROM pragma_table_info('json_each')
+8e45984da7516123 f626091c49ea0c0e SELECT * FROM pragma_table_xinfo('json_tree')

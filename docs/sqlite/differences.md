@@ -6,7 +6,6 @@ xqlite의 SQLite 방언이 SQLite 3.54.1과 다른 점입니다. 기준은 옵�
 
 - 파일 형식, 저널·WAL 형식. sqlite3가 만든 핫 저널과 WAL을 복구합니다.
 - 텍스트 인코딩. UTF-16le/be 데이터베이스(`PRAGMA encoding`, `sqlite3_open16()`)를 SQLite처럼 만들고, sqlite3가 만든 UTF-16 파일을 읽고 씁니다. 인덱스 순서, `hex()` 결과, collation의 변환까지 같습니다([features.md](features.md#1-스토리지-및-저널링-기능)).
-- 바이트코드(`EXPLAIN`)와 실행 계획(`EXPLAIN QUERY PLAN`). `tools/planner`의 케이스 4,349개가 sqlite3와 같고 알려진 차이는 없습니다([testing.md](../testing.md#known-failureslist)).
 - 결과와 오류 문구. sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)와 SQLite의 퍼즈 코퍼스(fuzzcheck)를 통과합니다.
 - C ABI: `sqlite3.h`의 함수 308개 중 297개([c-api.md](../c-api.md)). 스냅숏, `vfs_register`, 권한 검사기, 직렬화도 있습니다.
 
@@ -39,7 +38,7 @@ SQLite가 아닌 방언(PostgreSQL, MariaDB, MSSQL, Oracle)은 UTF-8 데이터�
 
 ## 내부 구현의 차이
 
-결과와 바이트코드는 같고, 실행 방식만 다릅니다.
+결과는 같고 실행 방식이 다릅니다. 바이트코드(`EXPLAIN`)와 실행 계획(`EXPLAIN QUERY PLAN`)은 v0.0.4까지 `tools/planner`의 모든 케이스에서 sqlite3와 같았지만, 앞으로는 맞추지 않습니다. `EXPLAIN`의 내용, `bytecode()` 가상 테이블, `sqlite3_stmt_status()`의 카운터가 SQLite와 달라질 수 있습니다.
 
 - 메모리 맵(`PRAGMA mmap_size`)에서 페이지를 바로 읽는 것은 읽기 트랜잭션 안에서만입니다. SQLite는 쓰기 트랜잭션 안의 읽기 커서도 맵의 페이지를 받는데(`PAGER_GET_READONLY`), xqlite의 B-tree는 이 표시를 넘기지 않아 그때는 페이지 캐시로 읽습니다. 맵을 키우는 것은 SQLite처럼 기존 매핑 뒤에 이어 붙이거나(Linux는 `mremap()`) 안 되면 새로 매핑합니다.
 - 메모리 저널(`memjournal.zig`)은 청크 목록을 SQLite처럼 두지만, 문장 저널(서브 저널)은 예전처럼 늘 메모리 버퍼입니다(`SQLITE_STMTJRNL_SPILL=-1`과 같음).

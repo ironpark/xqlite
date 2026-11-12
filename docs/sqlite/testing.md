@@ -12,7 +12,7 @@ xqlite는 SQLite 공식 테스트 도구 및 독자 검증 러너(`xqt`)를 결�
 flowchart TD
     Interop["xqt interop (파일 및 프로세스 상호운용 검증)"] --> Integrity["PRAGMA integrity_check 통과"]
     SLT["xqt slt (sqllogictest 590만 개)"] --> SQLResult["쿼리 결과 100% 일치"]
-    Planner["xqt planner (플래너 및 바이트코드 비교)"] --> Opcode["VDBE Opcode 및 쿼리 플랜 일치"]
+    Planner["xqt planner (결과 비교, 플랜·바이트코드 기록)"] --> Opcode["결과 일치, 플랜·바이트코드의 의도하지 않은 변화 감지"]
     Fuzz["fuzzcheck & 퍼징"] --> CrashFree["크래시 및 OOM 안정성 검증"]
 ```
 
@@ -21,7 +21,7 @@ flowchart TD
 | **`xqt interop btree, sql`** | 파일 및 B-Tree | 두 엔진이 상호 수정한 DB 파일의 무결성(`PRAGMA integrity_check`) 검증. |
 | **`xqt interop wal, hot-journal`**| 저널링 & 복구 | 크래시 상황 시 핫 저널 상호 복구, 동시 프로세스 읽기/쓰기 검증. |
 | **`xqt interop vacuum, attach`** | 다중 DB & 백업 | `VACUUM INTO` 바이트 단위 일치, 슈퍼 저널 롤백 복구 검증. |
-| **`xqt planner`** | 쿼리 플래너 & VDBE | 복잡한 조인 질의의 `EXPLAIN QUERY PLAN` 및 바이트코드 일치 검증. |
+| **`xqt planner`** | 쿼리 플래너 & VDBE | 질의 결과를 sqlite3와 비교하고, `EXPLAIN QUERY PLAN`과 바이트코드는 xqlite의 기록과 비교. |
 | **`xqt slt`** | sqllogictest | 스크립트 622개, 테스트 5,939,879개 전체 통과 (롤백 저널 및 WAL 모드). |
 | **`xqlite fuzzcheck`** | 퍼징 코퍼스 | 공식 SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`) 상 무결함 검증. |
 | **`xqt tcl`** | SQLite의 TCL 테스트 | `test/*.test` 1186개를 같은 테스트 픽스처로 libxqlite3와 SQLite 3.54.1에서 돌려 테스트마다 분류(두 쪽 통과·두 쪽 실패·xqlite만 실패). 기준선은 [테스트와 검증](../testing.md#기준선). |
@@ -46,7 +46,7 @@ zig-out/bin/xqt interop hot-journal
 zig-out/bin/xqt interop
 ```
 
-### 2.2 플래너 및 바이트코드 비교 (`planner`)
+### 2.2 플래너 결과 비교와 바이트코드 기록 (`planner`)
 ```sh
 zig-out/bin/xqt planner
 ```

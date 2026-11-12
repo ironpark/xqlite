@@ -1,0 +1,35 @@
+# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+# the next block of the case file.
+aea3e8cf1958fc3d e3b0c44298fc1c14 PRAGMA journal_mode
+bd50b92a01c6aa37 e3b0c44298fc1c14 PRAGMA journal_mode=wal
+bd50b92a01c6aa37 e3b0c44298fc1c14 PRAGMA main.journal_mode=WAL
+fe2c4fe30c6e0bf0 4b227777d4dd1fc6 PRAGMA journal_mode=WAL; INSERT INTO t VALUES(4,'w'); SELECT count(*) FROM t
+2278b8d3c286a8ac 6197595503f01ee2 PRAGMA journal_mode=WAL; PRAGMA journal_mode=DELETE
+6b9412eba3882ecb 4037f010ee87f626 PRAGMA journal_mode=wal; PRAGMA journal_mode=truncate; PRAGMA journal_mode
+aea3e8cf1958fc3d e3b0c44298fc1c14 PRAGMA journal_mode=bogus
+f1ff2dee8d53a4f5 e3b0c44298fc1c14 PRAGMA wal_checkpoint
+f1ff2dee8d53a4f5 e3b0c44298fc1c14 PRAGMA wal_checkpoint(PASSIVE)
+c33b3fba0f1f97e6 e3b0c44298fc1c14 PRAGMA wal_checkpoint(full)
+4da421bc7288ae24 e3b0c44298fc1c14 PRAGMA wal_checkpoint(RESTART)
+6e08552d633c9341 e3b0c44298fc1c14 PRAGMA main.wal_checkpoint(TRUNCATE)
+f74ef9b3fe214559 e3b0c44298fc1c14 PRAGMA wal_checkpoint(noop)
+f1ff2dee8d53a4f5 e3b0c44298fc1c14 PRAGMA wal_checkpoint(bogus)
+7deb43f20603c7c9 e3b0c44298fc1c14 PRAGMA wal_autocheckpoint
+be9f566ef153c34f e3b0c44298fc1c14 PRAGMA wal_autocheckpoint=10
+cf505ad97130fbd7 5feceb66ffc86f38 PRAGMA wal_autocheckpoint=-1; PRAGMA wal_autocheckpoint
+cf505ad97130fbd7 e3b0c44298fc1c14 PRAGMA wal_autocheckpoint=0
+f1279a990da7e9bd dd03e5fa66633617 SELECT * FROM pragma_journal_mode
+7f94bc450826f326 27a75a1c9d8f31b0 BEGIN; PRAGMA journal_mode=WAL
+----
+aea3e8cf1958fc3d e3b0c44298fc1c14 PRAGMA journal_mode
+e3a8c40764cd7680 8f97783108ee4caa SELECT count(*), sum(a) FROM t
+6aa6dcfb9ad58e36 39d456ec24236014 INSERT INTO t VALUES(1000, 'x'); PRAGMA wal_checkpoint
+26007803371979c2 b4ddf915e3d34e41 UPDATE t SET b = b || '!' WHERE a % 3 = 0; PRAGMA wal_checkpoint(NOOP); PRAGMA wal_checkpoint(TRUNCATE)
+92acf91025699736 ca378bb9ead7f3b2 DELETE FROM t WHERE a > 100; PRAGMA wal_checkpoint(FULL); PRAGMA wal_checkpoint(RESTART)
+9acd72bd211c0c69 e3b0c44298fc1c14 PRAGMA journal_mode=DELETE
+ac401f86f9b08983 8e9488371301a66f PRAGMA journal_mode=DELETE; PRAGMA journal_mode=wal; SELECT count(*) FROM t
+9d1c7e3f9fb3a345 27a75a1c9d8f31b0 PRAGMA journal_mode=persist; INSERT INTO t VALUES(2000, 'p'); PRAGMA journal_mode
+abbe2cbc156adcde 6197595503f01ee2 BEGIN; PRAGMA journal_mode=DELETE
+f1ff2dee8d53a4f5 e3b0c44298fc1c14 PRAGMA wal_checkpoint
+21928b4e7eb72ebe aaa3adc4375a3456 PRAGMA wal_autocheckpoint=1; INSERT INTO t VALUES(3000, 'q'); PRAGMA wal_checkpoint(NOOP)

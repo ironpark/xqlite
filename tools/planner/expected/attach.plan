@@ -1,0 +1,76 @@
+# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+# the next block of the case file.
+6216fda6fc1328e9 e3b0c44298fc1c14 ATTACH 'aux.db' AS aux
+ffcac4cbfb3b1ac3 e3b0c44298fc1c14 ATTACH DATABASE 'aux.db' AS "Aux"
+3fa48fb9dce3ada8 e3b0c44298fc1c14 ATTACH aux AS aux
+2f2116e29fdad940 e3b0c44298fc1c14 ATTACH 'a' || '.db' AS 'a' || 'b'
+6a1e56e3c924ad2c e3b0c44298fc1c14 ATTACH ':memory:' AS m KEY 'secret'
+af27905ac5902625 e3b0c44298fc1c14 ATTACH '' AS e
+b14cbad9645f9dbf e3b0c44298fc1c14 ATTACH NULL AS NULL
+18622c175c7c52a9 e3b0c44298fc1c14 ATTACH ? AS ?
+8305836e2e1a86c6 e3b0c44298fc1c14 ATTACH 'aux.db' AS main
+f63e3ccd2894655a e3b0c44298fc1c14 ATTACH 'aux.db' AS temp
+5fad67707e2d621d 6ad6c32bb7f0cc34 ATTACH x || y AS z
+9e581012b8ff5328 91f7ceb5260ba114 ATTACH (SELECT 'q.db') AS q
+6216fda6fc1328e9 a0731f3cb76da958 ATTACH 'aux.db' AS aux; PRAGMA database_list
+6216fda6fc1328e9 e3b0c44298fc1c14 ATTACH 'aux.db' AS aux; ATTACH 'aux.db' AS AUX
+417aff2670981e78 750f20e2332e5f9b ATTACH 'aux.db' AS aux; DETACH aux; PRAGMA database_list
+417aff2670981e78 750f20e2332e5f9b ATTACH 'aux.db' AS aux; DETACH DATABASE 'aux'
+3c5b05503a0cd20f e3b0c44298fc1c14 DETACH aux
+1da19b567aec7197 e3b0c44298fc1c14 DETACH main
+d72e1445283bc566 e3b0c44298fc1c14 DETACH temp
+bb27e5487dcc66d0 e3b0c44298fc1c14 DETACH ?
+3a3db10405fe486b 1b118b6c9c425fca DETACH x || y
+920f04ab8d03a01e 639a63ca3a3fb1ac CREATE TEMP TABLE tt(x); DETACH temp
+df91503486636dfe 4db2c56dbd42a3de ATTACH 'aux.db' AS aux; BEGIN; CREATE TABLE aux.t(x); DETACH aux
+b5b0b32e00ebea65 cfd543926ceed536 ATTACH 'aux.db' AS aux; SELECT * FROM aux.sqlite_schema
+bdff01eaee3e68cc 5d006778b3f87ad4 SELECT * FROM pragma_database_list
+----
+8119c177bce6aaed e6bd6691240d019a SELECT * FROM t WHERE a = 5
+9d33ef77d4708ee5 7c278b82212c0f8d SELECT * FROM aux1.t
+0c6d03c67d612dcc a30a786ed9b5aea4 SELECT * FROM main.t WHERE a = 1
+6dab959c54a6a51c 5d03a5550c9a22e1 SELECT count(*) FROM aux1.u
+5459d462054119af 0b0cf7c6109a337d SELECT * FROM aux1.u WHERE y = 'v3' ORDER BY x
+de06af349bbd8b9c d647bcd7bf352833 SELECT * FROM u WHERE x BETWEEN 10 AND 12
+313ca9228b2dc0f4 403cb18b7fdd0f11 SELECT t.a, u.y FROM t JOIN aux1.u ON u.x = t.a WHERE t.c = 2 ORDER BY t.a LIMIT 5
+409ddac6c69b013c ee2ef6c28296e764 SELECT t.b, w.v FROM t, aux2.w WHERE w.k = t.b ORDER BY t.a LIMIT 4
+b1d17b05761ed160 2413e7ce9d46416e SELECT y, n FROM aux1.uv ORDER BY n DESC, y LIMIT 3
+a40d0e22025bc632 bebe87e7b96c5b13 SELECT * FROM aux1.uv WHERE y = 'v1'
+b4f8141015f6a246 e91edc3deaaae302 SELECT (SELECT count(*) FROM aux1.u WHERE u.y = t.b) FROM t WHERE a < 4
+4d9e73eb4c763f48 f8b3a8117e48ffff SELECT a FROM t WHERE b IN (SELECT k FROM aux2.w) ORDER BY a
+907328597852331f 15df5dfab29d34bc SELECT k FROM aux2.w WHERE k > 'v1'
+fc1f5eb2ab0f7b87 e5ae7d9f6dc71828 SELECT name, type FROM aux1.sqlite_schema ORDER BY name
+2cfff08f4145a85c 177fe24251e5b7da SELECT name FROM aux2.sqlite_master ORDER BY name
+1f5013625ebfd3e3 5347b51c61fe07a3 SELECT * FROM aux1.sqlite_schema WHERE type = 'index'
+1e6b7741315fb45c b561a6bb5357655b SELECT schema, name, type FROM pragma_table_list WHERE schema LIKE 'aux%' ORDER BY 1, 2
+e19505fa8d8dbf8b 9cdafca725c07f82 SELECT * FROM pragma_table_info('u', 'aux1')
+b41ace1d4b315714 62d1a1b65916780f SELECT * FROM aux1.pragma_index_list('u')
+5b71ea00e5a3328d 2620e8c3181fe50a SELECT name FROM pragma_index_list('w') JOIN aux2.sqlite_schema USING (name)
+7cf4c603f04c51db e3b0c44298fc1c14 PRAGMA aux1.table_info(u)
+495bf919f511c4c7 e3b0c44298fc1c14 PRAGMA aux2.index_list(w)
+20a80e637767479d e3b0c44298fc1c14 PRAGMA aux1.page_count
+7a642d77caaf596d e3b0c44298fc1c14 PRAGMA aux1.user_version
+dfa9d8445ace3e20 e3b0c44298fc1c14 PRAGMA aux2.journal_mode
+5d737cbf09e06581 e3b0c44298fc1c14 PRAGMA aux1.schema_version
+5ab62f521858eb70 e3b0c44298fc1c14 PRAGMA aux1.foreign_key_check
+c54ef5cf3261de6f 859fe072fa792426 PRAGMA no_such.user_version
+15e5cc7b83950f1a 11c1ac49bc671b42 INSERT INTO aux1.t VALUES(2, 'two'); SELECT * FROM aux1.t
+c094c2fdaf03bd9d da1193e6e56ecb59 INSERT INTO aux1.u(y, z) SELECT b, a FROM main.t WHERE a < 4; SELECT count(*) FROM aux1.u
+b5b4d79d7642d316 c09c601c516d91a4 UPDATE aux1.u SET z = -z WHERE x < 3; SELECT x, z FROM aux1.u WHERE x < 4
+55372f683e8cc546 38258e9a3c1167c8 DELETE FROM aux1.u WHERE y = 'v1'; SELECT count(*) FROM aux1.u
+787f198230d279a6 e3b0c44298fc1c14 INSERT INTO aux2.w VALUES('v9', 9); SELECT * FROM aux2.log
+06c7994454300cc9 ae17f8ed3768ce9d INSERT INTO aux2.w VALUES('v1', 0) ON CONFLICT(k) DO UPDATE SET v = v + 10; SELECT * FROM aux2.w
+10aa4518eae37200 994d10de86e80a1b BEGIN; UPDATE t SET c = 0; UPDATE aux1.u SET z = 0; UPDATE aux2.w SET v = 0; COMMIT; SELECT sum(c) FROM t
+89a5da056dea8bf9 2e7af4bbdaaaacb3 BEGIN; UPDATE t SET c = 0; UPDATE aux1.u SET z = 0; ROLLBACK; SELECT sum(c) FROM t
+57e39c94c683854b 17d0824a9bde8b05 CREATE TABLE aux1.n AS SELECT a, b FROM t WHERE a < 3; SELECT * FROM aux1.n
+5f82bdb2a2375969 fb04dcb6970e4c3d CREATE INDEX aux2.wv ON w(v); SELECT k FROM aux2.w WHERE v = 2
+977cd0dd77d0bb27 501395a7ad5a1b99 DROP TABLE aux1.t; SELECT * FROM t WHERE a = 1
+843b48a910d94494 8d8aa3e1a3e50bde ALTER TABLE aux2.w RENAME TO w2; SELECT sql FROM aux2.sqlite_schema ORDER BY name
+68cae2b9383b8483 e97e7a9905bfe547 CREATE VIEW aux1.v2 AS SELECT * FROM main.t
+c260fa99150e2ba4 10d23b0ac9cddb06 CREATE VIEW aux1.v3 AS SELECT * FROM aux2.w
+bd0d6f5143a57d01 bd0d6f5143a57d01 CREATE TRIGGER aux1.tr AFTER INSERT ON u BEGIN INSERT INTO main.t VALUES(new.x, new.y, 0); END
+46d5a9e5c153ba60 e3b0c44298fc1c14 CREATE TEMP TRIGGER ttr AFTER INSERT ON aux1.t BEGIN INSERT INTO aux2.log VALUES('t ' || new.b); END; INSERT INTO aux1.t VALUES(5, 'five'); SELECT * FROM aux2.log
+aa6c90dc29454a5e 559a20065a44e8c3 CREATE TEMP VIEW tv AS SELECT t.a, u.z FROM t JOIN aux1.u ON u.x = t.a; SELECT * FROM tv WHERE a = 7
+09958dff8dcf03c9 7507c491bfae9bc4 DETACH aux1; SELECT * FROM aux1.u
+5a6475399630d859 800379e00ca618f8 DETACH aux2; SELECT name FROM pragma_database_list

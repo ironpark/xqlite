@@ -37,7 +37,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `zig build test` | 단위 테스트, 문서·예제의 이름, 전역 상태, 시드 퍼저 스모크 | — |
 | `zig build check` | 아래의 대부분을 병렬로 한 번에: 단위 테스트, `xqt` 자체의 테스트, `xqt interop`, `xqt planner`, `xqt dialect-diff pg`(기록과), `fuzzcheck` (`-Dslt`, `-Dfuzz`, `-Dfast`로 더) | 아래와 같음 |
 | `xqt interop [NAME...]` | DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 sqlite3와 교차 비교. 모듈은 [sqlite3 교차 검증](#sqlite3-교차-검증) | `--sqlite3`/`SQLITE3` (3.54.1) |
-| `xqt planner [FILE...]` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드 | `--sq`/`SQ` (3.54.1, 주석 없는 빌드) |
+| `xqt planner [FILE...]` | 쿼리 결과(sqlite3와), `EXPLAIN QUERY PLAN`·바이트코드(xqlite의 기록 `tools/planner/expected/*.plan`과) | `--sq`/`SQ` (3.54.1, 주석 없는 빌드) |
 | `xqt planner gen basic\|hard ...` | 무작위 플래너 케이스 생성 | — |
 | `xqt slt [PATH...]` | sqllogictest | `--ref` (선택) |
 | `xqt tcl [PATH...]` | SQLite의 TCL 테스트(`ref/sqlite/test`)를 libxqlite3와 SQLite에 링크한 같은 테스트 픽스처로 돌려 테스트 케이스마다 분류 | 같은 하네스의 SQLite 3.54.1 (`zig build testfixture`) |
@@ -176,7 +176,7 @@ zig build check -Dfast=true     # capi-fast도 (약 90초)
 
 ### known-failures.list
 
-`tools/planner/known-failures.list`는 플래너가 아직 sqlite3와 다른 것으로 알려진 쿼리의 목록입니다. 한 줄에 `케이스파일 종류 쿼리` 하나이고, 쿼리는 케이스 파일에 쓴 그대로입니다. 지금은 비어 있습니다.
+`tools/planner/known-failures.list`는 결과가 아직 sqlite3와 다른 것으로 알려진 쿼리의 목록입니다. 한 줄에 `케이스파일 종류 쿼리` 하나이고, 쿼리는 케이스 파일에 쓴 그대로입니다. 지금은 비어 있습니다.
 
 - 항목 하나는 실패 하나와 정확히 맞아야 합니다(파일, 종류, 쿼리).
 - 목록에 있는 실패는 `KNOWN`으로 출력하고 실패로 세지 않습니다.
@@ -301,7 +301,7 @@ zig-out/bin/xqt interop vacuum -j 4 --keep -v
 
 ## 플래너 차등 테스트
 
-같은 DB에서 같은 SQL을 xqlite와 sqlite3로 실행해 결과, `EXPLAIN QUERY PLAN`, `EXPLAIN` 바이트코드를 비교합니다. 플래너는 C 코드를 그대로 옮긴 포팅이라 바이트코드까지 같아야 합니다.
+같은 DB에서 같은 SQL을 실행해 결과는 sqlite3와, `EXPLAIN QUERY PLAN`과 `EXPLAIN` 바이트코드는 xqlite의 기록(`tools/planner/expected/*.plan`, 쿼리마다 해시)과 비교합니다. 실행 계획과 바이트코드는 SQLite와 같지 않아도 되지만([AGENTS.md](../AGENTS.md#지켜야-할-것)), 달라진 것은 의도하고 확인한 것이어야 합니다. 바꾸기 전 빌드와의 diff는 `--base`로 보고, 확인한 뒤 `--record`로 기록을 갱신합니다([tools/planner/README.md](../tools/planner/README.md#기록)).
 
 ```sh
 zig build tools
@@ -309,6 +309,9 @@ zig-out/bin/xqt planner tools/planner/planner.txt -v
 zig-out/bin/xqt planner -k code tools/planner/window.txt
 zig-out/bin/xqt planner --known tools/planner/known-failures.list   # vtablog.txt를 뺀 전부
 zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt    # 무작위 케이스(basic 또는 hard)
+zig-out/bin/xqt planner --base /tmp/xq-base/bin/xqlite -k code,eqp -v   # 다른 xqlite 빌드와 비교
+zig-out/bin/xqt planner --vs-sqlite -k code,eqp          # 예전처럼 sqlite3와 비교
+zig-out/bin/xqt planner --record                         # 기록 갱신
 ```
 
 `-k res,eqp,code`로 비교할 것을 고르고, `--known`은 [알려진 차이](#known-failureslist)를 받습니다. 케이스 파일 형식, 케이스 모음(`vtab.txt`, `json.txt`, `window.txt`, `wal.txt`, `pager.txt`, `utf16.txt`, `math.txt`, `attach.txt`, `vacuum.txt` ...), 무작위 케이스 생성기, `SQOPT`·`XQ_WHERETRACE` 같은 옵션은 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.

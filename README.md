@@ -18,7 +18,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 ## 특징
 
 1. **SQLite의 Zig 포팅**: SQLite의 구조(Pager, B-Tree, VDBE)를 Zig로 다시 구현했습니다. C 바인딩이 아니라 순수 Zig 구현입니다.
-2. **SQLite 파일 포맷 호환**: 기존 `.sqlite` / `.db` 파일을 그대로 읽고 씁니다. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 같습니다.
+2. **SQLite 파일 포맷 호환**: 기존 `.sqlite` / `.db` 파일을 그대로 읽고 씁니다. SQLite 방언의 결과는 sqlite3 3.54.1과 같습니다.
 3. **멀티 방언 SQL**: 연결 단위로 방언을 골라 PostgreSQL, MariaDB, MSSQL, Oracle의 문법과 의미를 따릅니다.
 4. **임베디드 우선**: 별도 프로세스 없이 라이브러리(Zig API, sqlite3 호환 C ABI, WebAssembly)로 씁니다. 와이어 프로토콜 서버(`xqlite serve`)로 띄울 수도 있습니다.
 5. **Zig다운 설계**: 명시적 allocator, comptime을 활용한 방언 특화, 숨은 전역 상태 없음, 크로스 컴파일 지원.
@@ -266,7 +266,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 
 - **단위 테스트**: `zig build test`. 시드 퍼저의 짧은 실행과 문서·예제의 이름 검사도 함께 합니다.
 - **sqlite3 교차 검증**: `xqt interop`이 서로 만든 DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 순정 sqlite3와 비교합니다.
-- **플래너 차등 테스트**: `xqt planner`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
+- **플래너 차등 테스트**: `xqt planner`가 쿼리 결과를 sqlite3 3.54.1과 비교하고, `EXPLAIN QUERY PLAN`과 바이트코드는 xqlite의 기록과 비교해 의도하지 않은 변화를 잡습니다.
 - **sqllogictest**: `xqt slt`
 - **C API**: `zig build test-capi`가 C 프로그램으로 `libxqlite3`를 검사하고, `zig build capi-shell`이 SQLite의 `shell.c`를 링크해 돌립니다.
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`)

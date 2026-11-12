@@ -1,0 +1,481 @@
+# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+# the next block of the case file.
+70634905f1449f4c 9cdafca725c07f82 select * from pragma_table_info('t1')
+1ec374bd7722d13a 9cdafca725c07f82 select * from pragma_table_info('t2')
+6322ce8875dec98f f626091c49ea0c0e select * from pragma_table_xinfo('t3')
+40bdcc91251da2d2 9cdafca725c07f82 select name from pragma_table_info('t1') where pk
+9bc3c4d49b31ca86 d75e67faf583ab5a select name, type from pragma_table_info('t1') order by name
+62cc655fdf67dc40 9cdafca725c07f82 select * from pragma_table_info('t1') where cid>0
+aabfffd0a26c88ae 9cdafca725c07f82 select * from pragma_table_info('nosuch')
+7c37626df1f5bf44 9cdafca725c07f82 select * from pragma_table_info
+244d2c1c8979487d 9cdafca725c07f82 select count(*) from pragma_table_info('t1')
+0655ad53f46e0304 96d0ec8627686bf3 select * from pragma_index_list('t1')
+9763f202cbf77928 96d0ec8627686bf3 select * from pragma_index_list('t2')
+17d34078167543eb 5bef6eb1ea4801b7 select * from pragma_index_info('t1b')
+02e95905c41987eb 20a888a54326e2ec select * from pragma_index_xinfo('t1b')
+cb33ff0ed879689a 4375e504a7adc7e0 select * from pragma_foreign_key_list('t2')
+536c99cc033f89b7 6b1143b2539eff41 select * from pragma_foreign_key_check
+2ce6b6ccb56d28d1 6b1143b2539eff41 select * from pragma_foreign_key_check('t2')
+4674cef96e6b0573 b561a6bb5357655b select * from pragma_table_list order by name
+70634905f1449f4c f0ef1ddd6992c7e7 select * from pragma_table_list('t1')
+f6e3aea0038c533a b561a6bb5357655b select name, ncol from pragma_table_list where schema='main' order by name
+5f472e874220c0d4 64e50d85585fa860 select * from pragma_quick_check
+5f472e874220c0d4 f53b1e16d7b4922d select * from pragma_integrity_check
+1c40efc406ca0cc3 f53b1e16d7b4922d select * from pragma_integrity_check('t1')
+3b92958d9b086ef2 64e50d85585fa860 select * from pragma_quick_check(1)
+5f472e874220c0d4 e065339c2f58ca26 select * from pragma_page_size
+5f472e874220c0d4 59eefb9b4b3ecde3 select * from pragma_user_version
+5f472e874220c0d4 e6543011996deccb select * from pragma_application_id
+5f472e874220c0d4 2c5e11d709931b1d select * from pragma_freelist_count
+5f472e874220c0d4 6028858bc2cc89a2 select * from pragma_page_count
+5f472e874220c0d4 6ff54004b5315b6a select * from pragma_encoding
+5f472e874220c0d4 8f2b44f7ff5c0188 select * from pragma_schema_version
+5f472e874220c0d4 c82c6ac55428eef3 select * from pragma_foreign_keys
+5f472e874220c0d4 dd03e5fa66633617 select * from pragma_journal_mode
+5f472e874220c0d4 8142d8a1f71ae86e select * from pragma_synchronous
+5f472e874220c0d4 bb78665e6c139274 select * from pragma_cache_size
+5f472e874220c0d4 c31e3b989ae9672e select * from pragma_auto_vacuum
+5f472e874220c0d4 e6f050a0cee3c2f9 select * from pragma_busy_timeout
+6bc46b6c6b261ddc bd043e79e1788c00 select name from pragma_function_list where name='abs'
+5ddb108e838ed7dc b07e4cfbecb29000 select name, narg from pragma_function_list where name like 'sub%' order by 1,2
+2a235721a3976aeb 1b0db1bf8cd0a2b5 select count(*)>100 from pragma_pragma_list
+8d206158b7dd0e1f 182d37cd569b560c select name from pragma_pragma_list where name like 'table%' order by 1
+c19632d3e4b2953b 182ed790c0a3be97 select s.name, i.name from sqlite_schema s, pragma_table_info(s.name) i where s.type='table' order by 1,2
+890e6b52daafe168 182ed790c0a3be97 select s.name, i.name from sqlite_schema s join pragma_index_list(s.name) i order by 1,2
+be1b9164d380ac44 1f249dd94b3f6b69 select s.name, count(*) from sqlite_schema s, pragma_table_info(s.name) group by 1 order by 1
+6ec6b0e5f20a940b fa8241458538d5d9 select t.name, c.name from pragma_table_list t, pragma_table_info(t.name) c where t.type='table' and t.schema='main' order by 1,2
+3d578054732a795a 9cdafca725c07f82 select * from pragma_table_info('t1') where arg='t1'
+70634905f1449f4c 9cdafca725c07f82 select * from pragma_table_info where arg='t1'
+763b9102e2db3e55 9cdafca725c07f82 select * from pragma_table_info where arg='t1' and schema='main'
+763b9102e2db3e55 9cdafca725c07f82 select * from pragma_table_info('t1','main')
+46945563f4f1419f 9cdafca725c07f82 select * from pragma_table_info('t1','temp')
+763b9102e2db3e55 9cdafca725c07f82 select * from pragma_table_info('t1') where schema='main'
+21c1d760c72b262a 9cdafca725c07f82 select arg, schema from pragma_table_info('t1')
+030c6d746b0bf5c5 9cdafca725c07f82 select name from pragma_table_info('v1')
+1dcb8013fff0264f 96d0ec8627686bf3 select * from pragma_index_list('t3')
+83c0899f4f544c24 2c047683ddc78ca3 select * from pragma_index_xinfo((select name from pragma_index_list('t3')))
+70634905f1449f4c 7ef76743d4c442ff select * from main.pragma_table_info('t1')
+50224316c4ce01fd 811744c699a20b31 select * from t1 where b in (select name from pragma_table_info('t1'))
+140b16d65bc16d7a 8150f09d64fea2a0 select * from t1 where exists (select 1 from pragma_index_list('t1') where name='t1b')
+b1adbb300f40085a afa5881ea4e7129d select (select count(*) from pragma_table_info(s.name)) from sqlite_schema s where type='table' order by name
+529425cf2375c14f 9cdafca725c07f82 select * from pragma_table_info('t1') limit 1
+285d81caf989f33d 9cdafca725c07f82 select * from pragma_table_info('t1') limit 1 offset 1
+e30fdeb81bfe6fab d75e67faf583ab5a select * from pragma_table_info('t1') order by cid desc
+08dcc1a875ae8043 c76380827264c7ac select distinct type from pragma_table_info('t1')
+a30b9b580aac3458 6a204d2fae353f10 select max(cid) from pragma_table_info('t2')
+4c72dbc3582c4710 814ef1b97189e9b7 select * from pragma_table_info('t1') a, pragma_table_info('t2') b where a.cid=b.cid
+8868ed7e8f4e85b5 49bd1217c63c0d2c select * from pragma_table_info('t1') left join pragma_table_info('t2') b using(cid)
+9b5b610feb2b0056 c4f7c57c65b43c56 select a.name from pragma_table_info('t1') a where a.name not in (select name from pragma_table_info('t2'))
+db27cf958cbf7675 9cdafca725c07f82 select rowid, name from pragma_table_info('t1')
+d47934206154da45 424406d7526ddbd6 select * from pragma_compile_options where 0
+0c8b69f9c74a5640 8bf34d3057a0218d select * from pragma_module_list where name='generate_series'
+ddee8399267ce5fc 9cdafca725c07f82 select * from pragma_table_info(null)
+08bf5a895122bedd 5bef6eb1ea4801b7 select * from pragma_index_info('nosuch')
+5f472e874220c0d4 97617db1106a476a select * from pragma_data_version
+----
+406eed4f573b70d4 4364eedaa7e040d0 select * from generate_series(1,5)
+20d677c4f1406b76 57fc41ab5eb405b3 select * from generate_series(5,1,-1)
+62d674c2f7664306 57fc41ab5eb405b3 select * from generate_series(1,10,0)
+834838bad6e672bd 57fc41ab5eb405b3 select * from generate_series(1,10,-2)
+3bd948ca8b6f0f7c 4364eedaa7e040d0 select * from generate_series(10,1)
+bb3961d56b80e3a1 57fc41ab5eb405b3 select * from generate_series(1,20,5)
+94cc6b11aec9aae3 830cccdc73dff1f7 select * from generate_series(0) limit 3
+61fb666172ed2ffb afcf025d9ce8fdf7 select * from generate_series(-3,3) where value<0
+aadced3f352b4f6e c482022e21dd6d6e select * from generate_series(1,100) where value>=95
+30387048b4a13f89 3fa0cc189dea6c9a select * from generate_series(1,100) where value>95 and value<99
+90c78c27bc5ad40f 9a8bef9947d07184 select * from generate_series(1,100) where value<=3
+edf72662da6ce2e9 51343d3d6ca1e173 select * from generate_series(1,100) where value=50
+9e7109e3035112ce 51343d3d6ca1e173 select * from generate_series(1,100) where value=50.0
+0e511a9bf36e0342 51343d3d6ca1e173 select * from generate_series(1,100) where value=50.5
+3b35dab0ca36a903 3fa0cc189dea6c9a select * from generate_series(1,100) where value>2.5 and value<5.5
+e8a2289f4df31ff2 376c6f4804cdf32b select * from generate_series(1,100) where value between 7 and 9
+2c1ce7a9938d6910 51343d3d6ca1e173 select * from generate_series(1,100) where value in (3,4,200)
+537ca4bd001d4223 9639aef4be1f554c select * from generate_series(1,100) where value in (select a from t1)
+f4c59c35d81dc489 4364eedaa7e040d0 select * from generate_series(1,100) where value not in (1,2,3) limit 2
+e15a92903c0b4cfe 4364eedaa7e040d0 select * from generate_series(1,100) where value is null
+f830fd588ec3e810 4364eedaa7e040d0 select * from generate_series(1,100) where value is not null limit 2
+96c7d2cef884b804 4364eedaa7e040d0 select * from generate_series(1,10) where value%3=0
+38626d8bfb25a259 4364eedaa7e040d0 select * from generate_series(1,10) where value>start+5
+ebdbca59fc533eac d5619ef61e5ba4c9 select * from generate_series(null)
+bd31a7123924db5a 4364eedaa7e040d0 select * from generate_series(1,null)
+cb8314f68b475d57 57fc41ab5eb405b3 select * from generate_series(1,5,null)
+dece0259d8c9e015 830cccdc73dff1f7 select * from generate_series('a') limit 5
+28f91281dd57d427 4364eedaa7e040d0 select * from generate_series('3','5')
+a78311a4ff2afd80 4364eedaa7e040d0 select * from generate_series(1.9,4.2)
+6870bc4bc4093ef6 4364eedaa7e040d0 select * from generate_series(9223372036854775800,9223372036854775807)
+9f4ce769000c51f5 4364eedaa7e040d0 select * from generate_series(-9223372036854775808,-9223372036854775805)
+0e15024d123aa239 17a0efe528529c49 select * from generate_series(9223372036854775807,-9223372036854775808,-9223372036854775808) order by value
+4144b246a8058687 69f7ba3aa7be2413 select * from generate_series(1,10) order by value limit 3 offset 4
+2ea96362d783094f 41d88a125fb1fdb7 select * from generate_series(1,10) limit -1 offset 8
+982655decc721db7 41d88a125fb1fdb7 select * from generate_series(1,10) limit 3 offset -2
+977e2a47577c5c32 55df40fcfa00f055 select * from generate_series(1,10) limit 0
+2499f7653e8b5a32 ae808f768a736a9d select * from generate_series(1,10) where value>3 limit 2
+c5de5f4529fd2db6 0a4faf96b04a006f select value from generate_series(1,10) order by rowid desc limit 3
+4880284e7f149c9d 4364eedaa7e040d0 select * from generate_series where start=1 and stop=3
+2d5c2475b7b42272 57fc41ab5eb405b3 select * from generate_series where start=1 and stop=3 and step=2
+4880284e7f149c9d 4364eedaa7e040d0 select * from generate_series where stop=3 and start=1
+412a47b8a3d4df23 830cccdc73dff1f7 select * from generate_series where start=5 limit 3
+9307fb5a2246125e ea966ddc31c4d8ae select * from generate_series where value between 1 and 3
+c33c74345878a7e3 67010fa894ee52fc select * from generate_series where value=7
+2c6baf7c8e98c853 2c6baf7c8e98c853 select * from generate_series where value in (1,2)
+2c6baf7c8e98c853 2c6baf7c8e98c853 select * from generate_series where stop=3
+2c6baf7c8e98c853 2c6baf7c8e98c853 select * from generate_series
+2c6baf7c8e98c853 2c6baf7c8e98c853 select * from generate_series()
+2954982a41e5849b 2954982a41e5849b select * from generate_series(1,2,3,4)
+fe3fc2f4af8947d0 4364eedaa7e040d0 select count(*), sum(value), min(value), max(value), avg(value) from generate_series(1,1000)
+09053674ebb8ebaf 57fc41ab5eb405b3 select total(value) from generate_series(1,100,7)
+848322542fd4dbf7 4364eedaa7e040d0 select group_concat(value) from generate_series(1,10)
+13362cf6e33d0a8a 0a309da2051cd95c select group_concat(value,'-') from (select value from generate_series(1,10) order by value desc)
+9cfb9d3c0d9fd4a8 4364eedaa7e040d0 select value, value*value from generate_series(1,5)
+754964ffc8913678 616e9e6c83b7c56c select a.value, b.value from generate_series(1,3) a, generate_series(1,2) b
+82ca98e971bac319 616e9e6c83b7c56c select a.value, b.value from generate_series(1,3) a join generate_series(1,a.value) b
+3895a97bd5c98cbc 2460094a61cd5088 select a.value, b.value from generate_series(1,3) a left join generate_series(a.value,2) b order by 1,2
+754964ffc8913678 616e9e6c83b7c56c select a.value, b.value from generate_series(1,3) a cross join generate_series(1,2) b
+539da493b6a56410 d7ab31e745d7b02f select * from t1, generate_series(1,t1.a) order by a, value
+a4f902380fabf74b 9b1f66dfb4a21394 select * from t1 join generate_series(1,3) g on g.value=t1.a
+1bee0490eda35981 1b6144875e3a5d46 select * from t1 left join generate_series(1,2) g on g.value=t1.a
+aca7ea9d66dcc85b 78081937b43693c4 select * from generate_series(1,3) g left join t1 on g.value=t1.a
+53e8089257966ca0 1f83a5752655bc20 select * from generate_series(1,5) g where exists (select 1 from t1 where a=g.value)
+cf0d08dc7241d92c 2c0bf10e9b21bc72 select * from generate_series(1,5) g where not exists (select 1 from t1 where a=g.value)
+df08ae5ebe0734a5 0c8d54aa09e16d81 select * from t1 where a in (select value from generate_series(2,3))
+eefe83a6977efcc1 47d62b3dbd939a61 select * from t1 where a = (select max(value) from generate_series(1,2))
+289c2ce983399994 66894940020d9142 select (select count(*) from generate_series(1,t1.a)) from t1
+636c66e941004d62 3fafac86115d5eee select * from t2, generate_series(t2.x, t2.y, 5) order by 1,2,3,4
+6de69c9b589c3044 5dd83e4e454d26ab select * from generate_series(1,3) union select * from generate_series(2,5)
+3f6e729d139e27ba abfd2e11936aac01 select * from generate_series(1,3) union all select * from generate_series(2,5)
+a8bb951ec82b6ee3 37dd39e61f52e580 select * from generate_series(1,5) intersect select * from generate_series(3,8)
+fecd3ec319f419c8 8666078a3b6c5142 select * from generate_series(1,5) except select * from generate_series(3,8)
+71533fb957dec07b 3617f5fcba25dfd5 select distinct value%3 from generate_series(1,20)
+18a049d9e2c48429 0bab279914a3bfd1 select value%3 as m, count(*) from generate_series(1,20) group by m
+c0c9421b417181b1 0bab279914a3bfd1 select value%3 as m, count(*) from generate_series(1,20) group by m having count(*)>6
+59cb6b2965a2524b 029a562d68cab4eb select value, row_number() over (order by value desc) from generate_series(1,4)
+b407f8eda8ab7e27 3e7db08021e670b4 select value, sum(value) over (rows between 1 preceding and current row) from generate_series(1,5)
+a1832e866109c7fc 4364eedaa7e040d0 with c(x) as (select value from generate_series(1,4)) select * from c
+84a937417ddcffec dd22dd6ccb1fb322 with c(x) as (select * from generate_series(1,3)) select * from c, generate_series(1,c.x)
+6199d0be95a31f13 2152b17b5752b76c with recursive r(n) as (select 1 union all select n+1 from r where n<3) select * from r, generate_series(1,r.n)
+1a1fff18f39a1c7a 7b4b8e709404ac93 select * from (select * from generate_series(1,10)) where value>7
+cfbdc7b806919bdb e3b0c44298fc1c14 create view vg as select value from generate_series(1,5)
+bcb1543fbbffc9eb 4364eedaa7e040d0 create table tg as select * from generate_series(1,3)
+4e46fd8e2ae300a1 4364eedaa7e040d0 insert into t2 select value, value*100, value from generate_series(10,12)
+fe2eb8006a55cc90 c4285073f67fd618 update t2 set z=z+1 where x in (select value from generate_series(1,2))
+24b45f98865f6c3c c4285073f67fd618 delete from t2 where x in (select value from generate_series(1,2))
+329fd5c1291e3bb0 329fd5c1291e3bb0 insert into generate_series values(1,2,3,4)
+329fd5c1291e3bb0 329fd5c1291e3bb0 update generate_series set value=1
+329fd5c1291e3bb0 329fd5c1291e3bb0 delete from generate_series
+f94b43ff7e85f64d e3b0c44298fc1c14 create virtual table g2 using generate_series
+79592beb04e54787 e3b0c44298fc1c14 create virtual table temp.g2 using generate_series
+b0b785ca42dc263c b0b785ca42dc263c create index gi on generate_series(value)
+d9c6cba18b45da75 d9c6cba18b45da75 drop table generate_series
+bec4f11a02e273a0 bec4f11a02e273a0 alter table generate_series rename to gs
+1203f738a6936af0 1203f738a6936af0 alter table generate_series add column w
+65365e968d28482a e3b0c44298fc1c14 create trigger tg after insert on t1 begin select * from generate_series(1,2); end
+6944e8179eb58296 4364eedaa7e040d0 select * from generate_series(1,3) where value match 'x'
+7058ad48e4032b9b 59688b4dd0b36ebc select * from generate_series(1,3) as gs where gs.value glob '2'
+05e67cf8091e388d 4364eedaa7e040d0 select * from generate_series(1,3) where value like '2'
+6a96d985ba2bed1b 4364eedaa7e040d0 select * from generate_series(1,3) where value != 2
+c252348d344e211f 4364eedaa7e040d0 select * from generate_series(1,3) where value is not 2
+19ddab2a5e15da9a 4364eedaa7e040d0 select * from generate_series(1,3) where value<>2 and start=1
+2ff63b663d2f913a 51343d3d6ca1e173 select * from generate_series(1,3) where 2=value
+45bf59166552aa24 0202e9248c8b9a6a select * from generate_series(1,3) where value=a
+ab8a8dbb63e3bf75 51343d3d6ca1e173 select * from generate_series(1,3) where (value,start)=(2,1)
+fc9780e065faa9d1 26c0a659724e4e5b select * from generate_series(1,3) where value>(select 1)
+2660973de5d40982 51343d3d6ca1e173 select * from generate_series(1,3) where value=?1
+ab1e43f3128c13e8 4364eedaa7e040d0 select * from generate_series(?1,?2)
+ba62971292c70a51 0a096fa5e4726b1f select * from generate_series(1,3) indexed by xyz
+3a697c56669b8bd2 ae0b0b01d5c45613 select * from generate_series(1,3) not indexed
+2ff63b663d2f913a 51343d3d6ca1e173 select value from generate_series(1,3) where rowid=2
+168ce803c6679860 4364eedaa7e040d0 select rowid from generate_series(1,3)
+d9d143619fce2e1b 4364eedaa7e040d0 select _rowid_, oid from generate_series(4,5)
+d58544aab5430085 8de18e8f8cb29103 select * from main.generate_series(1,2)
+d58544aab5430085 bb2eb5dce8d964d5 select * from temp.generate_series(1,2)
+98104b3277e13d85 23e25f5df5328e63 select * from generate_series(1,(select count(*) from t1))
+e27b1f74f5609f74 616e9e6c83b7c56c select * from generate_series(1,3) a, generate_series(1,3) b where a.value=b.value
+26e9ffa8bf26fc2b 616e9e6c83b7c56c select * from generate_series(1,3) a, generate_series(1,3) b where a.value=b.start
+ed191dc2820d156a 1c9091e9eb0d402c select * from generate_series(1,3) a, generate_series(a.value,3) b where b.value>a.value
+06c84f23e98537ff 52e3c82c1c8b2a64 select * from generate_series(1,3) a where a.value in (select b.value from generate_series(2,4) b)
+720a8943d9aec4dc 616e9e6c83b7c56c select sum(a.value*b.value) from generate_series(1,30) a, generate_series(1,30) b
+a4c18f4fcd59aedd 9093e708fd3c3f41 select * from generate_series(1,4) where value in (1,3) order by value desc
+a067fb71d75d0ed9 51343d3d6ca1e173 select * from generate_series(1,9) where value in (1,3) and value>2
+----
+2c02a843f38db21e 8d7cd0729a9e30da select * from bytecode('select 1')
+23939fb13df8bea1 8d7cd0729a9e30da select * from bytecode('select * from t1 where b=?')
+7835ecfeabe3ad17 8d7cd0729a9e30da select addr, opcode, p1, p2, p3, p5 from bytecode('select * from t1 where a>1 order by c')
+235d998ab2ccfafb 8d7cd0729a9e30da select opcode from bytecode('insert into t1 values(3,''x'',1)')
+0d74643a36a57388 8d7cd0729a9e30da select addr, opcode, p4, subprog from bytecode('insert into t1 values(3,''x'',1)')
+29072cd4d04bb5f3 8d7cd0729a9e30da select addr, opcode, subprog from bytecode('insert into t1 values(3,''x'',1)') where subprog is null
+3c3e2804c38fd9ae 8d7cd0729a9e30da select count(*) from bytecode('update t1 set b=1')
+a85573d032593b68 ffd23a21490de01f select opcode, count(*) from bytecode('select * from t1, t2 where t1.a=t2.x') group by 1 order by 1
+11c04b6c214a628a 8d7cd0729a9e30da select * from bytecode('select * from t1') where opcode='OpenRead'
+4bd3a33a3129487b 8d7cd0729a9e30da select * from bytecode('select * from t1') where addr between 1 and 3
+4e4eebebb42d6f53 8d7cd0729a9e30da select * from bytecode('select * from t1') limit 2
+bddb2b11276543b2 4724bc48369b83c6 select * from bytecode('select * from t1') order by addr desc limit 2
+a92244de3b40aacd a92244de3b40aacd select * from bytecode
+28348d26ba317cef 8d7cd0729a9e30da select * from bytecode(1)
+5f084877f4fb31f1 8d7cd0729a9e30da select * from bytecode(null)
+266dea650c75e878 8d7cd0729a9e30da select * from bytecode('not sql')
+12652ba982219de3 8d7cd0729a9e30da select * from bytecode('select * from nosuch')
+acfcbd264345747d 8d7cd0729a9e30da select * from bytecode('')
+7510a3971413f93b 8d7cd0729a9e30da select * from bytecode('select 1; select 2')
+1f6ca67658d05523 f360652041b5a248 select * from tables_used('select * from t1')
+8b8da109651dfcee f360652041b5a248 select * from tables_used('select * from t1 where b=?')
+d291adb2677f14a1 f360652041b5a248 select * from tables_used('select * from t1, t2 where t1.a=t2.x')
+fe0f82435a34a1da f360652041b5a248 select * from tables_used('insert into t1 values(4,''y'',2)')
+4361aee91662f710 f360652041b5a248 select * from tables_used('update t2 set z=1 where y=10')
+4a84dc8fe25ecbf1 f360652041b5a248 select * from tables_used('delete from t1 where b=''one''')
+adbf532015fe8332 bdc99cf68210a51b select type, name, wr from tables_used('insert into t1 values(4,''y'',2)') order by name
+91bf342056c7431b 486beff92885dab4 select * from tables_used('select * from t1') where subprog is null
+e08b7bbb57b2e6e1 f360652041b5a248 select * from tables_used('select * from sqlite_schema')
+be4e6ac7c1248138 f360652041b5a248 select * from tables_used('select * from generate_series(1,3)')
+d6937771d3602917 f360652041b5a248 select * from tables_used('select 1')
+c82802d9da977e9b f360652041b5a248 select * from tables_used(1)
+a511c1fc5eba7143 f360652041b5a248 select name from tables_used('select * from t2 where y=5')
+8b7ee374cc93779a 8d7cd0729a9e30da select * from bytecode('select * from generate_series(1,3)')
+6274afc82985bf6c 8d7cd0729a9e30da select * from bytecode('select * from pragma_table_info(''t1'')')
+8538374cb08f580d 8d7cd0729a9e30da select p4 from bytecode('select * from bytecode(''select 1'')') where opcode='VFilter'
+8f091cba1c494a82 b6410572918d0b59 select b.opcode, t.name from bytecode('select * from t1') b, tables_used('select * from t1') t where b.opcode='OpenRead'
+f0bff3011d0bdbd8 c875a43a772f49c2 select * from t1 where a in (select p1 from bytecode('select 1'))
+74821997b35e624f a71095ba5e3619b9 select (select count(*) from bytecode('select ' || a)) from t1
+b89e5bfb5509d766 8d7cd0729a9e30da select * from bytecode('pragma table_info(t1)')
+db343b4ecfa13e05 8d7cd0729a9e30da select * from bytecode('create table t9(a)')
+cead7c6006209a8e 8d7cd0729a9e30da select * from bytecode('explain select 1')
+9732ae99689a7361 8d7cd0729a9e30da select * from bytecode('begin')
+a216ed13f789b501 8d7cd0729a9e30da select opcode from bytecode('select * from t1 where a in (1,2,3)')
+----
+b78b60633dbbf86c 187685b61347212b CREATE VIRTUAL TABLE t1 USING generate_series
+0d1e7e42582189d1 e3b0c44298fc1c14 PRAGMA table_info(pragma_function_list)
+1c6d958017ac4fc3 e3b0c44298fc1c14 PRAGMA table_info(pragma_module_list)
+1c6d958017ac4fc3 e3b0c44298fc1c14 PRAGMA table_info(pragma_pragma_list)
+983b7ee790c308b3 e3b0c44298fc1c14 PRAGMA table_xinfo(generate_series)
+dd4d1c66b4c4e10d bd043e79e1788c00 SELECT (flags & 0x200000) FROM pragma_function_list WHERE name='next_char'
+790a4414535a1cf2 790a4414535a1cf2 SELECT (flgs & 0x0100)!=0 FROM pragma_stats WHERE tbl='t1' AND idx IS NULL
+8e87d3e7b0ef0fb4 abfd2e11936aac01 SELECT * FROM ( SELECT * FROM generate_series(1,10) UNION ALL SELECT * FROM generate_series(101,104) ) LIMIT -1 OFFSET 0
+a4643213ba3f6bc6 abfd2e11936aac01 SELECT * FROM ( SELECT * FROM generate_series(1,10) UNION ALL SELECT * FROM generate_series(101,104) ) LIMIT -1 OFFSET 5
+de2a31d67511fc26 abfd2e11936aac01 SELECT * FROM ( SELECT * FROM generate_series(1,10) UNION ALL SELECT * FROM generate_series(101,104) ) LIMIT 10 OFFSET 5
+017708e454a8f153 417c304829640e98 SELECT * FROM (generate_series(1,5,2)) AS x LIMIT 10
+d87f0e302d3cee5d d87f0e302d3cee5d SELECT * FROM (t1 NATURAL JOIN pragma_table_xinfo('t1_a') NATURAL JOIN t3) t1 NATURAL JOIN t2 NATURAL JOIN t3 WHERE rowid ISNULL>0 AND 0%y
+b43e2ad8bc64d62f e5b9871e2dfc3b94 SELECT * FROM generate_series WHERE start IN (1,7) AND stop=20 AND step=10 ORDER BY +1
+8f86a3ac0c887082 57fc41ab5eb405b3 SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808)
+a4c9b0ab5687afc8 866ef844f8b81b30 SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) LIMIT 1 OFFSET 0
+f7dbe532550915ee 17a0efe528529c49 SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) ORDER BY value ASC
+1f1352ea92ae3b83 49747ec688fcaf80 SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) ORDER BY value ASC LIMIT 10 OFFSET 1
+7a112a7966fe8467 49747ec688fcaf80 SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) ORDER BY value ASC LIMIT 10 OFFSET 40000000
+db6ceebaef91bf3d 57fc41ab5eb405b3 SELECT * FROM generate_series(0,0,0)
+cb133d110c00f500 c7f0c7ef96e937b9 SELECT * FROM generate_series(0,32,5) ORDER BY rowid DESC
+81e0fda8a95dbf59 830cccdc73dff1f7 SELECT * FROM generate_series(0) LIMIT 5
+110c07c7b9666163 4364eedaa7e040d0 SELECT * FROM generate_series(1, 5) WHERE value = (value & 14) LIMIT 3
+9ca70d924c8b9768 57fc41ab5eb405b3 SELECT * FROM generate_series(1,10) WHERE step=3
+b720a6be940a279e 866ef844f8b81b30 SELECT * FROM generate_series(1,11,1) LIMIT 100 OFFSET 10
+464c61a015f82e6a 866ef844f8b81b30 SELECT * FROM generate_series(1,11,1) LIMIT 3 OFFSET 3
+6eafb2e03ab86639 57fc41ab5eb405b3 SELECT * FROM generate_series(1,11,2)
+03e885e655871814 866ef844f8b81b30 SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 4
+a543c28a6a48d8d5 866ef844f8b81b30 SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 5
+5988c913cb840c5d 866ef844f8b81b30 SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 6
+7859a44d5b410624 866ef844f8b81b30 SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 7
+94bb07ebebe2475f 866ef844f8b81b30 SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 9223372036854775807
+2954982a41e5849b 2954982a41e5849b SELECT * FROM generate_series(1,9,2,11)
+0397b060e8764b34 57fc41ab5eb405b3 SELECT * FROM generate_series(1,9,2)
+28885bc19604ff92 4364eedaa7e040d0 SELECT * FROM generate_series(1,9)
+e70bd35425bcbbb5 866ef844f8b81b30 SELECT * FROM generate_series(11,1,-1) LIMIT 100 OFFSET 10
+9c928521779e4d0f 866ef844f8b81b30 SELECT * FROM generate_series(11,1,-1) LIMIT 100 OFFSET 9223372036854775807
+ad278cd49bfb9555 57fc41ab5eb405b3 SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808)
+9c7e484742f84f53 866ef844f8b81b30 SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808) LIMIT 100 OFFSET 1
+6d5d0d7e37bf24b8 866ef844f8b81b30 SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808) LIMIT 100 OFFSET 2
+e138bd40980d8b27 866ef844f8b81b30 SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808) LIMIT 100 OFFSET 9223372036854775807
+d414667ad54a2160 8de18e8f8cb29103 SELECT * FROM main.generate_series(1,4)
+cbcc392933bd812f 4375e504a7adc7e0 SELECT * FROM pragma_foreign_key_list('c2')
+8ba5f43123c8aea2 5bef6eb1ea4801b7 SELECT * FROM pragma_index_info('i2')
+4e4263f7f1393f4e 96d0ec8627686bf3 SELECT * FROM pragma_index_list('t1')
+235c23b2710c5169 96d0ec8627686bf3 SELECT * FROM pragma_index_list('t2')
+2b2b67b8941049a0 1b0db1bf8cd0a2b5 SELECT * FROM pragma_pragma_list WHERE name='pragma_list'
+b2eb8ed9abe25e88 9cdafca725c07f82 SELECT * FROM pragma_table_info('t2')
+d414667ad54a2160 bb2eb5dce8d964d5 SELECT * FROM temp.generate_series(1,4)
+8588a7acae25c1ef 3213166c1ed827f5 SELECT *, '|' FROM (SELECT x FROM t1) AS y, generate_series(1,y.x) ORDER BY 1, 2
+2c6baf7c8e98c853 2c6baf7c8e98c853 SELECT *, '|' FROM generate_series LIMIT 5
+e2334363ac44b5ff 57fc41ab5eb405b3 SELECT *, '|' FROM generate_series WHERE start=1 AND stop=9 AND step=2
+8623e3b7464b853d 830cccdc73dff1f7 SELECT *, '|' FROM generate_series(0) LIMIT 5
+2c6baf7c8e98c853 2c6baf7c8e98c853 SELECT *, '|' FROM generate_series(value) LIMIT 5
+5e3eb49e5c0d86b3 b09e26e30173baf4 SELECT *, '|' FROM pragma_foreign_key_check AS x ORDER BY x."table"
+b37e7168a206e1cf 6b1143b2539eff41 SELECT *, 'x' FROM pragma_foreign_key_check('t1','aux')
+f6f2269bb73c39d4 6b1143b2539eff41 SELECT *, 'x' FROM pragma_foreign_key_check('t1','main')
+39d545b9cb724251 6b1143b2539eff41 SELECT *, 'x' FROM pragma_foreign_key_check('t1')
+e583be999b3ac74f 4515d92c2d02961a select 1 as c_0 from generate_series(1, 1) as ref_3 where (ref_3.value) in (select 1)
+cbaff4995f2eb190 7d22717dcb18c5b0 SELECT DISTINCT 'xyz' FROM pragma_cache_size WHERE rowid OR abs(0) ORDER BY 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+c6dac90f25641845 dd501738fef41b68 SELECT DISTINCT name, builtin FROM pragma_function_list WHERE name LIKE 'exter%'
+3241b4fd40d4f980 dd501738fef41b68 SELECT DISTINCT name, builtin FROM pragma_function_list WHERE name='upper' AND builtin
+6ad8830e13abf27e c521753e486341a1 SELECT DISTINCT value FROM generate_series(1,x), t1 ORDER BY 1
+fd52a20f2efbd962 d75e67faf583ab5a SELECT name FROM pragma_table_info('t1') ORDER BY cid
+cff23badb67da05d f626091c49ea0c0e SELECT name FROM pragma_table_xinfo('t1')
+83ecba5c2c93765a f0ef1ddd6992c7e7 SELECT name, type FROM pragma_table_list('v1')
+068e3e8c723fbb62 c7f0c7ef96e937b9 SELECT rowid, * FROM generate_series(0,32,5) ORDER BY +value DESC
+1be13207f4f97cfb 38e97dc762045e66 SELECT rowid, * FROM generate_series(0,32,5) ORDER BY value DESC
+d474663b32282403 f0ef1ddd6992c7e7 SELECT strict FROM pragma_table_list('t1')
+eab10998883eec59 3b29405e0f854a9e SELECT t4.name, t3.name FROM pragma_table_info('t4') t4 RIGHT JOIN pragma_table_info('t3') t3 ON (t4.name=t3.name)
+14bf24a04688cdba 57fc41ab5eb405b3 SELECT value FROM generate_series(-9223372036854760000,-9223372036854775808,-10000)
+dff4d7cad854b934 a8a77482a19b7e78 SELECT value FROM generate_series(-9223372036854760000,-9223372036854775808,-10000) WHERE value < -9223372036854770001
+80250ae3fc576e6d 99b6a4f42c3e548e SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 0 AND 6
+ea60a874a1a273bb 99b6a4f42c3e548e SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 0.5 AND 6.25
+bea43571bc3b5d6f 99b6a4f42c3e548e SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 1 AND 5
+7f8347e2ba28048c 99b6a4f42c3e548e SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 9223372036854775803 AND 9223372036854775807
+0f6afd95915f2dab ac2375cf396688ad SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 9223372036854775803 AND 9223372036854775807 ORDER BY value DESC
+9654a8370cd86e0b 376c6f4804cdf32b SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value BETWEEN 4 AND 1
+85875b277b9349c3 afcf025d9ce8fdf7 SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value<-9223372036854775807
+d555ada2430c25be afcf025d9ce8fdf7 SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value<-9223372036854775808
+c25db915e463616a 9a8bef9947d07184 SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value<=-9223372036854775808
+1400ca38bc4c4c0b 51343d3d6ca1e173 SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value=-9.2234e18
+39de1205061b230b 51343d3d6ca1e173 SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value=9.2234e18
+092ab5641c360213 c482022e21dd6d6e SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value>=9223372036854775807
+8468e8683a06721e 7b4b8e709404ac93 SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value>9223372036854775806
+ec441cce911ec4ae 7b4b8e709404ac93 SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value>9223372036854775807
+284b9e5665465516 ae808f768a736a9d SELECT value FROM generate_series(-9223372036854775808,1) WHERE value>-9223372036854775000.0 LIMIT 3
+9f1c052b1c4711cf 4ed7bac233eb659b SELECT value FROM generate_series(-9223372036854775808,1) WHERE value>=-9223372036854775000.0 LIMIT 3
+fdef5e484d661244 99b6a4f42c3e548e SELECT value FROM generate_series(0,100,+10) WHERE value BETWEEN 33 AND 38
+81e0fda8a95dbf59 830cccdc73dff1f7 SELECT value FROM generate_series(0) LIMIT 5
+27142b4af6898988 4364eedaa7e040d0 SELECT value FROM generate_series(0) WHERE stop=6
+29ce89e3ef64339d d5619ef61e5ba4c9 SELECT value FROM generate_series(0xfffffffd)
+587dfa83af83ff70 4364eedaa7e040d0 SELECT value FROM generate_series(1,10) WHERE step IS NULL
+370ef20f0b0320c4 9a8bef9947d07184 SELECT value FROM generate_series(1,10) WHERE value<=5.0
+3e2e15aa4dacd9ac 9a8bef9947d07184 SELECT value FROM generate_series(1,10) WHERE value<=5.5
+f4599e9e971efcfe afcf025d9ce8fdf7 SELECT value FROM generate_series(1,10) WHERE value<5.0
+da294e281ea27acb 51343d3d6ca1e173 SELECT value FROM generate_series(1,10) WHERE value==5.0
+1bce514d4c6b8ccd 51343d3d6ca1e173 SELECT value FROM generate_series(1,10) WHERE value==5.5
+88d829fc10f20629 c482022e21dd6d6e SELECT value FROM generate_series(1,10) WHERE value>=5.0
+ca546a63501c647d c482022e21dd6d6e SELECT value FROM generate_series(1,10) WHERE value>=5.5
+04853d1792635f43 bc2026b203586dee SELECT value FROM generate_series(1,10) WHERE value>2 LIMIT 4 OFFSET 1
+07f0c25ce3cffc18 7b4b8e709404ac93 SELECT value FROM generate_series(1,10) WHERE value>5.0
+771365eb193ad09e 7b4b8e709404ac93 SELECT value FROM generate_series(1,10) WHERE value>5.5
+c2d1e4c8d66e10f1 4ed7bac233eb659b SELECT value FROM generate_series(1,9223372036854775807) WHERE value>=9223372036854775000.0 LIMIT 3
+401d702010e23186 4ed7bac233eb659b SELECT value FROM generate_series(1,9223372036854775807) WHERE value>=9223372036854775807.0 LIMIT 3
+722421aa02f78a9e ae808f768a736a9d SELECT value FROM generate_series(1,9223372036854775807) WHERE value>9223372036854775000.0 LIMIT 3
+8a925a34a75ad3fb ae808f768a736a9d SELECT value FROM generate_series(1,9223372036854775807) WHERE value>9223372036854775807.0 LIMIT 3
+bdd2061a03c6bc33 bdce1bf22be9e461 SELECT value FROM generate_series(1) WHERE value<-1e19 LIMIT 3
+a2552376aece1d4b ee32c1f2eb3492ed SELECT value FROM generate_series(1) WHERE value<=-1e19 LIMIT 3
+eac939dacf901a89 5457916c398f8eed SELECT value FROM generate_series(1) WHERE value>=1e19 LIMIT 3
+4d48da589ee670e4 c27e1b7c4e483003 SELECT value FROM generate_series(1) WHERE value>1e19 LIMIT 3
+67d4712da51bae41 e1388c97c801c3dc SELECT value FROM generate_series(10,1,-1) WHERE value<=5.0
+d42ef3cc95e1e836 e1388c97c801c3dc SELECT value FROM generate_series(10,1,-1) WHERE value<=5.5
+7e94216f53e6327d a8a77482a19b7e78 SELECT value FROM generate_series(10,1,-1) WHERE value<5.0
+9c0b85e7dac4c8a4 a8a77482a19b7e78 SELECT value FROM generate_series(10,1,-1) WHERE value<5.5
+b456ee6a5ede34a4 8f7b4f0891b8984a SELECT value FROM generate_series(10,1,-1) WHERE value>=5.0
+4079fe5d99b51958 8f7b4f0891b8984a SELECT value FROM generate_series(10,1,-1) WHERE value>=5.5
+d44a066ba6827d8f 61aeb13e889474ae SELECT value FROM generate_series(10,1,-1) WHERE value>5.0
+35c5f6f44d0ef096 61aeb13e889474ae SELECT value FROM generate_series(10,1,-1) WHERE value>5.5
+479db6017914d1e5 99b6a4f42c3e548e SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 38
+834e0acc4aa538fe 99b6a4f42c3e548e SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 59
+e45d2c7c6fd9f9e9 99b6a4f42c3e548e SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 60
+0028e50b7bc56be4 99b6a4f42c3e548e SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 66
+c8503cbdf2ffe37b 57fc41ab5eb405b3 SELECT value FROM generate_series(3,4,-1)
+7603be565050de5f 57fc41ab5eb405b3 SELECT value FROM generate_series(4,3,1)
+af5f6cc3bb1ed073 830cccdc73dff1f7 SELECT value FROM generate_series(5) LIMIT 5
+ddaa80a69fd029fa 57fc41ab5eb405b3 SELECT value FROM generate_series(9223372036854760000,9223372036854775807,10000)
+1a264148f011bca1 61aeb13e889474ae SELECT value FROM generate_series(9223372036854760000,9223372036854775807,10000) WHERE value > 9223372036854770001
+4e6e6ca2bb79d2ce ee32c1f2eb3492ed SELECT value FROM generate_series(9223372036854774784) WHERE value<=9223372036854775000.0 LIMIT 3
+d00ef58432f778bc bdce1bf22be9e461 SELECT value FROM generate_series(9223372036854774784) WHERE value<9223372036854775000.0 LIMIT 3
+6530af2fe25f6efd 4364eedaa7e040d0 SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE +value<=9223372036854775807.0 LIMIT 3
+5b82ef8637073e87 4364eedaa7e040d0 SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE +value<9223372036854775807.0 LIMIT 3
+e3daaef86221bf97 bc5af525173a39c0 SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE value<=9223372036854775807.0 LIMIT 3
+151a2091a7b7b682 131d2c8ae950a48d SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE value<9223372036854775807.0 LIMIT 3
+fbe09a602ecba905 fbe09a602ecba905 SELECT x, y, value FROM t2 JOIN (t1 RIGHT JOIN generate_series(t2.y,5) AS value)
+842bd85164dc28a4 ef1d9ecc72b07314 SELECT x.*, '|' FROM sqlite_schema, pragma_foreign_key_check(name) AS x WHERE type='table' ORDER BY x."table"
+3d84bfa1ddb65319 3d84bfa1ddb65319 UPDATE pragma_encoding SET encoding='UTF-8' RETURNING a, b, *
+90d1ab96de89a927 ed453160345ce7ce WITH cst(rsx, rsy) AS ( SELECT 100, 100 ), cst2(minx, maxx, stepx, miny, maxy, stepy, qualitativex, qualitativey) AS ( SELECT NULL, NULL, NULL, NULL, NULL, NULL, 0, 0 ), ds0(m, n, x, y, x2, y2, title, size, mark, label, markmode) AS ( SELECT 1, 2, 3, 4, 5, 6, 7 , 8, 9, 10, 11 ), ds(m, n, x, y, x2, y2, title, size, mark, label, markmode) AS ( SELECT m, n, x, y, x2, y2, title, size, mark, label, markmode FROM ds0 WINDOW w AS (PARTITION BY m, x ORDER BY n) ), d(m, n, x, y, x2, y2, labelx,labely,title,size,mark,label,markmode) AS ( SELECT m, n, x, y, x2, y2, x, y, title, size, mark, label, markmode FROM ds, cst2 ), ylabels(y, label) AS ( SELECT y, MIN(labely) FROM d GROUP BY y ), yaxis(maxy, miny, stepy , minstepy) AS ( WITH xt0(minx, maxx) AS ( SELECT coalesce(miny, min(min(y2), min(y))), coalesce(maxy, max(max(y2), max(y))) + qualitativey FROM d, cst2 ), xt1(mx, mn) AS (SELECT maxx, minx FROM xt0), xt2(mx, mn, step) AS (SELECT mx, mn, (mx-mn) FROM xt1), xt3(mx, mn, ms) AS ( SELECT mx, mn, first_value(rs) OVER (order by x desc) AS ms FROM (SELECT mx, mn, step, f,(mx-mn) as rng, 1.0*step/f as rs, 1.0*(mx-mn)/(step/f) AS x FROM xt2, (SELECT 1 AS f UNION ALL SELECT 2 UNION ALL SELECT 4 UNION ALL SELECT 5)) AS src WHERE x < 10 limit 1), xt4(minstepy) AS ( SELECT MIN(abs(y2-y)) FROM d WHERE y2 != y ) SELECT (mx/ms)*ms, (mn/ms)*ms, coalesce(stepy, ms), coalesce(minstepy, ms, stepy) FROM xt3, cst2,xt4 ), distinct_mark_n_m(mark, ze, zem, title) AS ( SELECT DISTINCT mark, n AS ze, m AS zem, title FROM ds0 ), facet0(m, mi, title, radial) AS ( SELECT md, row_number() OVER () - 1, title, 'radial' IN (SELECT mark FROM distinct_mark_n_m WHERE zem = md) FROM (SELECT DISTINCT zem AS md, title AS title FROM distinct_mark_n_m ORDER BY 2, 1) ), facet(m, mi, xorigin, yorigin, title, radial) AS ( SELECT m, mi, rsx * 1.2 * IFNULL(CASE WHEN ( 0 ) > 0 THEN mi / ( 0 ) ELSE mi % ( 2 ) END, mi), rsy * 1.2 * IFNULL(CASE WHEN ( 2 ) > 0 THEN mi / ( 2 ) ELSE mi / ( 0 ) END, 0), title, radial FROM facet0, cst ), radygrid(m, mi, tty, wty, ttx, ttx2, xorigin, yorigin) AS ( SELECT m, mi, rsy / 2 / ((maxy-miny)/stepy) * (value-1) AS tty, coalesce(NULL, miny + stepy * (value-1)) AS wty, xorigin, xorigin+rsx, xorigin + rsx / 2, yorigin + rsy / 2 FROM generate_series(1), yaxis, cst, facet LEFT JOIN ylabels ON ylabels.y = (miny + (value-1) * stepy) WHERE radial AND stop = 1+1.0*(maxy-miny)/stepy ), ypos(m, mi, pcx, pcy, radial) AS ( SELECT m, mi, xorigin, yorigin + CASE WHEN 0 BETWEEN miny AND maxy THEN rsy - (0 - miny) * rsy / (maxy-miny) WHEN 0 >= maxy THEN 0 ELSE rsy END, radial FROM yaxis, cst, facet WHERE NOT radial UNION ALL SELECT m, mi, xorigin + rsx / 2, yorigin + (CASE WHEN 0 BETWEEN miny AND maxy THEN rsy - (0 - miny) * rsy / 2 / (maxy-miny) WHEN 0 >= maxy THEN 0 ELSE rsy END ) / 2, radial FROM yaxis, cst, facet WHERE radial ) SELECT * FROM radygrid , ypos
+85f66b09ae73fd85 8bedc6e47a9009bf WITH data(v) AS ( SELECT value FROM generate_series(1,35,3) UNION ALL SELECT value FROM generate_series(10,30,4) UNION ALL SELECT value FROM generate_series(20,50,5) UNION ALL SELECT value FROM generate_series(30,60,6) UNION ALL SELECT value FROM generate_series(1,50,7) UNION ALL SELECT value FROM generate_series(10,80,8) ) SELECT v FROM data ORDER BY v
+----
+bceb0c8b121be252 af2b7d335967f022 SELECT t0.c0, v0.c0, vt0.name FROM v0, t0 LEFT JOIN pragma_table_info('t0') AS vt0 ON vt0.name LIKE 'c0' WHERE v0.c0 == 0
+----
+6124942b8510bcff f626091c49ea0c0e SELECT name, type FROM pragma_table_xinfo('t1')
+----
+790a4414535a1cf2 790a4414535a1cf2 SELECT tbl, (flgs & 0x10)!=0 FROM pragma_stats WHERE tbl='t1' AND idx IS NULL
+----
+2ddd369455e1cbbb d0268fe2bc06c4f6 CREATE TABLE t9 AS SELECT id, h, g, f, e, d, c, b, a FROM t1 NATURAL FULL JOIN t2 NATURAL FULL JOIN t3 NATURAL FULL JOIN t4 NATURAL FULL JOIN t5 NATURAL FULL JOIN t6 NATURAL FULL JOIN t7 NATURAL FULL JOIN t8
+----
+ba5480d85550efc4 3213166c1ed827f5 SELECT *, '|' FROM t1, generate_series(1,x) ORDER BY 1, 2
+----
+46c301dc1a6d110a 9cdafca725c07f82 SELECT name FROM pragma_table_info('t2')
+----
+ffb8b34440c48083 e590f1e68a9928bb SELECT b FROM t600 WHERE a IN generate_series(2,52,10)
+----
+9bf3d801f45645af 9cdafca725c07f82 SELECT type FROM pragma_table_info('v2')
+----
+0f9831cb29ca12fc 4364eedaa7e040d0 SELECT * FROM v2
+----
+e5b805248c230615 aadc7b30b3ca9a3a SELECT name FROM temp.pragma_table_info('t5_1')
+----
+b25c35c8de99c3e7 7d1cbf5e7af9795d SELECT t1.value, t2.value FROM t1 RIGHT JOIN generate_series(1,3,1) AS t2 USING(value)
+----
+73c7c45b7863bb40 c5a5bd8ca1f130fb SELECT t.name, f."table", f."from", i.name, i.pk FROM pragma_table_list() AS t JOIN pragma_foreign_key_list(t.name, t.schema) AS f JOIN pragma_table_info(f."table", t.schema) AS i WHERE i.pk
+----
+e5b805248c230615 aadc7b30b3ca9a3a SELECT name FROM temp.pragma_table_info('t5_1')
+----
+07ef748057ad900e 9cdafca725c07f82 SELECT name, type FROM pragma_table_info('v1')
+----
+fd58705830e11fb3 3c62f3e0e6ec3ad8 select * from vx(1,3)
+4d6663d266856840 3c62f3e0e6ec3ad8 select * from vx where start=2 and stop=4
+2ca74a32b8f24cb5 92f21805d4e0d4d0 select value, start from vx(5) limit 2
+2c6baf7c8e98c853 2c6baf7c8e98c853 select * from vx
+a907e785b4bdf872 a907e785b4bdf872 select * from vp('t1')
+a907e785b4bdf872 a907e785b4bdf872 select name from vp where arg='t1'
+227f59fca83ac914 af7de6303f53a928 select opcode from vb('select 1')
+2cf58a846cca2ff8 2cf58a846cca2ff8 select * from vn
+3b4d51ab59bae407 fba23791741a3866 select * from t1, vx(1,t1.a)
+1e052a3139ae9e45 e3b0c44298fc1c14 pragma table_info(vx)
+983b7ee790c308b3 e3b0c44298fc1c14 pragma table_xinfo(vx)
+a907e785b4bdf872 a907e785b4bdf872 pragma table_info(vp)
+2cf58a846cca2ff8 2cf58a846cca2ff8 pragma table_info(vn)
+d46b997e96422bfd f626091c49ea0c0e select * from pragma_table_xinfo('vx')
+bacdd431d6df7b90 b561a6bb5357655b select type, name, ncol from pragma_table_list order by name
+aadeabea7a9c3196 e3b0c44298fc1c14 drop table vx
+2cf58a846cca2ff8 2cf58a846cca2ff8 drop table vn
+aadeabea7a9c3196 e3b0c44298fc1c14 drop table if exists vx
+329108d974014acf e3b0c44298fc1c14 alter table vx rename to vy
+1203f738a6936af0 1203f738a6936af0 alter table vx add column w
+a6c4fbae88e16128 a6c4fbae88e16128 alter table vx rename column start to s
+fda02dbdb9c622cd fda02dbdb9c622cd alter table vx drop column start
+b0b785ca42dc263c b0b785ca42dc263c create index vxi on vx(value)
+61633c6e3e1d870f 61633c6e3e1d870f create trigger vxt after insert on vx begin select 1; end
+cf021d1daa869bdc cf021d1daa869bdc insert into vx values(1,2,3,4)
+cf021d1daa869bdc cf021d1daa869bdc update vx set value=1
+cf021d1daa869bdc cf021d1daa869bdc delete from vx
+4e57c3c297db9e36 616e9e6c83b7c56c select * from vx(1,2) a join vx(1,2) b using(value)
+cdbc1dcff6765473 f7ee2e68d0c54b44 select * from vx(1,10) where value in (select a from t1)
+b8c4a9fcd55b2602 fbe4dcdc23744b3a select count(*) from sqlite_schema where sql like 'CREATE VIRTUAL%'
+377c0c3f46d2e742 e3b0c44298fc1c14 create virtual table v2 using nosuch
+45e7f5cd2c8d4433 e3b0c44298fc1c14 create virtual table v2 using nosuch(a, b int, 'c d', "e", (f, g), [h])
+6e56ea2a3a610ad5 e3b0c44298fc1c14 create virtual table if not exists vx using generate_series
+625343abf45a4159 e3b0c44298fc1c14 create virtual table if not exists v3 using generate_series
+ba1adbea0eb70b56 e3b0c44298fc1c14 create virtual table temp.v3 using generate_series(1,2)
+6944cb78d98f6a16 e3b0c44298fc1c14 create virtual table main.v3 using pragma_table_info
+2ed93d1ef9e8352c 54d77f7e849c4003 create virtual table t1 using generate_series
+58db91e92e9b11fe e3b0c44298fc1c14 create virtual table v4 using bytecode
+8b2cdd99f40fe11b 8b2cdd99f40fe11b create virtual table sqlite_v4 using generate_series
+ba1c9101fbd5b408 4e5dcb551469ae0b create temp virtual table v5 using nosuch
+1983e311d2794d59 1983e311d2794d59 create virtual table v5 using
+a97781a967a3cdc3 331c1b1923d5432e explain create virtual table v6 using whatever(x, y)
+e878a535b6d92078 c2bb595ee57cca8c explain create virtual table temp.v6 using whatever
+570a6d25cce6660b 6053e69c2aa90a92 explain create virtual table if not exists v6 using whatever(a 'b' (c d))
+530d3b22d45ac203 530d3b22d45ac203 insert into pragma_table_info values(1)
+530d3b22d45ac203 530d3b22d45ac203 update pragma_table_info set name='x'
+530d3b22d45ac203 530d3b22d45ac203 delete from pragma_table_info
+c045c1130149137e c045c1130149137e drop table pragma_table_info
+584628ab5a481420 584628ab5a481420 drop table bytecode
+b0b785ca42dc263c b0b785ca42dc263c create index pi on pragma_table_info(name)
+61633c6e3e1d870f 61633c6e3e1d870f create trigger pt after insert on pragma_table_info begin select 1; end
+1203f738a6936af0 1203f738a6936af0 alter table pragma_table_info add column x
+0c26c7d8c47d5e4f 0c26c7d8c47d5e4f alter table pragma_compile_options rename to flubber
+0c26c7d8c47d5e4f 0c26c7d8c47d5e4f alter table pragma_compile_options drop column start
+ee409fb45500a68a ee409fb45500a68a select * from pragma_nosuch
+ccf642c661e35bae ccf642c661e35bae select * from pragma_case_sensitive_like
+86650a98a7dc5703 9cdafca725c07f82 select * from pragma_table_info('t1') where cid in (0,1)
+690de07d478785a5 9cdafca725c07f82 insert into t1 select cid+10, name from pragma_table_info('t1')
+dde583139ff73b1a f864a5b886554905 update t1 set b=(select count(*) from pragma_table_info('t1'))
+5f69231400ea8cc6 0c8d54aa09e16d81 delete from t1 where a in (select value from generate_series(1,1))
+89209a22d98ce312 ce0f4ee6e8951cdb select * from generate_series(1,3) where value in (select value from vx(2,3))
+----
+9f7075403ccdfe3e 9f7075403ccdfe3e select * from vv
+2b142aedc89cd680 4364eedaa7e040d0 select * from vg
+a1b5e48a900e5d48 a1b5e48a900e5d48 select * from vb
+d78475d3da3f2766 9f7075403ccdfe3e pragma trusted_schema=off; select * from vv
+026197517ad9f843 ad53e8806d17c82d pragma trusted_schema=off; select * from vg
+bc6c8820962e2faa a1b5e48a900e5d48 pragma trusted_schema=off; select * from vb
+18ee333d59c0a75a e3b0c44298fc1c14 pragma trusted_schema=off; insert into t1 values(1,'x')
+8631410f8395bb81 e3b0c44298fc1c14 insert into t1 values(1,'x')

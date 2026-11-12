@@ -1,0 +1,62 @@
+# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+# the next block of the case file.
+aea3e8cf1958fc3d e3b0c44298fc1c14 PRAGMA journal_mode
+b2d057507185af56 e3b0c44298fc1c14 PRAGMA journal_mode=memory
+b3bb3f6848c2bb39 6197595503f01ee2 PRAGMA main.journal_mode=MEMORY; PRAGMA journal_mode
+9df53ff06a26cf2c c3ea99f86b2f8a74 PRAGMA journal_mode=memory; INSERT INTO t VALUES(1000, 'w'); SELECT count(*) FROM t
+8c054c0990e57fae 71f96687f207eecd PRAGMA journal_mode=memory; BEGIN; DELETE FROM t; ROLLBACK; SELECT count(*), sum(a) FROM t
+c3b6916b1c2d5202 983bd614bb5afece PRAGMA journal_mode=memory; BEGIN; UPDATE t SET b = b || '!'; SAVEPOINT s; DELETE FROM t WHERE a > 10; ROLLBACK TO s; COMMIT; SELECT count(*) FROM t WHERE b LIKE '%!'
+b9e45e10041c2a6d 1b028ece7e2e5c4b PRAGMA journal_mode=memory; PRAGMA journal_mode=wal; PRAGMA journal_mode
+55ff20ebcd5ba24d 06b7ff0064101d1c PRAGMA journal_mode=wal; PRAGMA journal_mode=memory; PRAGMA journal_mode
+7d194e9731e77cec e3b0c44298fc1c14 PRAGMA m.journal_mode
+0898b97b1e9c89ab e3b0c44298fc1c14 PRAGMA m.journal_mode=wal
+8c0a7f902617e8cc e3b0c44298fc1c14 PRAGMA m.journal_mode=delete
+c5f4fe922e1f37b8 e3b0c44298fc1c14 PRAGMA m.journal_mode=persist
+43e245e7fc9d658c e3b0c44298fc1c14 PRAGMA m.journal_mode=truncate
+e957ee50673589b1 e3b0c44298fc1c14 PRAGMA m.journal_mode=memory
+05f036520a6a917d dd03e5fa66633617 SELECT * FROM pragma_journal_mode('m')
+060dbcd0d299652d e3b0c44298fc1c14 PRAGMA locking_mode
+80daadc9999bf5f8 e3b0c44298fc1c14 PRAGMA locking_mode=exclusive
+3d8de91daff299fc bcf064ade0784934 PRAGMA locking_mode=EXCLUSIVE; PRAGMA main.locking_mode; PRAGMA m.locking_mode; PRAGMA temp.locking_mode; PRAGMA locking_mode
+6666de574038bd59 7af24a526f628d7c PRAGMA main.locking_mode=exclusive; PRAGMA locking_mode; PRAGMA main.locking_mode
+05697ae244788d3f cd70ee647522f451 PRAGMA locking_mode=exclusive; PRAGMA locking_mode=normal; PRAGMA main.locking_mode
+060dbcd0d299652d e3b0c44298fc1c14 PRAGMA locking_mode=bogus
+80daadc9999bf5f8 e3b0c44298fc1c14 PRAGMA m.locking_mode=normal
+bfbe5f71fd523d4f bfbe5f71fd523d4f PRAGMA temp.locking_mode=normal
+87346c97e5d11d6e c3ea99f86b2f8a74 PRAGMA locking_mode=exclusive; INSERT INTO t VALUES(1001, 'v'); SELECT count(*) FROM t
+d8e01720053e3dae 983bd614bb5afece PRAGMA locking_mode=exclusive; BEGIN; DELETE FROM t WHERE a < 100; ROLLBACK; SELECT count(*) FROM t
+2a7b76980115a4df d03b0e1feee8cef7 PRAGMA locking_mode=exclusive; PRAGMA journal_mode=persist; INSERT INTO t VALUES(1002, 'p'); PRAGMA journal_mode=delete; SELECT count(*) FROM t
+20260236d8886ba6 f20738c8eda32ae4 PRAGMA locking_mode=exclusive; PRAGMA journal_mode=wal; INSERT INTO t VALUES(1003, 'u'); PRAGMA locking_mode=normal; PRAGMA locking_mode
+ed1c839e457b97d9 db522b6b60fbd6a5 PRAGMA locking_mode=exclusive; PRAGMA journal_mode=wal; PRAGMA journal_mode=delete; PRAGMA locking_mode=normal
+f1279a990da7e9bd b70ecef994a9c303 SELECT * FROM pragma_locking_mode
+cf505ad97130fbd7 e3b0c44298fc1c14 PRAGMA mmap_size
+a43e16e87c48d4a6 e3b0c44298fc1c14 PRAGMA mmap_size=1048576
+b6df4584398ff1b0 7e89dc8ff005ead0 PRAGMA mmap_size=1048576; SELECT count(*), sum(a), max(b) FROM t
+1f822f5e6d9b6054 88b6e00e7ff827e7 PRAGMA mmap_size=1048576; SELECT a FROM t WHERE b > 'v5' ORDER BY b LIMIT 5
+27a5914e67199f0c 73475cb40a568e8d PRAGMA mmap_size=1048576; UPDATE t SET b = b || '?' WHERE a % 7 = 0; SELECT count(*) FROM t WHERE b LIKE '%?'
+cd4e0fc73bdf3915 56fd4db26deaece4 PRAGMA mmap_size=1048576; BEGIN; DELETE FROM t WHERE a > 50; SELECT count(*) FROM t; ROLLBACK; SELECT count(*) FROM t
+c0b71a78d95cb9c6 cca57e3a1243058b PRAGMA mmap_size=1048576; PRAGMA journal_mode=wal; INSERT INTO t SELECT a + 5000, b FROM t; PRAGMA wal_checkpoint(TRUNCATE); SELECT count(*) FROM t
+c98a9ad846940300 0f255ec16482c343 PRAGMA main.mmap_size=65536; PRAGMA mmap_size
+cf505ad97130fbd7 e3b0c44298fc1c14 PRAGMA mmap_size=-1
+0195d713795fa0f0 e3b0c44298fc1c14 PRAGMA mmap_size=99999999999999
+a43e16e87c48d4a6 e3b0c44298fc1c14 PRAGMA mmap_size=0x100000
+5ab62f521858eb70 e3b0c44298fc1c14 PRAGMA m.mmap_size
+5ab62f521858eb70 e3b0c44298fc1c14 PRAGMA m.mmap_size=4096
+bfbe5f71fd523d4f bfbe5f71fd523d4f PRAGMA temp.mmap_size
+710920edb8fb2cba 710920edb8fb2cba SELECT * FROM pragma_mmap_size
+----
+339f8ad0407547e3 caacfd63e8db4363 CREATE TABLE m.x(y); INSERT INTO m.x SELECT a FROM t; BEGIN; DELETE FROM m.x; ROLLBACK; SELECT count(*) FROM m.x
+339f8ad0407547e3 caacfd63e8db4363 CREATE TABLE m.x(y); BEGIN; INSERT INTO m.x VALUES(1); SAVEPOINT s; INSERT INTO m.x VALUES(2); ROLLBACK TO s; COMMIT; SELECT * FROM m.x
+339f8ad0407547e3 caacfd63e8db4363 CREATE TABLE m.x(y); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<3000) INSERT INTO m.x SELECT zeroblob(500) FROM c; PRAGMA m.cache_size=5; SELECT count(*), sum(length(y)) FROM m.x; PRAGMA m.integrity_check
+0ab7cb0dfa34b6b7 444dde1bbd749a1f CREATE TABLE e.x(y); INSERT INTO e.x VALUES(1); BEGIN; INSERT INTO e.x VALUES(2); ROLLBACK; SELECT * FROM e.x
+0ab7cb0dfa34b6b7 444dde1bbd749a1f CREATE TABLE e.x(y); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<3000) INSERT INTO e.x SELECT zeroblob(500) FROM c; BEGIN; DELETE FROM e.x; ROLLBACK; SELECT count(*), sum(length(y)) FROM e.x; PRAGMA e.integrity_check
+dfa9d8445ace3e20 e3b0c44298fc1c14 PRAGMA e.journal_mode
+af81b764fc0d638e e3b0c44298fc1c14 PRAGMA e.journal_mode=wal
+4fec6a74a5ae8f0c e3b0c44298fc1c14 PRAGMA e.journal_mode=memory
+a6aad99200c93a7b e3b0c44298fc1c14 PRAGMA e.journal_mode=persist
+80daadc9999bf5f8 e3b0c44298fc1c14 PRAGMA e.locking_mode
+80daadc9999bf5f8 e3b0c44298fc1c14 PRAGMA e.locking_mode=normal
+5ab62f521858eb70 e3b0c44298fc1c14 PRAGMA e.mmap_size
+6b78661be6a42eec 57ed8a447ed4dad8 CREATE TEMP TABLE tt(z); INSERT INTO tt VALUES(1); PRAGMA temp.journal_mode; PRAGMA temp.locking_mode; PRAGMA temp.mmap_size
+7ebd940860913846 e3b0c44298fc1c14 PRAGMA database_list

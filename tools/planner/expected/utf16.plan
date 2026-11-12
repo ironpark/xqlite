@@ -1,0 +1,93 @@
+# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+# the next block of the case file.
+e4da600f1f7e7c63 be2c674adbac4d93 SELECT a, b, hex(b) FROM t ORDER BY b
+e24571fac63ff758 be2c674adbac4d93 SELECT a, b FROM t ORDER BY b DESC
+1a1155246da66091 9dafb886aed987e6 SELECT a FROM t WHERE b > 'Z' ORDER BY b
+e867df1b64c1d347 c960c8270f996dc1 SELECT a FROM t WHERE b BETWEEN 'a' AND 'zz'
+451f06901da2d08f 9dafb886aed987e6 SELECT a FROM t WHERE b >= 'Ā'
+20d2458c340649da 2d3076492c32fed7 SELECT a, c FROM t ORDER BY c, a
+d71f2d25b30da4b2 796fc5ad56736eb2 SELECT a FROM t WHERE c = 'abc' ORDER BY a
+140a2a67effa5a28 5dc98353a5423145 SELECT a FROM t WHERE c > 'b' ORDER BY c
+b18b1219e37742fb c9c2db2e916c1dc4 SELECT a, d FROM t ORDER BY d, a
+b38f13ab50c40f4f 11f7e283509b854e SELECT a FROM t WHERE d = 'x' ORDER BY a
+53cbb2d904350450 763f144053882bd4 SELECT a FROM t WHERE lower(b) = 'abc'
+250af37869b4e984 f6852ad21275945b SELECT k, v FROM w ORDER BY k
+149f223009e17913 037c47b461db57e1 SELECT k FROM w WHERE k < 'a' ORDER BY k DESC
+9a8ffa682522c47f 8f97783108ee4caa SELECT min(b), max(b), min(c), max(c), min(d), max(d) FROM t
+f6389d39d1a32b5b 8f97783108ee4caa SELECT b, length(b), octet_length(b), hex(b), upper(b), lower(b), unicode(b) FROM t ORDER BY a
+96ba3216ac9153d8 8f97783108ee4caa SELECT substr(b, 2), substr(b, -2, 1), instr(b, 'l'), instr(b, x'6c00'), quote(b), replace(b, 'l', 'L') FROM t ORDER BY a
+3162322d0cce387f 8f97783108ee4caa SELECT b LIKE 'h%', b LIKE '%É%', b GLOB '*l*', b || '-' || a, a || b, trim(d), rtrim(d) FROM t ORDER BY a
+92c6c83def816117 be2c674adbac4d93 SELECT a FROM t WHERE b LIKE 'h%'
+339b54d4ec7aebd0 545199e7be1b2ceb SELECT a FROM t WHERE b GLOB 'a*' ORDER BY a
+9da1c345c480fe78 b7d2f5c08412dac0 SELECT a FROM t WHERE c LIKE 'a%' ORDER BY a
+938ae526fa0c642d 8f97783108ee4caa SELECT e, typeof(e), e + 0, CAST(e AS TEXT), hex(CAST(e AS TEXT)), CAST(e AS INTEGER), CAST(e AS REAL), CAST(e AS NUMERIC), quote(e) FROM t ORDER BY a
+605f3c7fdb13eef1 e1a8d6c43abd0bf4 SELECT CAST(x'6100620063' AS TEXT), hex(CAST('é' AS BLOB)), hex(x'00ff' || 'a'), '12' + 1, ' 3.5 ' * 2, '1.5é' + 0, CAST('12é' AS INTEGER)
+01dae4f0da16c490 8f97783108ee4caa SELECT printf('%s|%5s|%-3s|%q|%w', b, a, 'é', b, b), format('%.2f', e) FROM t ORDER BY a
+06e97364a9e2150b 8f97783108ee4caa SELECT json_object('b', b, 'a', a), json_array(b, c), json_quote(b), json_extract(json_object('k', b), '$.k') FROM t ORDER BY a
+4db822275c61188e ac2b79f9fe6d7702 SELECT key, value, type, fullkey FROM json_each('{"é":"ü","n":[1,"😀"]}')
+bb919990c170e258 d38ffeae3ab9531c SELECT group_concat(b, '·'), string_agg(c, ',') FROM (SELECT * FROM t ORDER BY a)
+b83501cf06aca7af 6607f0a84872a689 SELECT a, b, row_number() OVER (ORDER BY b), first_value(b) OVER (ORDER BY a), lag(c) OVER (ORDER BY a), max(c) OVER (ORDER BY a ROWS 2 PRECEDING) FROM t ORDER BY a
+ea626433b45bd5d8 2d3076492c32fed7 SELECT DISTINCT c FROM t ORDER BY c
+22496e8e751e0eb6 f23ed58f96afef15 SELECT c, count(*) FROM t GROUP BY c ORDER BY 2 DESC, 1
+58bf7f34de5e3944 7ee9c411d3d6a50a SELECT b FROM t UNION SELECT c FROM t ORDER BY 1
+506c4da1cf36e9b6 d1a221163cb238b1 SELECT b FROM t INTERSECT SELECT 'abc'
+b1fb44ea10d5ff21 9c9ed28a1fc63ad6 SELECT b FROM t EXCEPT SELECT 'abc' ORDER BY 1
+751a4e6dd4b33eae e1a8d6c43abd0bf4 SELECT 'é' < 'z', 'Ā' < 'a', '😀' < '', 'abc' = 'ABC' COLLATE NOCASE, 'x ' = 'x' COLLATE RTRIM, 'Ā' < 'a' COLLATE NOCASE
+75153d3597ae8046 3e1ecd4240ce748f SELECT a FROM t WHERE b IN ('abc', 'héllo', 'Zé') ORDER BY a
+2733669c04e355dc cf44a674b1d71022 SELECT a FROM t WHERE b IN (SELECT c FROM t) ORDER BY a
+3dbc7e927aea47be 3dbc7e927aea47be SELECT char(233, 128512), hex(char(233)), unhex('6100'), concat('a', 'é', 3), concat_ws('-', 'é', 'ü'), soundex('Robert'), iif(1, 'yes', 'no')
+386af8c80c8f3dc4 e1a8d6c43abd0bf4 SELECT date('2024-01-02'), datetime('2024-01-02 03:04:05', '+1 day'), strftime('%Y/%m', '2024-05-06'), julianday('2024-01-01')
+9138741dd12a3498 9cdafca725c07f82 SELECT name, type, dflt_value FROM pragma_table_info('t')
+a00c1e3934857350 5789799e18157557 SELECT name FROM pragma_index_list('t') ORDER BY name
+003532b8ee1cade3 82c8ddad900d6e73 SELECT sql FROM sqlite_schema ORDER BY name
+145bbadf3cf37ef6 e3b0c44298fc1c14 PRAGMA encoding
+270be68e9eaa3f60 e3b0c44298fc1c14 INSERT INTO t(b, c) VALUES ('nëw', 'NËW') RETURNING a, b, hex(b), c
+d74b7f2691a793cd 6b3c51fa99a558f1 UPDATE t SET b = b || 'ñ' WHERE a < 3 RETURNING a, b, hex(b)
+002a67c1b802b44a d868fed4cf6c8a6e DELETE FROM t WHERE b = 'abc' RETURNING a
+8cfd9d9e9c21863a e3b0c44298fc1c14 INSERT INTO w VALUES ('Zé', 0) ON CONFLICT(k) DO UPDATE SET v = excluded.v || 'é' RETURNING k, v
+db170462490ddd98 e3b0c44298fc1c14 REPLACE INTO w VALUES ('a', 'r')
+03744e844a329492 e3b0c44298fc1c14 ALTER TABLE t ADD COLUMN f TEXT DEFAULT 'défaut'
+037123b45339fd1a e3b0c44298fc1c14 ALTER TABLE t RENAME COLUMN c TO cé
+0ea9d29d795ae411 be2c674adbac4d93 CREATE TABLE n AS SELECT b, upper(b) AS u FROM t
+3b0bb5522ec4e9a3 a11561641fe00712 CREATE VIEW v AS SELECT b, 'vé' AS k FROM t WHERE a < 5; SELECT * FROM v ORDER BY b
+79c9414f27d9a67d e3b0c44298fc1c14 CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO w VALUES (new.b || '·t', 'trig'); END; INSERT INTO t(b) VALUES ('trigé'); SELECT k, v FROM w WHERE v = 'trig'
+dd0666a6490627e3 68548706601d52c6 ANALYZE; SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY tbl, idx
+ecae417e0b46dce0 e3b0c44298fc1c14 VACUUM
+f26fab31b6d966c0 e3b0c44298fc1c14 REINDEX tb
+458c94bde973b8a9 e3b0c44298fc1c14 REINDEX w
+623370865a5306d8 e3b0c44298fc1c14 REINDEX te
+----
+c1255426d88d4007 be2c674adbac4d93 SELECT a, b, hex(b) FROM t ORDER BY b
+9620427cf85305a1 9dafb886aed987e6 SELECT a FROM t WHERE b > 'Z' ORDER BY b
+c3ccbd20121bbf4f 2d3076492c32fed7 SELECT a, c FROM t ORDER BY c, a
+afbb25d48b54b21e f6852ad21275945b SELECT k, v FROM w ORDER BY k DESC
+2784bdd99fead163 8f97783108ee4caa SELECT b, length(b), octet_length(b), hex(b), upper(b), substr(b, 2), instr(b, 'l') FROM t ORDER BY a
+c352bf4302412248 be2c674adbac4d93 SELECT min(b), max(b), group_concat(b) FROM t
+afeef5e45f5ffc28 be2c674adbac4d93 SELECT a FROM t WHERE b LIKE 'h%'
+ebfb20ccc920ac93 e1a8d6c43abd0bf4 SELECT CAST(x'00610062' AS TEXT), hex(CAST('é' AS BLOB)), '12' + 1
+d6faa26d0592534e 7ee9c411d3d6a50a SELECT b FROM t UNION SELECT c FROM t ORDER BY 1
+808bd8bd9701c7d8 e3b0c44298fc1c14 PRAGMA encoding
+16e3712ada86d250 e3b0c44298fc1c14 INSERT INTO t(b, c) VALUES ('nëw', 'NËW') RETURNING a, b, hex(b), c
+----
+145bbadf3cf37ef6 e3b0c44298fc1c14 PRAGMA encoding
+5248ea430d377779 3919fafd4b054f18 SELECT a, hex(a) FROM t ORDER BY a
+133de880a44a3f24 e082bc5865778349 PRAGMA encoding = 'UTF-8'; PRAGMA encoding
+----
+12593d9b5baeba79 3ad3031f5503a440 PRAGMA encoding = 'UTF-16le'; PRAGMA encoding
+2ab425b86c102773 2ab425b86c102773 PRAGMA encoding = 'bogus'
+b1a38646ad2518e7 8b1df81035e454d6 SELECT 1; PRAGMA encoding = 'UTF16be'; PRAGMA encoding
+----
+02d577f7b6a26b40 8f97783108ee4caa SELECT b, f, hex(f), g, h, typeof(h), CAST(h AS TEXT) FROM t
+e2a176f5a12a0aa8 8f97783108ee4caa SELECT a FROM t WHERE f = 'défaut'
+912a922c65599427 e3449e74df189bf7 SELECT k, v FROM s WHERE k = 'ab' COLLATE NOCASE ORDER BY v
+f977b55721a083cd 0ec21bbde2a16f35 SELECT k FROM s ORDER BY k COLLATE NOCASE, v
+439262e26c3c5c88 2f6753d5c940ff54 SELECT k, count(*) FROM s GROUP BY k COLLATE NOCASE ORDER BY 1
+798602e3d05510d3 686c397f139c6dab SELECT max(k COLLATE NOCASE), min(k) FROM s
+efbdca3af0e07a22 50a530d0d9868448 SELECT k FROM s WHERE k LIKE 'a%' ORDER BY v
+f6322a80dfb8a143 e971d14dec84c601 SELECT k FROM s WHERE k LIKE 'é%' ORDER BY v
+b2ae21920ae96bc8 e971d14dec84c601 SELECT k FROM s WHERE k GLOB '[a-c]*' ORDER BY v
+491a62dd2f9042b0 e971d14dec84c601 SELECT * FROM s WHERE k > 'a' AND k < 'c' ORDER BY k
+4a208c7bb20ad2b2 688e6a6046a79e7a SELECT group_concat(DISTINCT k) FROM s
+5c62dbe15674f5f0 e971d14dec84c601 SELECT k FROM s WHERE k IN ('ab', 'b', 'é') ORDER BY v
+d78f34c4af9c3a7a 270fccf40ffb0a09 SELECT k, rank() OVER (ORDER BY k COLLATE NOCASE) FROM s ORDER BY v

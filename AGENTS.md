@@ -12,7 +12,15 @@
 
 ## 지켜야 할 것
 
-- **SQLite 방언은 그대로**: SQLite 방언의 바이트코드와 파일 형식은 SQLite(3.54.1)와 같아야 합니다. 오류 문구와 위치, `sqlite_schema`에 저장되는 텍스트도 같습니다. 코어의 타입 계층은 SQLite 방언에서 꺼져 있습니다(`typing.active(db)`가 false).
+- **SQLite 방언은 결과가 같아야 함**: SQLite 방언이 SQLite(3.54.1)와 같아야 하는 것은 다음입니다.
+  - 파일 형식(레코드와 인덱스 키의 인코딩, collation, 저널·WAL)과 `sqlite_schema`에 저장되는 텍스트. 한 데이터베이스를 두 엔진이 번갈아 읽고 씁니다.
+  - 실행 결과: 값과 타입, 오류 문구와 위치, 여러 제약 중 어느 위반이 먼저 보고되는지, 트리거 순서, `changes()`·`last_insert_rowid()` 같은 부수 효과.
+  - sqlite3 C ABI와 확장(가상 테이블의 `xBestIndex` 계약 포함).
+  - `ORDER BY`가 없는 결과의 행 순서도 지금은 같게 둡니다. 실행 계획을 바꾸는 작업에서 케이스별로 풉니다.
+  - 코어의 타입 계층은 SQLite 방언에서 꺼져 있습니다(`typing.active(db)`가 false).
+- **바이트코드와 실행 계획은 같지 않아도 됨**: 처음에는 포팅의 오류를 잡으려고 바이트코드(레지스터 번호, 라벨과 opcode의 순서)까지 SQLite와 맞췄습니다. 이제는 목표가 아닙니다. 코드 생성과 VDBE는 C의 구조를 따르지 않고 Zig답게 고쳐도 됩니다. 그래서 `EXPLAIN`의 내용, `bytecode()` 가상 테이블, `sqlite3_stmt_status()`의 카운터(`VM_STEP`, `FULLSCAN_STEP`, `SORT` ...)는 SQLite와 달라질 수 있고, API와 형식만 유지합니다.
+  - 대신 바뀐 것은 기록에 남깁니다. `xqt planner`는 `EXPLAIN`과 `EXPLAIN QUERY PLAN`을 xqlite 자신의 기록(`tools/planner/expected/*.plan`)과 비교합니다. 바이트코드를 바꾸지 않는 리팩터링은 기록이 그대로 통과해야 합니다.
+  - 의도해서 바꿨으면 바꾸기 전 빌드와 비교해(`xqt planner --base 예전-xqlite -v`) 달라진 것이 의도한 것뿐인지 본 뒤 `xqt planner --record`로 기록을 갱신하고, 무엇이 왜 달라졌는지 커밋 메시지에 씁니다.
 - **스키마에 저장되는 엔진 함수의 의미는 바꾸지 않음**: CHECK, DEFAULT, 생성 열, 식 인덱스, 뷰가 부르는 `xq_*` 함수, collation, 정렬 키 인코딩이 여기에 해당합니다.
   - 식 인덱스와 STORED 생성 열은 결과를 디스크에 남깁니다. 의미가 바뀌면 xqlite끼리도, xqlite와 sqlite3 + 확장 사이에서도 인덱스가 깨집니다.
   - 동작을 바꿔야 하면 새 이름을 쓰고 확장의 ABI 버전을 올립니다([docs/extension.md](docs/extension.md)).

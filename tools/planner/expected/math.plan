@@ -1,0 +1,38 @@
+# xqt planner --record: per query, the SHA-256 (16 hex digits) of xqlite's
+# EXPLAIN and of its EXPLAIN QUERY PLAN, then the query. "----" starts
+# the next block of the case file.
+3d3bbe18c5b6af7d 00d31e4e032db1e0 SELECT id, ceil(x), ceiling(x), floor(x), trunc(x), typeof(ceil(x)), typeof(trunc(x)) FROM n
+7f9e43d390e4ea08 00d31e4e032db1e0 SELECT id, ln(x), printf('%.12g', log(x)), printf('%.12g', log10(x)), printf('%.12g', log2(x)), typeof(ln(x)), typeof(log2(x)) FROM n
+f21a93ebdce9b554 00d31e4e032db1e0 SELECT id, exp(x), sqrt(x), radians(x), degrees(x) FROM n
+865a75fd127f7d3c 00d31e4e032db1e0 SELECT id, printf('%.12g', sin(x)), printf('%.12g', cos(x)), printf('%.12g', tan(x)), typeof(sin(x)) FROM n
+afcb9cf9a5b2be74 00d31e4e032db1e0 SELECT id, printf('%.12g', asin(x)), printf('%.12g', acos(x)), printf('%.12g', atan(x)), typeof(asin(x)) FROM n
+ae61ee41a5639986 00d31e4e032db1e0 SELECT id, printf('%.12g', sinh(x)), printf('%.12g', cosh(x)), printf('%.12g', tanh(x)), typeof(cosh(x)) FROM n
+1b7326f6af773181 00d31e4e032db1e0 SELECT id, printf('%.12g', asinh(x)), printf('%.12g', acosh(x)), printf('%.12g', atanh(x)), typeof(atanh(x)) FROM n
+52cf2818a025191c 622c40c3b2730dc5 SELECT rowid, pow(a, b), power(a, b), mod(a, b), printf('%.12g', atan2(a, b)), log(a, b), typeof(mod(a, b)), typeof(atan2(a, b)) FROM p
+d28ca185149e80d8 00d31e4e032db1e0 SELECT quote(ceil(x)), quote(floor(x)), quote(trunc(x)), quote(sqrt(x)) FROM n
+604d19c614180e31 622c40c3b2730dc5 SELECT quote(pow(a, b)), quote(mod(a, b)) FROM p
+c5d36b632a41a11e e1a8d6c43abd0bf4 SELECT quote(pi()), typeof(pi()), quote(exp(0)), quote(ln(1)), quote(log(1000)), quote(log2(1024)), quote(log(2, 1024)), quote(sin(0)), quote(cos(0)), quote(atan2(0, -1)), quote(acos(-1)), quote(degrees(pi())), quote(radians(180))
+618a24af4a6c1fae e1a8d6c43abd0bf4 SELECT ceil(-0.5), quote(ceil(-0.5)), floor(-0.0), trunc(-0.7), ceil(9223372036854775807), floor(-9223372036854775808), ceil(1e300), trunc('-12'), floor(' 7 ')
+fe8fb49b7adb3f28 e1a8d6c43abd0bf4 SELECT sqrt(-1), ln(0), log(-1), log10(0), log2(-0.0), acos(2), asin(-2), acosh(0.5), atanh(1.5), mod(5, 0), pow(-8, 1.0/3), pow(0, -1), exp(1000), exp(-1000)
+a4bea81afcfe13a5 e1a8d6c43abd0bf4 SELECT log(2, 'x'), log('x', 8), log(1, 8), log(0.5, 8), log(2, x'38'), log(x'32', 8), log(2, NULL), log(NULL, 2)
+57896d126fb9a426 efe48eab10d50723 SELECT pi(1)
+a2b5d8b718103342 865ca6bd9d71bcbd SELECT ceil()
+25a4bf3910dc47be c0f9005ecf09e3e5 SELECT log(1, 2, 3)
+4b6cef9ba8bc3620 e19e630d086c23d0 SELECT mod(1)
+785f67c57de309f0 8cbd4c341a9897e3 SELECT nosuchmath(1)
+56753210b8a9ddeb b07e4cfbecb29000 SELECT name, builtin, type, enc, narg, flags FROM pragma_function_list WHERE name IN ('ceil', 'ceiling', 'floor', 'trunc', 'ln', 'log', 'log10', 'log2', 'exp', 'pow', 'power', 'mod', 'acos', 'asin', 'atan', 'atan2', 'cos', 'sin', 'tan', 'cosh', 'sinh', 'tanh', 'acosh', 'asinh', 'atanh', 'sqrt', 'radians', 'degrees', 'pi') ORDER BY name, narg
+af900e1f7fcc4237 e1397d076088bd63 SELECT x, ceil(2.5) + floor(x), pi() * x, sqrt(16) FROM n WHERE id < 5
+eaea359546d57767 00d31e4e032db1e0 SELECT x FROM n WHERE sqrt(x) > 1 AND typeof(x) = 'integer'
+7ef9efea05f9a74b 3cb4f893575e4e19 SELECT x FROM n WHERE x > exp(2) ORDER BY ln(x)
+0c3bcf0d19904631 00d31e4e032db1e0 SELECT max(sin(x)), min(cos(x)), sum(ceil(x)), avg(floor(x)) FROM n WHERE typeof(x) IN ('integer', 'real')
+f16311a9af4a9a62 5819a3bc2d52c300 SELECT x, l, s FROM g
+41604bc5febd1f00 efe5f15df74d74af SELECT x FROM g WHERE trunc(x * 10) = 20
+c160384fec321279 30b4c9d2401b098e SELECT x FROM g WHERE ln(x) > 1 AND x > 0
+6d48ecc24f86e99e 5819a3bc2d52c300 SELECT * FROM v
+1cc4955b26626fcd 4846d469660f06b4 SELECT x FROM g ORDER BY trunc(x * 10) DESC
+063826c6ad518b94 5dbf6ecc2a7e69a5 INSERT INTO g(x) VALUES (64), (0.25)
+385c4709291288cb 5819a3bc2d52c300 UPDATE g SET x = x * 2 WHERE ceil(x) = 2
+46d74da0a44804e4 5819a3bc2d52c300 DELETE FROM g WHERE log2(x) IS NULL
+04b750d885e68284 e3b0c44298fc1c14 INSERT INTO g(x) VALUES (-1)
+66ee27e152a2c5c5 00d31e4e032db1e0 SELECT CASE WHEN sign(x) < 0 THEN abs(x) ELSE sqrt(x) END FROM n WHERE typeof(x) = 'real'
+54a40039abb9597e 773cfceceaf40413 SELECT exp(ln(x)), pow(x, 2), x * x FROM n WHERE id BETWEEN 2 AND 9

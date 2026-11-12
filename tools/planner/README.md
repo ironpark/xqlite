@@ -1,12 +1,29 @@
 # 쿼리 플래너 차등 테스트
 
-같은 데이터베이스에서 같은 SQL을 xqlite와 sqlite3 3.54.1로 실행해 세 가지를 비교합니다.
+같은 데이터베이스에서 같은 SQL을 실행해 세 가지를 비교합니다.
 
-- `res`: 쿼리 결과. DML이면 실행 뒤 `.dump`와 `PRAGMA integrity_check` 결과까지 비교합니다.
-- `eqp`: `EXPLAIN QUERY PLAN` 트리
-- `code`: `EXPLAIN` 바이트코드(addr, opcode, p1~p5). 트리거 서브프로그램은 xqlite의 EXPLAIN이 아직 나열하지 않으므로 메인 프로그램만 비교합니다.
+- `res`: 쿼리 결과를 sqlite3 3.54.1과 비교합니다. DML이면 실행 뒤 `.dump`와 `PRAGMA integrity_check` 결과까지 비교합니다.
+- `eqp`: `EXPLAIN QUERY PLAN` 트리를 xqlite의 기록과 비교합니다.
+- `code`: `EXPLAIN` 바이트코드(addr, opcode, p1~p5)를 xqlite의 기록과 비교합니다. 트리거 서브프로그램은 xqlite의 EXPLAIN이 아직 나열하지 않으므로 메인 프로그램만 봅니다.
 
-플래너는 C 코드를 그대로 옮긴 포팅이라 바이트코드까지 같아야 합니다.
+실행 계획과 바이트코드는 SQLite와 같지 않아도 됩니다([AGENTS.md](../../AGENTS.md#지켜야-할-것)). 대신 달라진 것은 누군가 의도하고 확인한 것이어야 하므로 기록과 비교합니다. 기록을 만든 시점(v0.0.4)에는 모든 케이스의 실행 계획과 바이트코드가 sqlite3와 같았습니다.
+
+## 기록
+
+`tools/planner/expected/NAME.plan`이 `NAME.txt`의 기록입니다. 쿼리마다 한 줄에 `EXPLAIN`의 SHA-256(16진수 16자리), `EXPLAIN QUERY PLAN`의 SHA-256, 쿼리가 있고, `----` 줄이 블록을 나눕니다. 텍스트 전체가 아니라 해시를 두는 것은 크기 때문입니다.
+
+- 기록과 다르면 `FAIL[code]`나 `FAIL[eqp]`입니다. 케이스 파일의 쿼리가 기록과 다르면 `STALE RECORDING`, 기록이 없으면 `NOT RECORDED`로 실패합니다.
+- 해시로는 무엇이 달라졌는지 볼 수 없습니다. 바꾸기 전의 xqlite를 따로 빌드해 두고 `--base`로 비교하면 달라진 쿼리와 diff가 나옵니다.
+
+  ```sh
+  git stash && zig build -p /tmp/xq-base && git stash pop      # 바꾸기 전 빌드
+  zig build tools
+  zig-out/bin/xqt planner --base /tmp/xq-base/bin/xqlite -k code,eqp -v
+  zig-out/bin/xqt planner --record                             # 확인한 뒤 기록 갱신
+  ```
+
+- `--vs-sqlite`는 예전처럼 실행 계획과 바이트코드를 sqlite3와 비교합니다. SQLite와 얼마나 달라졌는지 볼 때 씁니다.
+- 기준 셸이 셋업을 `.testctrl prng_seed 1`로 돌리므로 `random()`·`randomblob()`을 쓰는 셋업도 실행마다 같은 데이터베이스를 만듭니다. 실행 디렉터리의 경로는 `DIR`로 바꿔서 해시합니다.
 
 다른 테스트 도구는 [테스트와 검증](../../docs/testing.md)에 정리되어 있습니다.
 
@@ -24,7 +41,7 @@ zig-out/bin/xqt planner     # vtablog.txt를 뺀 전부
 zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt && zig-out/bin/xqt planner /tmp/c1.txt
 ```
 
-- `xqt planner`는 파일마다 실패한 쿼리를 `FAIL[종류] block N: 쿼리`로, 마지막에 `N queries; failures: code=…, eqp=…, res=…`를 출력합니다. `-k res,eqp,code`로 비교할 것을 고르고, `-v`는 다른 부분을 보여 줍니다(바이트코드는 unified diff). 블록의 셋업을 모두 병렬로 만든 뒤, 쿼리를 블록 안에서도 8개씩 나눠 각자 블록 디렉터리의 사본에서 병렬로 돌립니다. 엔진은 쿼리마다 60초가 지나면 `TIMEOUT`이 됩니다.
+- `xqt planner`는 파일마다 실패한 쿼리를 `FAIL[종류] block N: 쿼리`로, 마지막에 `N queries; failures: code=…, eqp=…, res=…`를 출력합니다. `-k res,eqp,code`로 비교할 것을 고르고, `-v`는 다른 부분을 보여 줍니다(`--base`·`--vs-sqlite`의 바이트코드는 unified diff, 기록과 비교할 때는 지금의 출력). 블록의 셋업을 모두 병렬로 만든 뒤, 쿼리를 블록 안에서도 8개씩 나눠 각자 블록 디렉터리의 사본에서 병렬로 돌립니다. 엔진은 쿼리마다 60초가 지나면 `TIMEOUT`이 됩니다.
 - `--known FILE`은 알려진 차이의 목록(`known-failures.list`, 줄마다 `케이스파일 종류 쿼리`)입니다. 항목 하나는 실패 하나와 정확히 맞아야 합니다. 목록에 있는 실패는 `KNOWN`으로 출력하고 종료 코드에 넣지 않으며, 다시 같아진 항목은 `FIXED`로 실패하고, 목록에 없는 실패는 모두 실패입니다. `zig build check`가 이 목록을 씁니다.
 - 케이스 파일은 `----` 줄로 블록을 나눕니다. 블록마다 `==` 줄 앞은 스키마와 데이터(기준 셸로 한 번 만들어 둠), 뒤는 한 줄에 쿼리 하나입니다.
 - `vtab.txt`는 가상 테이블 케이스입니다. 두 엔진에 다 있는 모듈만 씁니다: `pragma_*` 테이블 값 함수(`sqlite_schema`와 조인, 숨은 열 제약, ORDER BY, LIMIT), 셸이 등록하는 `generate_series`, `bytecode()`/`tables_used()`, `sqlite_schema`에 써 넣은 가상 테이블(xConnect, DDL)과 오류("no such module", "may not be modified" 등). 일부는 SQLite TCL 테스트(`tabfunc01.test`, `pragma5.test` 등)에서 뽑았습니다.

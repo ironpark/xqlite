@@ -33,6 +33,11 @@ const TK = int.TK;
 const WHERE = int.WHERE;
 const OP = vi.OP;
 const Vdbe = vi.Vdbe;
+const Reg = aux.operand.Reg;
+const Cursor = aux.operand.Cursor;
+const Label = aux.operand.Label;
+const Addr = aux.operand.Addr;
+const Jump = aux.operand.Jump;
 const Writer = std.Io.Writer;
 const WhereInfo = wi.WhereInfo;
 const WhereLevel = wi.WhereLevel;
@@ -192,7 +197,7 @@ pub fn explainOneScan(p: *Parse, tab_list: *SrcList, level: *WhereLevel, wctrl_f
         if (!loop.ws_flags.MULTI_OR and !wctrl_flags.OR_SUBCLAUSE) {
             const v = p.vdbe.?;
             const addr = aux.currentAddr(v);
-            ret = aux.addOp3(v, OP.Explain, addr, p.addr_explain, loop.r_run);
+            ret = aux.emit(v, .Explain, .{ addr, p.addr_explain, loop.r_run }).int();
             try addExplainText(p, addr, tab_list, level, wctrl_flags);
         }
     }
@@ -228,9 +233,9 @@ pub fn explainBloomFilter(p: *Parse, w: *WhereInfo, level: *WhereLevel) Oom!i32 
     defer out.deinit();
     explainBloomText(&out.writer, item, level.w_loop.?) catch return error.OutOfMemory;
     const msg = try out.toOwnedSliceSentinel(0);
-    const ret = aux.addOp4(v, OP.Explain, aux.currentAddr(v), p.addr_explain, 0, .{ .z = msg });
+    const ret = aux.emit4(v, .Explain, .{ aux.currentAddr(v), p.addr_explain }, .{ .z = msg });
     aux.scanStatus(v, aux.currentAddr(v) - 1, 0, 0, 0, null);
-    return ret;
+    return ret.int();
 }
 
 /// Port of sqlite3WhereAddScanStatus(): the sqlite3_stmt_scanstatus()
@@ -292,7 +297,7 @@ fn disableTerm(level: *const WhereLevel, term_arg: *WhereTerm) void {
 
 /// Port of codeApplyAffinity(): OP_Affinity for registers base..base+n-1,
 /// skipping BLOB/NONE affinities at either end.
-fn codeApplyAffinity(p: *Parse, base_arg: i32, n_arg: i32, z_aff_arg: ?[]u8) void {
+fn codeApplyAffinity(p: *Parse, base_arg: Reg, n_arg: i32, z_aff_arg: ?[]u8) void {
     const v = p.vdbe.?;
     var z_aff = z_aff_arg orelse {
         std.debug.assert(p.db.malloc_failed);
@@ -302,11 +307,11 @@ fn codeApplyAffinity(p: *Parse, base_arg: i32, n_arg: i32, z_aff_arg: ?[]u8) voi
     var n = n_arg;
     while (n > 0 and z_aff[0] <= Aff.blob) {
         n -= 1;
-        base += 1;
+        base = base.at(1);
         z_aff = z_aff[1..];
     }
     while (n > 1 and z_aff[@intCast(n - 1)] <= Aff.blob) n -= 1;
-    if (n > 0) _ = aux.addOp4Str(v, OP.Affinity, base, n, 0, z_aff[0..@intCast(n)]);
+    if (n > 0) _ = aux.emitStr(v, .Affinity, .{ base, n }, z_aff[0..@intCast(n)]);
 }
 
 /// Port of updateRangeAffinityStr(): set to BLOB the entries of `z_aff`
@@ -390,8 +395,8 @@ fn removeUnindexableInClauseTerms(p: *Parse, i_eq: usize, loop: *WhereLoop, x: *
 }
 
 /// Port of codeINTerm(): code an X IN (...) term of loop `level`: set up
-/// a loop over the values of X, the current one in register i_target.
-fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_rev_arg: bool, i_target: i32) Oom!void {
+/// a loop over the values of X, the current one in register `target`.
+fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_rev_arg: bool, target: Reg) Oom!void {
     const x = term.expr;
     var e_type: ec.IN_INDEX = .NOOP;
     var i_tab: i32 = 0;
@@ -435,11 +440,12 @@ fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_re
     }
 
     if (e_type == .INDEX_DESC) b_rev = !b_rev;
-    _ = aux.addOp2(v, if (b_rev) OP.Last else OP.Rewind, i_tab, 0);
+    const tab: Cursor = .from(i_tab);
+    _ = aux.emitAny(v, if (b_rev) OP.Last else OP.Rewind, .{ .cursor, .jump, .int }, .{ tab, 0 });
 
     std.debug.assert(!loop.ws_flags.MULTI_OR);
     loop.ws_flags.IN_ABLE = true;
-    if (level.in_loops.len == 0) level.addr_nxt = aux.makeLabel(p);
+    if (level.in_loops.len == 0) level.addr_nxt = aux.newLabel(p).int();
     if (i_eq > 0 and !loop.ws_flags.IN_SEEKSCAN) loop.ws_flags.IN_EARLYOUT = true;
 
     const n_old = level.in_loops.len;
@@ -451,23 +457,23 @@ fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_re
     while (i < loop.n_lterm) : (i += 1) {
         if (loop.a_lterm[i].?.expr != x) continue;
         const in = &level.in_loops[i_in];
-        const i_out = i_target + @as(i32, @intCast(i - i_eq));
+        const out = target.at(i - i_eq);
         if (e_type == .ROWID) {
-            in.addr_in_top = aux.addOp2(v, OP.Rowid, i_tab, i_out);
+            in.addr_in_top = aux.emit(v, .Rowid, .{ tab, out }).int();
         } else {
             var i_col: i32 = 0;
             if (ai_map) |m| {
                 i_col = m[i_map];
                 i_map += 1;
             }
-            in.addr_in_top = aux.addOp3(v, OP.Column, i_tab, i_col, i_out);
+            in.addr_in_top = aux.emit(v, .Column, .{ tab, i_col, out }).int();
         }
-        _ = aux.addOp1(v, OP.IsNull, i_out);
+        _ = aux.emit(v, .IsNull, .{out});
         if (i == i_eq) {
-            in.i_cur = i_tab;
+            in.i_cur = tab.int();
             in.e_end_loop_op = if (b_rev) OP.Prev else OP.Next;
             if (i_eq > 0) {
-                in.i_base = i_target - @as(i32, @intCast(i));
+                in.i_base = target.int() - @as(i32, @intCast(i));
                 in.n_prefix = @intCast(i);
             } else {
                 in.n_prefix = 0;
@@ -478,34 +484,34 @@ fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_re
         i_in += 1;
     }
     if (i_eq > 0 and !loop.ws_flags.intersects(.{ .IN_SEEKSCAN = true, .VIRTUALTABLE = true })) {
-        _ = aux.addOp3(v, OP.SeekHit, level.i_idx_cur, 0, @intCast(i_eq));
+        _ = aux.emit(v, .SeekHit, .{ Cursor.from(level.i_idx_cur), 0, i_eq });
     }
 }
 
 /// Port of codeEqualityTerm(): code an == or IN term; the register
-/// holding its current value is returned (i_target is only guaranteed
+/// holding its current value is returned (`target` is only guaranteed
 /// for ISNULL and IN).
-fn codeEqualityTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_rev: bool, i_target: i32) Oom!i32 {
+fn codeEqualityTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_rev: bool, target: Reg) Oom!Reg {
     const x = term.expr;
-    var i_reg: i32 = undefined;
+    var reg: Reg = undefined;
     std.debug.assert(level.w_loop.?.a_lterm[i_eq] == term);
-    std.debug.assert(i_target > 0);
+    std.debug.assert(target.int() > 0);
     if (x.op == TK.EQ or x.op == TK.IS) {
-        i_reg = ec.codeTarget(p, x.right, i_target);
+        reg = .from(ec.codeTarget(p, x.right, target.int()));
     } else if (x.op == TK.ISNULL) {
-        i_reg = i_target;
-        _ = aux.addOp2(p.vdbe.?, OP.Null, 0, i_reg);
+        reg = target;
+        _ = aux.emit(p.vdbe.?, .Null, .{ 0, reg });
     } else {
         std.debug.assert(x.op == TK.IN);
-        i_reg = i_target;
-        try codeINTerm(p, term, level, i_eq, b_rev, i_target);
+        reg = target;
+        try codeINTerm(p, term, level, i_eq, b_rev, target);
     }
     // The term driving the index is always true, so disable it, unless it
     // is a transitive constraint (forum post eb8613976a).
     if (!level.w_loop.?.ws_flags.TRANSCONS or term.e_operator & WO.EQUIV == 0) {
         disableTerm(level, term);
     }
-    return i_reg;
+    return reg;
 }
 
 /// Port of codeAllEqualityTerms(): code the == and IN constraints of an
@@ -513,7 +519,7 @@ fn codeEqualityTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize
 /// range constraint), returning the first. `z_aff_out` receives a copy of
 /// the index affinity string with entries that need no conversion set
 /// to BLOB.
-fn codeAllEqualityTerms(p: *Parse, level: *WhereLevel, b_rev: bool, n_extra_reg: i32, z_aff_out: *?[:0]u8) Oom!i32 {
+fn codeAllEqualityTerms(p: *Parse, level: *WhereLevel, b_rev: bool, n_extra_reg: i32, z_aff_out: *?[:0]u8) Oom!Reg {
     const v = p.vdbe.?;
     const loop = level.w_loop.?;
     std.debug.assert(!loop.ws_flags.VIRTUALTABLE);
@@ -521,7 +527,7 @@ fn codeAllEqualityTerms(p: *Parse, level: *WhereLevel, b_rev: bool, n_extra_reg:
     const n_skip: usize = loop.n_skip;
     const idx = loop.btree.index.?;
 
-    const reg_base = p.n_mem + 1;
+    const reg_base: Reg = .from(p.n_mem + 1);
     const n_reg = @as(i32, @intCast(n_eq)) + n_extra_reg;
     p.n_mem += n_reg;
 
@@ -530,17 +536,18 @@ fn codeAllEqualityTerms(p: *Parse, level: *WhereLevel, b_rev: bool, n_extra_reg:
     std.debug.assert(z_aff != null or p.db.malloc_failed);
 
     if (n_skip != 0) {
-        const i_idx_cur = level.i_idx_cur;
+        const idx_cur: Cursor = .from(level.i_idx_cur);
         const ns: i32 = @intCast(n_skip);
-        _ = aux.addOp3(v, OP.Null, 0, reg_base, reg_base + ns - 1);
-        _ = aux.addOp1(v, if (b_rev) OP.Last else OP.Rewind, i_idx_cur);
-        const j = aux.addOp0(v, OP.Goto);
+        _ = aux.emit(v, .Null, .{ 0, reg_base, reg_base.at(ns - 1) });
+        _ = aux.emitAny(v, if (b_rev) OP.Last else OP.Rewind, .{ .cursor, .jump, .int }, .{idx_cur});
+        const j = aux.emit(v, .Goto, .{});
         std.debug.assert(level.addr_skip == 0);
-        level.addr_skip = aux.addOp4Int(v, if (b_rev) OP.SeekLT else OP.SeekGT, i_idx_cur, 0, reg_base, ns);
-        aux.jumpHere(v, j);
+        const skip = aux.emitAny(v, if (b_rev) OP.SeekLT else OP.SeekGT, .{ .cursor, .jump, .reg }, .{ idx_cur, 0, reg_base });
+        aux.changeP4(v, skip.int(), .{ .int32 = ns });
+        level.addr_skip = skip.int();
+        aux.landHere(v, j);
         for (0..n_skip) |jj| {
-            const r: i32 = @intCast(jj);
-            _ = aux.addOp3(v, OP.Column, i_idx_cur, r, reg_base + r);
+            _ = aux.emit(v, .Column, .{ idx_cur, jj, reg_base.at(jj) });
         }
     }
 
@@ -548,9 +555,9 @@ fn codeAllEqualityTerms(p: *Parse, level: *WhereLevel, b_rev: bool, n_extra_reg:
     var j = n_skip;
     while (j < n_eq) : (j += 1) {
         const term = loop.a_lterm[j].?;
-        const reg_j = reg_base + @as(i32, @intCast(j));
+        const reg_j = reg_base.at(j);
         const r1 = try codeEqualityTerm(p, term, level, j, b_rev, reg_j);
-        if (r1 != reg_j) _ = aux.addOp2(v, OP.Copy, r1, reg_j);
+        if (r1 != reg_j) _ = aux.emit(v, .Copy, .{ r1, reg_j });
         if (term.e_operator & WO.IN != 0) {
             // The RHS of "? IN (SELECT ...)" already has the comparison
             // affinity applied by sqlite3FindInIndex().
@@ -560,7 +567,7 @@ fn codeAllEqualityTerms(p: *Parse, level: *WhereLevel, b_rev: bool, n_extra_reg:
         } else if (term.e_operator & WO.ISNULL == 0) {
             const right = term.expr.right.?;
             if (!term.wt_flags.IS and expr_mod.canBeNull(right)) {
-                _ = aux.addOp2(v, OP.IsNull, reg_j, level.addr_brk);
+                _ = aux.emit(v, .IsNull, .{ reg_j, Jump.from(level.addr_brk) });
             }
             if (p.n_err == 0) {
                 std.debug.assert(!p.db.malloc_failed);
@@ -588,18 +595,18 @@ fn whereLikeOptimizationStringFixup(v: *Vdbe, level: *const WhereLevel, term: *c
     }
 }
 
-/// Port of codeDeferredSeek(): OP_DeferredSeek of table cursor `i_cur`
-/// to the rowid in index cursor `i_idx_cur`. In an OR branch or RIGHT
+/// Port of codeDeferredSeek(): OP_DeferredSeek of table cursor `cur`
+/// to the rowid in index cursor `idx_cur`. In an OR branch or RIGHT
 /// JOIN of a read-only statement, P4 maps table columns to index
 /// columns so that OP_Column may avoid the seek.
-fn codeDeferredSeek(w: *WhereInfo, idx: *Index, i_cur: i32, i_idx_cur: i32) Oom!void {
+fn codeDeferredSeek(w: *WhereInfo, idx: *Index, cur: Cursor, idx_cur: Cursor) Oom!void {
     const p = w.parse;
     const v = p.vdbe.?;
-    std.debug.assert(i_idx_cur > 0);
+    std.debug.assert(idx_cur.int() > 0);
     std.debug.assert(idx.ai_column[idx.n_column - 1] == -1);
 
     w.b_deferred_seek = true;
-    _ = aux.addOp3(v, OP.DeferredSeek, i_idx_cur, 0, i_cur);
+    _ = aux.emit(v, .DeferredSeek, .{ idx_cur, 0, cur });
     if (w.wctrl_flags.intersects(.{ .OR_SUBCLAUSE = true, .RIGHT_JOIN = true }) and build.toplevel(p).write_mask == 0) {
         const tab = idx.table;
         const n_col: usize = @intCast(tab.nCol());
@@ -617,41 +624,42 @@ fn codeDeferredSeek(w: *WhereInfo, idx: *Index, i_cur: i32, i_idx_cur: i32) Oom!
 }
 
 /// Case 1 of sqlite3WhereCodeOneLoopStart(): the loop over virtual table
-/// cursor `i_cur`, by OP_VFilter and OP_VNext.
-fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, i_cur: i32, b_rev: bool) Oom!void {
+/// cursor `cur`, by OP_VFilter and OP_VNext.
+fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, cur: Cursor, b_rev: bool) Oom!void {
     const db = p.db;
     const loop = level.w_loop.?;
     const n_constraint: usize = loop.n_lterm;
-    const i_reg = expr_mod.getTempRange(p, @as(i32, @intCast(n_constraint)) + 2);
-    var addr_not_found = level.addr_brk;
+    // The arguments of xFilter: idxNum, argc, and then the values.
+    const reg_args: Reg = .from(expr_mod.getTempRange(p, @as(i32, @intCast(n_constraint)) + 2));
+    var addr_not_found: Jump = .from(level.addr_brk);
     for (0..n_constraint) |j| {
-        const i_target = i_reg + @as(i32, @intCast(j)) + 2;
+        const target = reg_args.at(j + 2);
         const term = loop.a_lterm[j] orelse continue;
         if (term.e_operator & WO.IN != 0) {
             if (wi.smaskBit32(j) & loop.vtab.m_handle_in != 0) {
-                const i_tab = p.n_tab;
+                const tab: Cursor = .from(p.n_tab);
                 p.n_tab += 1;
                 p.n_mem += 1;
-                const i_cache = p.n_mem;
-                ec.codeRhsOfIN(p, term.expr, i_tab, false);
-                _ = aux.addOp3(v, OP.VInitIn, i_tab, i_target, i_cache);
+                const cache: Reg = .from(p.n_mem);
+                ec.codeRhsOfIN(p, term.expr, tab.int(), false);
+                _ = aux.emit(v, .VInitIn, .{ tab, target, cache });
             } else {
-                _ = try codeEqualityTerm(p, term, level, j, b_rev, i_target);
-                addr_not_found = level.addr_nxt;
+                _ = try codeEqualityTerm(p, term, level, j, b_rev, target);
+                addr_not_found = .from(level.addr_nxt);
             }
         } else {
             const right = term.expr.right;
-            codeExprOrVector(p, right, i_target, 1);
+            codeExprOrVector(p, right, target, 1);
             if (term.e_match_op == vtab.INDEX_CONSTRAINT.OFFSET and loop.vtab.b_omit_offset) {
                 std.debug.assert(term.e_operator == WO.AUX);
                 std.debug.assert(w.select != null and w.select.?.i_offset > 0);
                 // Zero the OFFSET counter.
-                _ = aux.addOp2(v, OP.Integer, 0, w.select.?.i_offset);
+                _ = aux.emit(v, .Integer, .{ 0, Reg.from(w.select.?.i_offset) });
             }
         }
     }
-    _ = aux.addOp2(v, OP.Integer, loop.vtab.idx_num, i_reg);
-    _ = aux.addOp2(v, OP.Integer, @intCast(n_constraint), i_reg + 1);
+    _ = aux.emit(v, .Integer, .{ loop.vtab.idx_num, reg_args });
+    _ = aux.emit(v, .Integer, .{ n_constraint, reg_args.at(1) });
     // The instruction before OP_VFilter must be the OP_Integer of argc,
     // for resolveP2Values() (tag-20250207a).
     // The string goes to the program: P4_DYNAMIC if the loop owns it.
@@ -659,9 +667,9 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, i_cur
         (if (loop.vtab.need_free) .{ .dynamic = z } else .{ .z = z })
     else
         .notused;
-    _ = aux.addOp4(v, OP.VFilter, i_cur, addr_not_found, i_reg, p4);
+    _ = aux.emit4(v, .VFilter, .{ cur, addr_not_found, reg_args }, p4);
     loop.vtab.need_free = false;
-    level.p1 = i_cur;
+    level.p1 = cur.int();
     level.op = if (w.e_one_pass != .OFF) OP.Noop else OP.VNext;
     level.p2 = aux.currentAddr(v);
     std.debug.assert(!loop.ws_flags.MULTI_OR);
@@ -673,13 +681,17 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, i_cur
             continue;
         }
         if (term.e_operator & WO.IN != 0 and wi.smaskBit32(j) & loop.vtab.m_handle_in == 0 and !db.malloc_failed) {
-            // Reload the value of the constraint into reg[i_reg+j+2]:
+            // Reload the value of the constraint into reg[reg_args+j+2]:
             // xFilter may have changed its type or encoding.
-            const reg = i_reg + @as(i32, @intCast(j)) + 2;
+            const reg = reg_args.at(j + 2);
             for (level.in_loops) |in| {
                 const op = aux.getOp(v, in.addr_in_top);
-                if ((op.opcode == OP.Column and op.p3 == reg) or (op.opcode == OP.Rowid and op.p2 == reg)) {
-                    _ = aux.addOp3(v, op.opcode, op.p1, op.p2, op.p3);
+                if (op.opcode == OP.Column and op.p3 == reg.int()) {
+                    _ = aux.emit(v, .Column, .{ Cursor.from(op.p1), op.p2, Reg.from(op.p3) });
+                    break;
+                }
+                if (op.opcode == OP.Rowid and op.p2 == reg.int()) {
+                    _ = aux.emit(v, .Rowid, .{ Cursor.from(op.p1), Reg.from(op.p2), op.p3 });
                     break;
                 }
             }
@@ -698,7 +710,7 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, i_cur
                 }
                 const right = try expr_mod.exprAlloc(p.arena, TK.REGISTER, null, false);
                 compare.right = right;
-                right.i_table = reg;
+                right.i_table = reg.int();
                 ec.exprIfFalse(p, compare, level.addr_cont, vi.SQLITE_JUMPIFNULL);
                 compare.left = null;
             }
@@ -709,24 +721,24 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, i_cur
 }
 
 /// Port of codeExprOrVector(): code the first `n_reg` elements of vector
-/// `e` into registers i_reg.., or (n_reg 1) the value of `e`.
-fn codeExprOrVector(p: *Parse, e_opt: ?*Expr, i_reg: i32, n_reg: usize) void {
+/// `e` into registers `reg`.., or (n_reg 1) the value of `e`.
+fn codeExprOrVector(p: *Parse, e_opt: ?*Expr, reg: Reg, n_reg: usize) void {
     std.debug.assert(n_reg > 0);
     if (e_opt) |e| if (expr_mod.isVector(e)) {
         if (e.useXSelect()) {
             const v = p.vdbe.?;
             std.debug.assert(e.op == TK.SELECT);
-            const i_select = ec.codeSubselect(p, e);
-            _ = aux.addOp3(v, OP.Copy, i_select, i_reg, @as(i32, @intCast(n_reg)) - 1);
+            const reg_select: Reg = .from(ec.codeSubselect(p, e));
+            _ = aux.emit(v, .Copy, .{ reg_select, reg, @as(i32, @intCast(n_reg)) - 1 });
         } else {
             const list = e.x.list.?;
             std.debug.assert(n_reg <= list.len());
-            for (0..n_reg) |i| ec.exprCode(p, list.at(i).expr, i_reg + @as(i32, @intCast(i)));
+            for (0..n_reg) |i| ec.exprCode(p, list.at(i).expr, reg.at(i).int());
         }
         return;
     };
     std.debug.assert(n_reg == 1 or p.n_err != 0);
-    ec.exprCode(p, e_opt, i_reg);
+    ec.exprCode(p, e_opt, reg.int());
 }
 
 /// Port of whereApplyPartialIndexConstraints(): mark coded the WHERE
@@ -749,7 +761,7 @@ fn whereApplyPartialIndexConstraints(truth_arg: *Expr, i_tab_cur: i32, wc: *Wher
 /// Port of filterPullDown(): right after an OP_Filter, also check the
 /// Bloom filters of inner loops before the index lookup, and clear their
 /// reg_filter so they are not checked again.
-fn filterPullDown(p: *Parse, w: *WhereInfo, i_level_arg: usize, addr_nxt: i32, not_ready: Bitmask) Oom!void {
+fn filterPullDown(p: *Parse, w: *WhereInfo, i_level_arg: usize, addr_nxt: Jump, not_ready: Bitmask) Oom!void {
     var i_level = i_level_arg + 1;
     while (i_level < w.n_level) : (i_level += 1) {
         const level = &w.a[i_level];
@@ -759,13 +771,13 @@ fn filterPullDown(p: *Parse, w: *WhereInfo, i_level_arg: usize, addr_nxt: i32, n
         // ConstructBloomFilter() does not set reg_filter in this case.
         if (loop.prereq & not_ready != 0) continue;
         const saved_addr_brk = level.addr_brk;
-        level.addr_brk = addr_nxt;
+        level.addr_brk = addr_nxt.int();
         if (loop.ws_flags.IPK) {
             const term = loop.a_lterm[0].?;
-            var reg_rowid = expr_mod.getTempReg(p);
+            var reg_rowid: Reg = .from(expr_mod.getTempReg(p));
             reg_rowid = try codeEqualityTerm(p, term, level, 0, false, reg_rowid);
-            _ = aux.addOp2(p.vdbe.?, OP.MustBeInt, reg_rowid, addr_nxt);
-            _ = aux.addOp4Int(p.vdbe.?, OP.Filter, level.reg_filter, addr_nxt, reg_rowid, 1);
+            _ = aux.emit(p.vdbe.?, .MustBeInt, .{ reg_rowid, addr_nxt });
+            _ = aux.emitInt(p.vdbe.?, .Filter, .{ Reg.from(level.reg_filter), addr_nxt, reg_rowid }, 1);
         } else {
             const n_eq = loop.btree.n_eq;
             var z_start_aff: ?[:0]u8 = null;
@@ -773,7 +785,7 @@ fn filterPullDown(p: *Parse, w: *WhereInfo, i_level_arg: usize, addr_nxt: i32, n
             std.debug.assert(!loop.ws_flags.COLUMN_IN);
             const r1 = try codeAllEqualityTerms(p, level, false, 0, &z_start_aff);
             codeApplyAffinity(p, r1, n_eq, z_start_aff);
-            _ = aux.addOp4Int(p.vdbe.?, OP.Filter, level.reg_filter, addr_nxt, r1, n_eq);
+            _ = aux.emitInt(p.vdbe.?, .Filter, .{ Reg.from(level.reg_filter), addr_nxt, r1 }, n_eq);
         }
         level.reg_filter = 0;
         level.addr_brk = saved_addr_brk;
@@ -841,6 +853,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
     const loop = level.w_loop.?;
     const tab_item = w.tab_list.at(level.i_from);
     const i_cur = tab_item.i_cursor;
+    const cur: Cursor = .from(i_cur);
     level.not_ready = not_ready & ~wi.getMask(&w.s_mask_set, i_cur);
     const b_rev_bit: u1 = @intCast((w.rev_mask >> @intCast(i_level)) & 1);
     const b_rev = b_rev_bit != 0;
@@ -848,10 +861,10 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
 
     // Labels for "break" and "continue". addr_nxt continues with the next
     // IN combination; without IN operators it is addr_brk.
-    const addr_brk = level.addr_brk;
+    const addr_brk: Jump = .from(level.addr_brk);
     level.addr_nxt = level.addr_brk;
-    const addr_cont = aux.makeLabel(p);
-    level.addr_cont = addr_cont;
+    const addr_cont = aux.newLabel(p);
+    level.addr_cont = addr_cont.int();
 
     // The match flag of the right table of a LEFT JOIN.
     std.debug.assert(w.wctrl_flags.intersects(.{ .OR_SUBCLAUSE = true, .RIGHT_JOIN = true }) or
@@ -859,41 +872,41 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
     if (level.i_from > 0 and tab_item.fg.jointype.LEFT) {
         p.n_mem += 1;
         level.i_left_join = p.n_mem;
-        _ = aux.addOp2(v, OP.Integer, 0, level.i_left_join);
-        if (tab_item.fg.via_coroutine) _ = aux.addOp2(v, OP.NullRow, tab_item.i_cursor, 1);
+        _ = aux.emit(v, .Integer, .{ 0, Reg.from(level.i_left_join) });
+        if (tab_item.fg.via_coroutine) _ = aux.emit(v, .NullRow, .{ cur, 1 });
     }
 
     if (tab_item.fg.via_coroutine) {
         // A FROM-clause subquery implemented as a co-routine.
         std.debug.assert(tab_item.fg.is_subquery);
         const subq = tab_item.u4.subq.?;
-        const reg_yield = subq.reg_return;
-        _ = aux.addOp3(v, OP.InitCoroutine, reg_yield, 0, subq.addr_fill_sub);
-        level.p2 = aux.addOp2(v, OP.Yield, reg_yield, addr_brk);
+        const reg_yield: Reg = .from(subq.reg_return);
+        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, subq.addr_fill_sub });
+        level.p2 = aux.emit(v, .Yield, .{ reg_yield, addr_brk }).int();
         level.op = OP.Goto;
     } else if (loop.ws_flags.VIRTUALTABLE) {
         // Case 1: a virtual table, read with OP_VFilter and OP_VNext.
-        try codeVirtualLoop(p, v, w, level, i_cur, b_rev);
+        try codeVirtualLoop(p, v, w, level, cur, b_rev);
     } else if (loop.ws_flags.IPK and loop.ws_flags.intersects(.{ .COLUMN_IN = true, .COLUMN_EQ = true })) {
         // Case 2: one row by rowid equality, or several by "rowid IN (...)".
         std.debug.assert(loop.btree.n_eq == 1);
         const term = loop.a_lterm[0].?;
         p.n_mem += 1;
-        const i_release_reg = p.n_mem;
-        const i_rowid_reg = try codeEqualityTerm(p, term, level, 0, b_rev, i_release_reg);
-        if (i_rowid_reg != i_release_reg) expr_mod.releaseTempReg(p, i_release_reg);
-        const addr_nxt = level.addr_nxt;
+        const release_reg: Reg = .from(p.n_mem);
+        const rowid_reg = try codeEqualityTerm(p, term, level, 0, b_rev, release_reg);
+        if (rowid_reg != release_reg) expr_mod.releaseTempReg(p, release_reg.int());
+        const addr_nxt: Jump = .from(level.addr_nxt);
         if (level.reg_filter != 0) {
-            _ = aux.addOp2(v, OP.MustBeInt, i_rowid_reg, addr_nxt);
-            _ = aux.addOp4Int(v, OP.Filter, level.reg_filter, addr_nxt, i_rowid_reg, 1);
+            _ = aux.emit(v, .MustBeInt, .{ rowid_reg, addr_nxt });
+            _ = aux.emitInt(v, .Filter, .{ Reg.from(level.reg_filter), addr_nxt, rowid_reg }, 1);
             try filterPullDown(p, w, i_level, addr_nxt, not_ready);
         }
-        _ = aux.addOp3(v, OP.SeekRowid, i_cur, addr_nxt, i_rowid_reg);
+        _ = aux.emit(v, .SeekRowid, .{ cur, addr_nxt, rowid_reg });
         level.op = OP.Noop;
     } else if (loop.ws_flags.IPK and loop.ws_flags.COLUMN_RANGE) {
         // Case 3: an inequality on the rowid.
         var test_op: OP = OP.Noop;
-        var mem_end_value: i32 = 0;
+        var mem_end_value: Reg = .none;
         var j: usize = 0;
         var start: ?*WhereTerm = null;
         var end: ?*WhereTerm = null;
@@ -913,30 +926,30 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
             std.debug.assert(TK.LE == TK.GT + 1 and TK.LT == TK.GT + 2 and TK.GE == TK.GT + 3);
             std.debug.assert(!s.wt_flags.VNULL);
             const x = s.expr;
-            var r1: i32 = undefined;
+            var r1: Reg = undefined;
             var r_temp: i32 = 0;
             var op: OP = undefined;
             if (expr_mod.isVector(x.right.?)) {
                 r_temp = expr_mod.getTempReg(p);
-                r1 = r_temp;
+                r1 = .from(r_temp);
                 codeExprOrVector(p, x.right, r1, 1);
                 const k: usize = @intCast(((@as(i32, x.op) - TK.GT - 1) & 0x3) | 0x1);
                 op = a_move_op[k];
             } else {
-                r1 = ec.codeTemp(p, x.right, &r_temp);
+                r1 = .from(ec.codeTemp(p, x.right, &r_temp));
                 disableTerm(level, s);
                 op = a_move_op[x.op - TK.GT];
             }
-            _ = aux.addOp3(v, op, i_cur, addr_brk, r1);
+            _ = aux.emitAny(v, op, .{ .cursor, .jump, .reg }, .{ cur, addr_brk, r1 });
             expr_mod.releaseTempReg(p, r_temp);
         } else {
-            _ = aux.addOp2(v, if (b_rev) OP.Last else OP.Rewind, i_cur, level.addr_halt);
+            _ = aux.emitAny(v, if (b_rev) OP.Last else OP.Rewind, .{ .cursor, .jump, .int }, .{ cur, Jump.from(level.addr_halt) });
         }
         if (end) |e| {
             const x = e.expr;
             std.debug.assert(!e.wt_flags.VNULL);
             p.n_mem += 1;
-            mem_end_value = p.n_mem;
+            mem_end_value = .from(p.n_mem);
             codeExprOrVector(p, x.right, mem_end_value, 1);
             const is_vec = expr_mod.isVector(x.right.?);
             if (!is_vec and (x.op == TK.LT or x.op == TK.GT)) {
@@ -953,9 +966,9 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         std.debug.assert(level.p5 == 0);
         if (test_op != OP.Noop) {
             p.n_mem += 1;
-            const i_rowid_reg = p.n_mem;
-            _ = aux.addOp2(v, OP.Rowid, i_cur, i_rowid_reg);
-            _ = aux.addOp3(v, test_op, mem_end_value, addr_brk, i_rowid_reg);
+            const rowid_reg: Reg = .from(p.n_mem);
+            _ = aux.emit(v, .Rowid, .{ cur, rowid_reg });
+            _ = aux.emitAny(v, test_op, .{ .reg, .jump, .reg }, .{ mem_end_value, addr_brk, rowid_reg });
             aux.changeP5(v, Aff.numeric | vi.SQLITE_JUMPIFNULL);
         }
     } else if (loop.ws_flags.INDEXED) {
@@ -973,7 +986,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         } else {
             level.op = a_step[b_rev_bit];
             level.p1 = i_cur;
-            level.p2 = 1 + aux.addOp2(v, a_start[b_rev_bit], i_cur, level.addr_halt);
+            level.p2 = aux.emitAny(v, a_start[b_rev_bit], .{ .cursor, .jump, .int }, .{ cur, Jump.from(level.addr_halt) }).plus(1).int();
             level.p5 = vi.STMTSTATUS.FULLSCAN_STEP;
         }
     }
@@ -987,7 +1000,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
     while (true) {
         var i_next: i32 = 0;
         for (wc.terms()) |*term| {
-            var skip_like_addr: i32 = 0;
+            var skip_like: ?Addr = null;
             if (term.wt_flags.intersects(.{ .VIRTUAL = true, .CODED = true })) continue;
             if (term.prereq_all & level.not_ready != 0) {
                 w.untested_terms = true;
@@ -1008,11 +1021,11 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
                 // the like() call except on the pass that compares BLOBs.
                 const x = level.i_like_rep_cntr;
                 if (x > 0) {
-                    skip_like_addr = aux.addOp1(v, if (x & 1 != 0) OP.IfNot else OP.If, @intCast(x >> 1));
+                    skip_like = aux.emitAny(v, if (x & 1 != 0) OP.IfNot else OP.If, .{ .reg, .jump, .int }, .{Reg.from(@intCast(x >> 1))});
                 }
             }
-            ec.exprIfFalse(p, e, addr_cont, vi.SQLITE_JUMPIFNULL);
-            if (skip_like_addr != 0) aux.jumpHere(v, skip_like_addr);
+            ec.exprIfFalse(p, e, addr_cont.int(), vi.SQLITE_JUMPIFNULL);
+            if (skip_like) |a| aux.landHere(v, a);
             term.wt_flags.CODED = true;
         }
         i_loop = i_next;
@@ -1039,7 +1052,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         }
         var e_alt = alt.expr.*;
         e_alt.left = e.left;
-        ec.exprIfFalse(p, &e_alt, addr_cont, vi.SQLITE_JUMPIFNULL);
+        ec.exprIfFalse(p, &e_alt, addr_cont.int(), vi.SQLITE_JUMPIFNULL);
         alt.wt_flags.CODED = true;
     }
 
@@ -1047,43 +1060,43 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
     // matched, by storing its PK in the iMatch index and the Bloom filter.
     if (level.rj) |rj| {
         const tab = w.tab_list.at(level.i_from).s_tab.?;
-        var r: i32 = undefined;
+        var r: Reg = undefined;
         var n_pk: i32 = undefined;
         if (tab.hasRowid()) {
-            r = expr_mod.getTempRange(p, 2);
-            ec.codeGetColumnOfTable(v, tab, level.i_tab_cur, -1, r + 1);
+            r = .from(expr_mod.getTempRange(p, 2));
+            ec.codeGetColumnOfTable(v, tab, level.i_tab_cur, -1, r.at(1).int());
             n_pk = 1;
         } else {
             const pk = build.primaryKeyIndex(tab).?;
             n_pk = pk.n_key_col;
-            r = expr_mod.getTempRange(p, n_pk + 1);
+            r = .from(expr_mod.getTempRange(p, n_pk + 1));
             for (0..pk.n_key_col) |i_pk| {
                 const i_col = pk.ai_column[i_pk];
-                ec.codeGetColumnOfTable(v, tab, i_cur, i_col, r + 1 + @as(i32, @intCast(i_pk)));
+                ec.codeGetColumnOfTable(v, tab, i_cur, i_col, r.at(1 + i_pk).int());
             }
         }
-        const jmp1 = aux.addOp4Int(v, OP.Found, rj.i_match, 0, r + 1, n_pk);
-        _ = aux.addOp3(v, OP.MakeRecord, r + 1, n_pk, r);
-        _ = aux.addOp4Int(v, OP.IdxInsert, rj.i_match, r, r + 1, n_pk);
+        const jmp1 = aux.emitInt(v, .Found, .{ Cursor.from(rj.i_match), 0, r.at(1) }, n_pk);
+        _ = aux.emit(v, .MakeRecord, .{ r.at(1), n_pk, r });
+        _ = aux.emitInt(v, .IdxInsert, .{ Cursor.from(rj.i_match), r, r.at(1) }, n_pk);
         if (rj.reg_bloom != 0) {
-            _ = aux.addOp4Int(v, OP.FilterAdd, rj.reg_bloom, 0, r + 1, n_pk);
+            _ = aux.emitInt(v, .FilterAdd, .{ Reg.from(rj.reg_bloom), 0, r.at(1) }, n_pk);
             aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
         }
-        aux.jumpHere(v, jmp1);
-        expr_mod.releaseTempRange(p, r, n_pk + 1);
+        aux.landHere(v, jmp1);
+        expr_mod.releaseTempRange(p, r.int(), n_pk + 1);
     }
 
     // LEFT OUTER JOIN: record that a row of the right table matched.
     if (level.i_left_join != 0) {
         level.addr_first = aux.currentAddr(v);
-        _ = aux.addOp2(v, OP.Integer, 1, level.i_left_join);
+        _ = aux.emit(v, .Integer, .{ 1, Reg.from(level.i_left_join) });
     }
 
     if (level.rj) |rj| {
         // The subroutine for the interior loops of the RIGHT JOIN: inline
         // normally, and run at the end for unmatched rows of the table
         // with all tables to the left set to NULL.
-        _ = aux.addOp2(v, OP.BeginSubrtn, 0, rj.reg_return);
+        _ = aux.emit(v, .BeginSubrtn, .{ 0, Reg.from(rj.reg_return) });
         rj.addr_subrtn = aux.currentAddr(v);
         std.debug.assert(p.within_rj_subrtn < 255);
         p.within_rj_subrtn += 1;
@@ -1099,7 +1112,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
                 continue;
             }
             if (tab_item.fg.jointype.LTORJ) continue;
-            ec.exprIfFalse(p, term.expr, addr_cont, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, term.expr, addr_cont.int(), vi.SQLITE_JUMPIFNULL);
             term.wt_flags.CODED = true;
         }
     }
@@ -1115,7 +1128,8 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     const wc = &w.s_wc;
     const tab_item = w.tab_list.at(level.i_from);
     const i_cur = tab_item.i_cursor;
-    const addr_cont = level.addr_cont;
+    const cur: Cursor = .from(i_cur);
+    const addr_cont: Jump = .from(level.addr_cont);
     const b_rev = b_rev_bit != 0;
     const b_rev_i: i32 = b_rev_bit;
 
@@ -1129,12 +1143,12 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     var z_end_aff: ?[:0]u8 = null;
     var b_seek_past_null: i32 = 0;
     var b_stop_at_null: i32 = 0;
-    var reg_bignull: i32 = 0;
-    var addr_seek_scan: i32 = 0;
+    var reg_bignull: Reg = .none;
+    var addr_seek_scan: ?Addr = null;
 
     var idx: ?*Index = loop.btree.index.?;
     const ix = idx.?;
-    const i_idx_cur = level.i_idx_cur;
+    const idx_cur: Cursor = .from(level.i_idx_cur);
     std.debug.assert(n_eq >= loop.n_skip);
 
     // The inequality terms at the start and end of the range.
@@ -1154,7 +1168,7 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
             std.debug.assert(range_start != null and range_start.?.wt_flags.LIKEOPT);
             p.n_mem += 1;
             level.i_like_rep_cntr = @intCast(p.n_mem);
-            _ = aux.addOp2(v, OP.Integer, 1, @intCast(level.i_like_rep_cntr));
+            _ = aux.emit(v, .Integer, .{ 1, Reg.from(@intCast(level.i_like_rep_cntr)) });
             level.addr_like_rep = aux.currentAddr(v);
             // iLikeRepCntr holds 2x the counter register; the low bit is
             // whether the scan is DESC.
@@ -1178,10 +1192,10 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
         n_extra_reg = 1;
         b_seek_past_null = 1;
         p.n_mem += 1;
-        reg_bignull = p.n_mem;
-        level.reg_bignull = reg_bignull;
-        if (level.i_left_join != 0) _ = aux.addOp2(v, OP.Integer, 0, reg_bignull);
-        level.addr_bignull = aux.makeLabel(p);
+        reg_bignull = .from(p.n_mem);
+        level.reg_bignull = reg_bignull.int();
+        if (level.i_left_join != 0) _ = aux.emit(v, .Integer, .{ 0, reg_bignull });
+        level.addr_bignull = aux.newLabel(p).int();
     }
 
     // A reverse scan of an ascending index, or a forward scan of a
@@ -1195,7 +1209,7 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     if (i_level > 0 and loop.ws_flags.IN_SEEKSCAN) {
         // Make sure the index cursor is not on a valid row for the first
         // iteration, in case OP_SeekScan is used.
-        _ = aux.addOp1(v, OP.NullRow, i_idx_cur);
+        _ = aux.emit(v, .NullRow, .{idx_cur});
     }
 
     // The ==/IN terms go to registers reg_base...
@@ -1204,7 +1218,7 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     if (z_start_aff) |z| if (n_top != 0) {
         z_end_aff = try p.arena.dupeSentinel(u8, std.mem.sliceTo(z[n_eq..], 0), 0);
     };
-    const addr_nxt = if (reg_bignull != 0) level.addr_bignull else level.addr_nxt;
+    const addr_nxt: Jump = .from(if (!reg_bignull.isNone()) level.addr_bignull else level.addr_nxt);
 
     var start_eq: i32 = @intFromBool(range_start == null or range_start.?.e_operator & (WO.LE | WO.GE) != 0);
     var end_eq: i32 = @intFromBool(range_end == null or range_end.?.e_operator & (WO.LE | WO.GE) != 0);
@@ -1214,10 +1228,10 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     var n_constraint: i32 = n_eq;
     if (range_start) |rs| {
         const right = rs.expr.right.?;
-        codeExprOrVector(p, right, reg_base + n_eq, n_btm);
+        codeExprOrVector(p, right, reg_base.at(n_eq), n_btm);
         whereLikeOptimizationStringFixup(v, level, rs);
         if (!rs.wt_flags.VNULL and expr_mod.canBeNull(right)) {
-            _ = aux.addOp2(v, OP.IsNull, reg_base + n_eq, addr_nxt);
+            _ = aux.emit(v, .IsNull, .{ reg_base.at(n_eq), addr_nxt });
         }
         if (z_start_aff) |z| updateRangeAffinityStr(right, n_btm, z[n_eq..]);
         n_constraint += n_btm;
@@ -1229,11 +1243,11 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
         b_seek_past_null = 0;
     } else if (b_seek_past_null != 0) {
         start_eq = 0;
-        _ = aux.addOp2(v, OP.Null, 0, reg_base + n_eq);
+        _ = aux.emit(v, .Null, .{ 0, reg_base.at(n_eq) });
         start_constraints = 1;
         n_constraint += 1;
-    } else if (reg_bignull != 0) {
-        _ = aux.addOp2(v, OP.Null, 0, reg_base + n_eq);
+    } else if (!reg_bignull.isNone()) {
+        _ = aux.emit(v, .Null, .{ 0, reg_base.at(n_eq) });
         start_constraints = 1;
         n_constraint += 1;
     }
@@ -1242,32 +1256,36 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
         // The skip-scan code in codeAllEqualityTerms() already left the
         // cursor on the right row.
     } else {
-        if (reg_bignull != 0) _ = aux.addOp2(v, OP.Integer, 1, reg_bignull);
+        if (!reg_bignull.isNone()) _ = aux.emit(v, .Integer, .{ 1, reg_bignull });
         if (level.reg_filter != 0) {
-            _ = aux.addOp4Int(v, OP.Filter, level.reg_filter, addr_nxt, reg_base, n_eq);
+            _ = aux.emitInt(v, .Filter, .{ Reg.from(level.reg_filter), addr_nxt, reg_base }, n_eq);
             try filterPullDown(p, w, i_level, addr_nxt, not_ready);
         }
 
         var op = a_start_op[@intCast((start_constraints << 2) + (start_eq << 1) + b_rev_i)].?;
         if (loop.ws_flags.IN_SEEKSCAN and op == OP.SeekGE) {
-            std.debug.assert(reg_bignull == 0);
+            std.debug.assert(reg_bignull.isNone());
             // TUNING: try about log(N) steps before giving up and seeking.
-            addr_seek_scan = aux.addOp1(v, OP.SeekScan, @divTrunc(@as(i32, ix.ai_row_log_est[0]) + 9, 10));
+            const scan = aux.emit(v, .SeekScan, .{@divTrunc(@as(i32, ix.ai_row_log_est[0]) + 9, 10)});
+            addr_seek_scan = scan;
             if (range_start != null or range_end != null) {
                 aux.changeP5(v, 1);
-                aux.changeP2(v, addr_seek_scan, aux.currentAddr(v) + 1);
-                addr_seek_scan = 0;
+                aux.changeP2(v, scan.int(), aux.currentAddr(v) + 1);
+                addr_seek_scan = null;
             }
         }
-        _ = aux.addOp4Int(v, op, i_idx_cur, addr_nxt, reg_base, n_constraint);
+        // Not emitAny(): `op` is a seek, whose P3 is a register, or
+        // OP_Rewind or OP_Last, which get the register in P3 all the same
+        // and do not read it.
+        _ = aux.addOp4Int(v, op, idx_cur.int(), addr_nxt.int(), reg_base.int(), n_constraint);
 
         std.debug.assert(b_seek_past_null == 0 or b_stop_at_null == 0);
-        if (reg_bignull != 0) {
+        if (!reg_bignull.isNone()) {
             std.debug.assert(b_seek_past_null == 1 or b_stop_at_null == 1);
             std.debug.assert(b_stop_at_null == start_eq);
-            _ = aux.addOp2(v, OP.Goto, 0, aux.currentAddr(v) + 2);
+            _ = aux.emit(v, .Goto, .{ 0, aux.here(v).plus(2) });
             op = a_start_op[@intCast(@as(i32, @intFromBool(n_constraint > 1)) * 4 + 2 + b_rev_i)].?;
-            _ = aux.addOp4Int(v, op, i_idx_cur, addr_nxt, reg_base, n_constraint - start_eq);
+            _ = aux.addOp4Int(v, op, idx_cur.int(), addr_nxt.int(), reg_base.int(), n_constraint - start_eq);
         }
     }
 
@@ -1276,15 +1294,15 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     std.debug.assert(level.p2 == 0);
     if (range_end) |re| {
         const right = re.expr.right.?;
-        std.debug.assert(addr_seek_scan == 0);
-        codeExprOrVector(p, right, reg_base + n_eq, n_top);
+        std.debug.assert(addr_seek_scan == null);
+        codeExprOrVector(p, right, reg_base.at(n_eq), n_top);
         whereLikeOptimizationStringFixup(v, level, re);
         if (!re.wt_flags.VNULL and expr_mod.canBeNull(right)) {
-            _ = aux.addOp2(v, OP.IsNull, reg_base + n_eq, addr_nxt);
+            _ = aux.emit(v, .IsNull, .{ reg_base.at(n_eq), addr_nxt });
         }
         if (z_end_aff) |z| {
             updateRangeAffinityStr(right, n_top, z);
-            codeApplyAffinity(p, reg_base + n_eq, n_top, z);
+            codeApplyAffinity(p, reg_base.at(n_eq), n_top, z);
         } else {
             std.debug.assert(p.db.malloc_failed);
         }
@@ -1295,8 +1313,8 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
             end_eq = 1;
         }
     } else if (b_stop_at_null != 0) {
-        if (reg_bignull == 0) {
-            _ = aux.addOp2(v, OP.Null, 0, reg_base + n_eq);
+        if (reg_bignull.isNone()) {
+            _ = aux.emit(v, .Null, .{ 0, reg_base.at(n_eq) });
             end_eq = 0;
         }
         n_constraint += 1;
@@ -1307,24 +1325,26 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
 
     // Check whether the index cursor is past the end of the range.
     if (n_constraint != 0) {
-        if (reg_bignull != 0) {
+        if (!reg_bignull.isNone()) {
             // Skip the end-of-range check during the NULL-scan.
-            _ = aux.addOp2(v, OP.IfNot, reg_bignull, aux.currentAddr(v) + 3);
+            _ = aux.emit(v, .IfNot, .{ reg_bignull, aux.here(v).plus(3) });
         }
         const op = a_end_op[@intCast(b_rev_i * 2 + end_eq)];
-        _ = aux.addOp4Int(v, op, i_idx_cur, addr_nxt, reg_base, n_constraint);
-        if (addr_seek_scan != 0) aux.jumpHere(v, addr_seek_scan);
+        const end = aux.emitAny(v, op, .{ .cursor, .jump, .reg }, .{ idx_cur, addr_nxt, reg_base });
+        aux.changeP4(v, end.int(), .{ .int32 = n_constraint });
+        if (addr_seek_scan) |a| aux.landHere(v, a);
     }
-    if (reg_bignull != 0) {
+    if (!reg_bignull.isNone()) {
         // During the NULL-scan, stop at the end of the NULLs.
         std.debug.assert(b_seek_past_null + b_stop_at_null == 1);
-        _ = aux.addOp2(v, OP.If, reg_bignull, aux.currentAddr(v) + 2);
+        _ = aux.emit(v, .If, .{ reg_bignull, aux.here(v).plus(2) });
         const op = a_end_op[@intCast(b_rev_i * 2 + b_seek_past_null)];
-        _ = aux.addOp4Int(v, op, i_idx_cur, addr_nxt, reg_base, n_constraint + b_seek_past_null);
+        const end = aux.emitAny(v, op, .{ .cursor, .jump, .reg }, .{ idx_cur, addr_nxt, reg_base });
+        aux.changeP4(v, end.int(), .{ .int32 = n_constraint + b_seek_past_null });
     }
 
     if (loop.ws_flags.IN_EARLYOUT) {
-        _ = aux.addOp3(v, OP.SeekHit, i_idx_cur, n_eq, n_eq);
+        _ = aux.emit(v, .SeekHit, .{ idx_cur, n_eq, n_eq });
     }
 
     // Seek the table cursor, if needed.
@@ -1333,16 +1353,16 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     if (omit_table) {
         // A covering index: the table is not needed.
     } else if (ix.table.hasRowid()) {
-        try codeDeferredSeek(w, ix, i_cur, i_idx_cur);
-    } else if (i_cur != i_idx_cur) {
+        try codeDeferredSeek(w, ix, cur, idx_cur);
+    } else if (cur != idx_cur) {
         const pk = build.primaryKeyIndex(ix.table).?;
         const n_pk: i32 = pk.n_key_col;
-        const i_rowid_reg = expr_mod.getTempRange(p, n_pk);
+        const rowid_reg: Reg = .from(expr_mod.getTempRange(p, n_pk));
         for (0..pk.n_key_col) |jj| {
             const k = build.tableColumnToIndex(ix, pk.ai_column[jj]);
-            _ = aux.addOp3(v, OP.Column, i_idx_cur, k, i_rowid_reg + @as(i32, @intCast(jj)));
+            _ = aux.emit(v, .Column, .{ idx_cur, k, rowid_reg.at(jj) });
         }
-        _ = aux.addOp4Int(v, OP.NotFound, i_cur, addr_cont, i_rowid_reg, n_pk);
+        _ = aux.emitInt(v, .NotFound, .{ cur, addr_cont, rowid_reg }, n_pk);
     }
 
     if (level.i_left_join == 0) {
@@ -1359,7 +1379,7 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
 
     // The instruction that ends the loop.
     if (loop.ws_flags.ONEROW or
-        (level.in_loops.len != 0 and reg_bignull == 0 and whereLoopIsOneRow(loop)))
+        (level.in_loops.len != 0 and reg_bignull.isNone() and whereLoopIsOneRow(loop)))
     {
         level.op = OP.Noop;
     } else if (b_rev) {
@@ -1367,7 +1387,7 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
     } else {
         level.op = OP.Next;
     }
-    level.p1 = i_idx_cur;
+    level.p1 = idx_cur.int();
     level.p3 = if (loop.ws_flags.UNQ_WANTED) 1 else 0;
     if (!loop.ws_flags.intersects(wi.WS.CONSTRAINT)) {
         level.p5 = vi.STMTSTATUS.FULLSCAN_STEP;
@@ -1403,10 +1423,13 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
     const i_cov_cur = p.n_tab;
     p.n_tab += 1;
     p.n_mem += 1;
-    const reg_return = p.n_mem;
-    var reg_rowset: i32 = 0;
-    var reg_rowid: i32 = 0;
-    const i_loop_body = aux.makeLabel(p);
+    const reg_return: Reg = .from(p.n_mem);
+    // The rows seen so far: a RowSet in a register, or the cursor of an
+    // ephemeral index of the PKs of a WITHOUT ROWID table.
+    var reg_rowset: Reg = .none;
+    var seen_cur: Cursor = undefined;
+    var reg_rowid: Reg = .none;
+    const loop_body = aux.newLabel(p);
     var untested_terms = false;
     var and_expr: ?*Expr = null;
     const tab = tab_item.s_tab.?;
@@ -1416,7 +1439,7 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
     std.debug.assert(term.wt_flags.ORINFO);
     const or_wc = &term.or_info.?.wc;
     level.op = OP.Return;
-    level.p1 = reg_return;
+    level.p1 = reg_return.int();
 
     // The SrcList of the sub-WHERE loops: this table in a[0], then the
     // notReady tables.
@@ -1444,19 +1467,19 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
     if (!w.wctrl_flags.DUPLICATES_OK) {
         if (tab.hasRowid()) {
             p.n_mem += 1;
-            reg_rowset = p.n_mem;
-            _ = aux.addOp2(v, OP.Null, 0, reg_rowset);
+            reg_rowset = .from(p.n_mem);
+            _ = aux.emit(v, .Null, .{ 0, reg_rowset });
         } else {
             const pk = build.primaryKeyIndex(tab).?;
-            reg_rowset = p.n_tab;
+            seen_cur = .from(p.n_tab);
             p.n_tab += 1;
-            _ = aux.addOp2(v, OP.OpenEphemeral, reg_rowset, pk.n_key_col);
+            _ = aux.emit(v, .OpenEphemeral, .{ seen_cur, pk.n_key_col });
             aux.setP4KeyInfo(p, pk);
         }
         p.n_mem += 1;
-        reg_rowid = p.n_mem;
+        reg_rowid = .from(p.n_mem);
     }
-    const i_ret_init = aux.addOp2(v, OP.Integer, 0, reg_return);
+    const ret_init = aux.emit(v, .Integer, .{ 0, reg_return });
 
     // For a WHERE clause "(x1 OR x2 OR ...) AND y", code each xN as
     // "xN AND w", where w is the usable terms of y: no ON clause terms
@@ -1488,7 +1511,7 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
         const or_term = &or_wc.a[ii];
         if (or_term.left_cursor != i_cur and or_term.e_operator & WO.AND == 0) continue;
         var or_expr = (try expr_mod.exprDup(p.arena, or_term.expr)).?;
-        var jmp1: i32 = 0;
+        var jmp1: ?Addr = null;
         if (and_expr) |ae| {
             ae.left = or_expr;
             or_expr = ae;
@@ -1502,33 +1525,33 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
         if (!w.wctrl_flags.DUPLICATES_OK) {
             const i_set: i32 = if (ii == n_or_term - 1) -1 else @intCast(ii);
             if (tab.hasRowid()) {
-                ec.codeGetColumnOfTable(v, tab, i_cur, -1, reg_rowid);
-                jmp1 = aux.addOp4Int(v, OP.RowSetTest, reg_rowset, 0, reg_rowid, i_set);
+                ec.codeGetColumnOfTable(v, tab, i_cur, -1, reg_rowid.int());
+                jmp1 = aux.emitInt(v, .RowSetTest, .{ reg_rowset, 0, reg_rowid }, i_set);
             } else {
                 const pk = build.primaryKeyIndex(tab).?;
                 const n_pk: i32 = pk.n_key_col;
-                const r = expr_mod.getTempRange(p, n_pk);
+                const r: Reg = .from(expr_mod.getTempRange(p, n_pk));
                 for (0..pk.n_key_col) |i_pk| {
                     const i_col = pk.ai_column[i_pk];
-                    ec.codeGetColumnOfTable(v, tab, i_cur, i_col, r + @as(i32, @intCast(i_pk)));
+                    ec.codeGetColumnOfTable(v, tab, i_cur, i_col, r.at(i_pk).int());
                 }
                 // As with OP_RowSetTest: iSet 0 means the key cannot be
                 // present yet, -1 that it need not be inserted.
                 if (i_set != 0) {
-                    jmp1 = aux.addOp4Int(v, OP.Found, reg_rowset, 0, r, n_pk);
+                    jmp1 = aux.emitInt(v, .Found, .{ seen_cur, 0, r }, n_pk);
                 }
                 if (i_set >= 0) {
-                    _ = aux.addOp3(v, OP.MakeRecord, r, n_pk, reg_rowid);
-                    _ = aux.addOp4Int(v, OP.IdxInsert, reg_rowset, reg_rowid, r, n_pk);
+                    _ = aux.emit(v, .MakeRecord, .{ r, n_pk, reg_rowid });
+                    _ = aux.emitInt(v, .IdxInsert, .{ seen_cur, reg_rowid, r }, n_pk);
                     if (i_set != 0) aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
                 }
-                expr_mod.releaseTempRange(p, r, n_pk);
+                expr_mod.releaseTempRange(p, r.int(), n_pk);
             }
         }
 
         // Invoke the main loop body as a subroutine.
-        _ = aux.addOp2(v, OP.Gosub, reg_return, i_loop_body);
-        if (jmp1 != 0) aux.jumpHere(v, jmp1);
+        _ = aux.emit(v, .Gosub, .{ reg_return, loop_body });
+        if (jmp1) |a| aux.landHere(v, a);
 
         // Terms of notReady tables in this OR term are tested later.
         if (sub.untested_terms) untested_terms = true;
@@ -1558,9 +1581,9 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
     level.covering_idx = cov;
     if (cov != null) level.i_idx_cur = i_cov_cur;
     if (and_expr) |ae| ae.left = null;
-    aux.changeP1(v, i_ret_init, aux.currentAddr(v));
-    _ = aux.goto_(v, level.addr_brk);
-    aux.resolveLabel(v, i_loop_body);
+    aux.changeP1(v, ret_init.int(), aux.currentAddr(v));
+    _ = aux.emit(v, .Goto, .{ 0, Jump.from(level.addr_brk) });
+    aux.place(v, loop_body);
 
     // P2 of the final OP_Return is the top of the containing loop: an
     // indentation hint for the bytecode formatter (tag-20220407a).
@@ -1592,10 +1615,11 @@ pub fn rightJoinLoop(w: *WhereInfo, i_level: usize, level: *WhereLevel) Oom!void
             std.debug.assert(right.fg.is_subquery);
             const subq = right.u4.subq.?;
             const n: i32 = @intCast(subq.select.e_list.?.len());
-            _ = aux.addOp3(v, OP.Null, 0, subq.reg_result, subq.reg_result + n - 1);
+            const reg_result: Reg = .from(subq.reg_result);
+            _ = aux.emit(v, .Null, .{ 0, reg_result, reg_result.at(n - 1) });
         }
-        _ = aux.addOp1(v, OP.NullRow, lk.i_tab_cur);
-        if (lk.i_idx_cur != 0) _ = aux.addOp1(v, OP.NullRow, lk.i_idx_cur);
+        _ = aux.emit(v, .NullRow, .{Cursor.from(lk.i_tab_cur)});
+        if (lk.i_idx_cur != 0) _ = aux.emit(v, .NullRow, .{Cursor.from(lk.i_idx_cur)});
     }
     if (!tab_item.fg.jointype.LTORJ) {
         m_all |= loop.mask_self;
@@ -1610,7 +1634,7 @@ pub fn rightJoinLoop(w: *WhereInfo, i_level: usize, level: *WhereLevel) Oom!void
         // Expressions of sub_where that read the index of the right table
         // fall back to the table when the index cursor is on a NULL row,
         // so make sure it is.
-        _ = aux.addOp1(v, OP.NullRow, level.i_idx_cur);
+        _ = aux.emit(v, .NullRow, .{Cursor.from(level.i_idx_cur)});
     }
     const from = try p.arena.create(SrcList);
     from.* = .{};
@@ -1625,12 +1649,12 @@ pub fn rightJoinLoop(w: *WhereInfo, i_level: usize, level: *WhereLevel) Oom!void
     if (where_mod.whereBegin(p, from, sub_where, null, null, null, .{ .RIGHT_JOIN = true }, 0)) |sub| {
         const i_cur = level.i_tab_cur;
         p.n_mem += 1;
-        const r = p.n_mem;
+        const r: Reg = .from(p.n_mem);
         var n_pk: i32 = undefined;
-        const addr_cont = where_mod.continueLabel(sub);
+        const addr_cont: Jump = .from(where_mod.continueLabel(sub));
         const tab = tab_item.s_tab.?;
         if (tab.hasRowid()) {
-            ec.codeGetColumnOfTable(v, tab, i_cur, -1, r);
+            ec.codeGetColumnOfTable(v, tab, i_cur, -1, r.int());
             n_pk = 1;
         } else {
             const pk = build.primaryKeyIndex(tab).?;
@@ -1638,28 +1662,28 @@ pub fn rightJoinLoop(w: *WhereInfo, i_level: usize, level: *WhereLevel) Oom!void
             p.n_mem += n_pk - 1;
             for (0..pk.n_key_col) |i_pk| {
                 const i_col = pk.ai_column[i_pk];
-                ec.codeGetColumnOfTable(v, tab, i_cur, i_col, r + @as(i32, @intCast(i_pk)));
+                ec.codeGetColumnOfTable(v, tab, i_cur, i_col, r.at(i_pk).int());
             }
         }
 
         // Skip rows of the right table that appeared in an output row.
         if (rj.reg_bloom != 0) {
-            _ = aux.addOp4Int(v, OP.Filter, rj.reg_bloom, aux.currentAddr(v) + 2, r, n_pk);
+            _ = aux.emitInt(v, .Filter, .{ Reg.from(rj.reg_bloom), aux.here(v).plus(2), r }, n_pk);
         }
-        _ = aux.addOp4Int(v, OP.Found, rj.i_match, addr_cont, r, n_pk);
-        const r2 = expr_mod.getTempReg(p);
+        _ = aux.emitInt(v, .Found, .{ Cursor.from(rj.i_match), addr_cont, r }, n_pk);
+        const r2: Reg = .from(expr_mod.getTempReg(p));
 
         // Record the row in the iMatch index.
-        _ = aux.addOp3(v, OP.MakeRecord, r, n_pk, r2);
-        _ = aux.addOp4Int(v, OP.IdxInsert, rj.i_match, r2, r, n_pk);
-        expr_mod.releaseTempReg(p, r2);
+        _ = aux.emit(v, .MakeRecord, .{ r, n_pk, r2 });
+        _ = aux.emitInt(v, .IdxInsert, .{ Cursor.from(rj.i_match), r2, r }, n_pk);
+        expr_mod.releaseTempReg(p, r2.int());
         if (rj.reg_bloom != 0) {
-            _ = aux.addOp4Int(v, OP.FilterAdd, rj.reg_bloom, 0, r, n_pk);
+            _ = aux.emitInt(v, .FilterAdd, .{ Reg.from(rj.reg_bloom), 0, r }, n_pk);
             aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
         }
 
         // Output the row with NULLs for the tables to the left.
-        _ = aux.addOp2(v, OP.Gosub, rj.reg_return, rj.addr_subrtn);
+        _ = aux.emit(v, .Gosub, .{ Reg.from(rj.reg_return), Jump.from(rj.addr_subrtn) });
         where_mod.whereEnd(sub);
     }
     aux.explainPop(p);

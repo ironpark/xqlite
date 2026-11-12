@@ -315,7 +315,7 @@ pub fn codeEval(s: *Parser, exprs: []const *tree.Expr) Error!void {
         var nc: int.NameContext = .{ .parse = s.p };
         @import("../../sql/resolve.zig").resolveExprNames(&nc, e) catch return error.ParseFailed;
         s.p.n_mem += 1;
-        @import("../../sql/expr_code.zig").exprCode(s.p, e, s.p.n_mem);
+        @import("../../sql/expr_code.zig").exprCode(s.p, e, .from(s.p.n_mem));
     }
 }
 

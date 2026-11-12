@@ -358,13 +358,13 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
     const v = build.getVdbe(p) orelse return;
     // The schema format must be at least 3, but one below 3 is not raised
     // to 4, which would corrupt existing DESC indexes.
-    const r1: Reg = .from(expr_mod.getTempReg(p));
+    const r1: Reg = expr_mod.getTempReg(p);
     _ = aux.emit(v, .ReadCookie, .{ i_db, r1, @backingInt(btree.Meta.file_format) });
     aux.usesBtree(v, @intCast(i_db));
     _ = aux.emit(v, .AddImm, .{ r1, -2 });
     _ = aux.emit(v, .IfPos, .{ r1, aux.here(v).plus(2) });
     _ = aux.emit(v, .SetCookie, .{ i_db, @backingInt(btree.Meta.file_format), 3 });
-    expr_mod.releaseTempReg(p, r1.int());
+    expr_mod.releaseTempReg(p, r1);
 
     // Reload the table definition.
     renameReloadSchema(p, i_db, prepare.INITFLAG_AlterAdd);
@@ -1551,7 +1551,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
                 // affinity.
                 const aff = c.affinity;
                 if (aff == Aff.real) c.affinity = Aff.numeric;
-                ec.codeGetColumnOfTable(v, t, cur.int(), @intCast(i), out.int());
+                ec.codeGetColumnOfTable(v, t, cur, @intCast(i), out);
                 c.affinity = aff;
             }
             n_field += 1;

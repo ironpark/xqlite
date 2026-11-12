@@ -1435,7 +1435,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
             for (fk.cols, 0..) |fc, j| {
                 const i_col = if (ai_cols) |a| a[j] else fc.i_from;
                 const reg = reg_row.at(j);
-                ec.codeGetColumnOfTable(v, t, child_cur.int(), i_col, reg.int());
+                ec.codeGetColumnOfTable(v, t, child_cur, i_col, reg);
                 _ = aux.emit(v, .IsNull, .{ reg, ok });
             }
 
@@ -1633,7 +1633,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     var r2: Reg = .none;
     if (!is_quick and !t.hasRowid()) {
         pk = build.primaryKeyIndex(t).?;
-        r2 = .from(expr.getTempRange(p, pk.?.n_key_col));
+        r2 = expr.getTempRange(p, pk.?.n_key_col);
         _ = aux.emit(v, .Null, .{ 1, r2, r2.at(@as(i32, pk.?.n_key_col) - 1) });
     }
     var i_data_cur: i32 = undefined;
@@ -1679,7 +1679,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         _ = integrityCheckResultRow(v);
         aux.landHere(v, a1);
         aux.landHere(v, a1.plus(1));
-        for (0..pki.n_key_col) |jj| ec.codeLoadIndexColumn(p, pki, data_cur.int(), jj, r2.at(jj).int());
+        for (0..pki.n_key_col) |jj| ec.codeLoadIndexColumn(p, pki, data_cur, jj, r2.at(jj));
     }
 
     // The datatype of every column:
@@ -1701,7 +1701,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         var p1: i32 = undefined;
         var p3: i32 = undefined;
         if (col.col_flags.VIRTUAL) {
-            ec.codeGetColumnOfTable(v, t, data_cur.int(), jc, ck.msg.int());
+            ec.codeGetColumnOfTable(v, t, data_cur, jc, ck.msg);
             p1 = -1;
             p3 = ck.msg.int();
         } else {
@@ -1773,7 +1773,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             // (4) Numeric columns hold no TEXT that looks like a number.
             _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
             aux.changeP5(v, 0x1b); // NULL, INT, FLOAT or BLOB
-            if (p1 >= 0) ec.codeGetColumnOfTable(v, t, data_cur.int(), jc, ck.msg.int());
+            if (p1 >= 0) ec.codeGetColumnOfTable(v, t, data_cur, jc, ck.msg);
             _ = aux.emit4(v, .Affinity, .{ ck.msg, 1 }, .{ .z = "C" });
             _ = aux.emitInt(v, .IsType, .{ -1, label_ok, ck.msg.int() }, p4);
             aux.changeP5(v, 0x1c); // NULL, TEXT or BLOB
@@ -1792,8 +1792,8 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         const ck_ok = aux.newLabel(p);
         p.i_self_tab = data_cur.int() + 1;
         var kk = check.len() - 1;
-        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, ck_fault.int(), 0);
-        ec.exprIfTrue(p, check.at(0).expr, ck_ok.int(), vi.SQLITE_JUMPIFNULL);
+        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, .of(ck_fault), 0);
+        ec.exprIfTrue(p, check.at(0).expr, .of(ck_ok), vi.SQLITE_JUMPIFNULL);
         aux.place(v, ck_fault);
         p.i_self_tab = 0;
         const msg = try build.mprintf(p, "CHECK constraint failed in %s", &.{.{ .str = t.name }});
@@ -1896,7 +1896,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     }
     _ = aux.emit(v, .Next, .{ data_cur, loop_top });
     aux.landHere(v, loop_top.plus(-1));
-    if (pk) |pki| expr.releaseTempRange(p, r2.int(), pki.n_key_col);
+    if (pk) |pki| expr.releaseTempRange(p, r2, pki.n_key_col);
 }
 
 // ===================================================== pragma virtual tables

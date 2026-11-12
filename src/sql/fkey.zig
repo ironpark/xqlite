@@ -160,7 +160,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
     if (!is_ignore) {
         if (idx) |ix| {
             const n_col: i32 = @intCast(fk.cols.len);
-            const temp: Reg = .from(expr_mod.getTempRange(p, n_col));
+            const temp: Reg = expr_mod.getTempRange(p, n_col);
             _ = aux.emit(v, .OpenRead, .{ cur, ix.tnum, i_db });
             aux.setP4KeyInfo(p, ix);
             for (0..fk.cols.len) |i| {
@@ -182,11 +182,11 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
             }
             _ = aux.emitStr(v, .Affinity, .{ temp, n_col, 0 }, insert_mod.indexAffinityPrefix(p, ix, fk.cols.len));
             _ = aux.emitInt(v, .Found, .{ cur, ok, temp }, n_col);
-            expr_mod.releaseTempRange(p, temp.int(), n_col);
+            expr_mod.releaseTempRange(p, temp, n_col);
         } else {
             // The parent key is the INTEGER PRIMARY KEY: a child key that
             // is not an integer has no parent.
-            const temp: Reg = .from(expr_mod.getTempReg(p));
+            const temp: Reg = expr_mod.getTempReg(p);
             _ = aux.emit(v, .SCopy, .{ cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[0]))), temp });
             const must_be_int = aux.emit(v, .MustBeInt, .{ temp, 0 });
             // A row inserted into its own parent table satisfies itself.
@@ -199,7 +199,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
             _ = aux.emit(v, .Goto, .{ 0, ok });
             aux.landHere(v, aux.here(v).plus(-2));
             aux.landHere(v, must_be_int);
-            expr_mod.releaseTempReg(p, temp.int());
+            expr_mod.releaseTempReg(p, temp);
         }
     }
 

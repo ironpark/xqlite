@@ -113,7 +113,7 @@ pub fn vacuum(p: *Parse, name: ?int.Token, into: ?*int.Expr) void {
             if (resolve.resolveSelfReference(p, null, .{}, e, null)) |_| {
                 p.n_mem += 1;
                 into_reg = .from(p.n_mem);
-                expr_code.exprCode(p, e, into_reg.int());
+                expr_code.exprCode(p, e, into_reg);
             } else |_| {}
         }
         _ = aux.emit(v, .Vacuum, .{ i_db, into_reg });

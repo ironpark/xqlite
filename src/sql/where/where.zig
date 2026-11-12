@@ -374,10 +374,10 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     if (partial) |pe| {
         const l = aux.newLabel(p);
         skip_row = l;
-        ec.exprIfFalse(p, pe, l.int(), vi.SQLITE_JUMPIFNULL);
+        ec.exprIfFalse(p, pe, .of(l), vi.SQLITE_JUMPIFNULL);
         loop.ws_flags.PARTIALIDX = true;
     }
-    const reg_record: Reg = .from(expr_mod.getTempReg(p));
+    const reg_record: Reg = expr_mod.getTempReg(p);
     const reg_base: Reg = .from(delete.generateIndexKey(p, idx, tab_cur.int(), reg_record.int(), false, null, null, 0));
     if (level.reg_filter != 0) {
         std.debug.assert(we.loopBloomable(loop));
@@ -400,7 +400,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         aux.changeP5(v, vi.STMTSTATUS.AUTOINDEX);
         if (src.fg.jointype.LEFT) aux.landHere(v, addr_top);
     }
-    expr_mod.releaseTempReg(p, reg_record.int());
+    expr_mod.releaseTempReg(p, reg_record);
 
     // Jump here when skipping the initialization.
     aux.landHere(v, addr_init);
@@ -455,25 +455,25 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
             if (!term.wt_flags.VIRTUAL and
                 expr_mod.isSingleTableConstraint(e, tab_list, i_src, false))
             {
-                ec.exprIfFalse(p, term.expr, addr_cont.int(), vi.SQLITE_JUMPIFNULL);
+                ec.exprIfFalse(p, term.expr, .of(addr_cont), vi.SQLITE_JUMPIFNULL);
             }
         }
         if (loop.ws_flags.IPK) {
-            const r1: Reg = .from(expr_mod.getTempReg(p));
+            const r1: Reg = expr_mod.getTempReg(p);
             _ = aux.emit(v, .Rowid, .{ cur, r1 });
             _ = aux.emitInt(v, .FilterAdd, .{ filter, 0, r1 }, 1);
-            expr_mod.releaseTempReg(p, r1.int());
+            expr_mod.releaseTempReg(p, r1);
         } else {
             const idx = loop.btree.index.?;
             const n: i32 = loop.btree.n_eq;
-            const r1: Reg = .from(expr_mod.getTempRange(p, n));
+            const r1: Reg = expr_mod.getTempRange(p, n);
             var jj: i32 = 0;
             while (jj < n) : (jj += 1) {
                 std.debug.assert(idx.table == item.s_tab.?);
-                ec.codeLoadIndexColumn(p, idx, cur.int(), @intCast(jj), r1.at(jj).int());
+                ec.codeLoadIndexColumn(p, idx, cur, @intCast(jj), r1.at(jj));
             }
             _ = aux.emitInt(v, .FilterAdd, .{ filter, 0, r1 }, n);
-            expr_mod.releaseTempRange(p, r1.int(), n);
+            expr_mod.releaseTempRange(p, r1, n);
         }
         aux.place(v, addr_cont);
         _ = aux.emit(v, .Next, .{ cur, addr_top.plus(1) });
@@ -1538,7 +1538,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             (n_tab_list == 0 or exprIsDeterministic(x)) and
             !(x.flags.InnerON and tab_list.at(0).fg.jointype.LTORJ))
         {
-            ec.exprIfFalse(p, x, w.i_break, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, x, .from(w.i_break), vi.SQLITE_JUMPIFNULL);
             t.wt_flags.CODED = true;
         }
     }

@@ -240,7 +240,7 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
             }
             progress = true;
             const x = build.tableColumnToStorage(t, @intCast(i)) + reg_store;
-            ec.codeGeneratedColumn(p, t, c, x);
+            ec.codeGeneratedColumn(p, t, c, .from(x));
             c.col_flags.NOTAVAIL = false;
         }
         if (redo == null or !progress) break;
@@ -348,8 +348,8 @@ pub fn autoincrementEnd(p: *Parse) void {
         ops[0].p1 = mem_id + 1;
         ops[1].p2 = mem_id + 1;
         ops[2].p1 = mem_id - 1;
-        ops[2].p3 = i_rec;
-        ops[3].p2 = i_rec;
+        ops[2].p3 = i_rec.int();
+        ops[3].p2 = i_rec.int();
         ops[3].p3 = mem_id + 1;
         ops[3].p5 = OPFLAG.APPEND;
         expr_mod.releaseTempReg(p, i_rec);
@@ -384,20 +384,20 @@ fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void 
 /// `st` (typing.Store.pick()).
 pub fn codeStore(p: *Parse, st: typing.Conv, reg: i32) void {
     const val: Reg = .from(reg);
-    const tmp: Reg = .from(expr_mod.getTempReg(p));
+    const tmp: Reg = expr_mod.getTempReg(p);
     if (st.n_consts == 0) {
         _ = aux.addFunctionCall(p, 0, reg, tmp.int(), 1, st.def, 0);
     } else {
         // The value and the constants after it.
         const n: i32 = 1 + @as(i32, st.n_consts);
-        const base: Reg = .from(expr_mod.getTempRange(p, n));
+        const base: Reg = expr_mod.getTempRange(p, n);
         _ = aux.emit(p.vdbe.?, .Copy, .{ val, base });
         for (st.consts[0..st.n_consts], 0..) |c, i| _ = aux.emit(p.vdbe.?, .Integer, .{ c, base.at(1 + i) });
         _ = aux.addFunctionCall(p, 0, base.int(), tmp.int(), n, st.def, 0);
-        expr_mod.releaseTempRange(p, base.int(), n);
+        expr_mod.releaseTempRange(p, base, n);
     }
     _ = aux.emit(p.vdbe.?, .Move, .{ tmp, val, 1 });
-    expr_mod.releaseTempReg(p, tmp.int());
+    expr_mod.releaseTempReg(p, tmp);
 }
 
 /// Port of sqlite3MultiValuesEnd(): if `val` is a VALUES clause coded
@@ -495,7 +495,7 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Selec
         if (subq.select.e_list.?.len() != row.len()) {
             select_mod.selectWrongNumTermsError(p, subq.select);
         } else {
-            _ = ec.codeExprList(p, row, subq.reg_result, 0, 0);
+            _ = ec.codeExprList(p, row, .from(subq.reg_result), .none, 0);
             _ = aux.emit(p.vdbe.?, .Yield, .{Reg.from(subq.reg_return)});
         }
     }
@@ -640,8 +640,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         if (use_temp_table) {
             src_tab = .from(p.n_tab);
             p.n_tab += 1;
-            const rec: Reg = .from(expr_mod.getTempReg(p));
-            const temp_rowid: Reg = .from(expr_mod.getTempReg(p));
+            const rec: Reg = expr_mod.getTempReg(p);
+            const temp_rowid: Reg = expr_mod.getTempReg(p);
             _ = aux.emit(v, .OpenEphemeral, .{ src_tab.?, n_column });
             const addr_l = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
             _ = aux.emit(v, .MakeRecord, .{ select_reg, n_column, rec });
@@ -649,8 +649,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             _ = aux.emit(v, .Insert, .{ src_tab.?, rec, temp_rowid });
             _ = aux.emit(v, .Goto, .{ 0, addr_l });
             aux.landHere(v, addr_l);
-            expr_mod.releaseTempReg(p, rec.int());
-            expr_mod.releaseTempReg(p, temp_rowid.int());
+            expr_mod.releaseTempReg(p, rec);
+            expr_mod.releaseTempReg(p, temp_rowid);
         }
     } else {
         var nc: NameContext = .{ .parse = p };
@@ -784,7 +784,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                     if (tmask & int.TRIGGER_BEFORE != 0) _ = aux.emit(v, .SoftNull, .{store_reg});
                     continue;
                 } else if (column == null) {
-                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg.int());
+                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg);
                     continue;
                 }
             }
@@ -792,13 +792,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 const j = tab_col_map[ii];
                 if (j == 0) {
                     // Not in the IDLIST: the DEFAULT.
-                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg.int());
+                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg);
                     continue;
                 }
                 k = j - 1;
             } else if (n_column == 0) {
                 // DEFAULT VALUES.
-                ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg.int());
+                ec.codeFactorable(p, build.columnExprAuth(t, c, p), store_reg);
                 continue;
             } else {
                 k = i - n_hidden;
@@ -810,7 +810,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 if (select_reg != data_reg) _ = aux.emit(v, .SCopy, .{ select_reg.at(k), store_reg });
             } else {
                 const x = list.?.at(@intCast(k)).expr.?;
-                const y: Reg = .from(ec.codeTarget(p, x, store_reg.int()));
+                const y: Reg = ec.codeTarget(p, x, store_reg);
                 if (y != store_reg) _ = aux.emitAny(v, if (x.flags.Subquery) .Copy else .SCopy, .{ .reg, .reg, .int }, .{ y, store_reg });
                 if (stores) |f| if (f[ii]) |st| if (st.pick(db, x)) |s| {
                     if (typing.readStoredLiteral(p, s, x) catch return build.oomFault(p)) return;
@@ -829,7 +829,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     // BEFORE (and INSTEAD OF) triggers, given the NEW.* row.
     if (tmask & int.TRIGGER_BEFORE != 0) {
         const n_col: i32 = @intCast(t.cols.len);
-        const cols_reg: Reg = .from(expr_mod.getTempRange(p, n_col + 1));
+        const cols_reg: Reg = expr_mod.getTempRange(p, n_col + 1);
         // The rowid of a NULL INTEGER PRIMARY KEY is not known before the
         // insert: it is -1 here.
         if (ipk_column < 0) {
@@ -840,7 +840,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 _ = aux.emit(v, .Column, .{ src_tab.?, ipk_column, cols_reg });
             } else {
                 std.debug.assert(sel == null);
-                ec.exprCode(p, list.?.at(@intCast(ipk_column)).expr, cols_reg.int());
+                ec.exprCode(p, list.?.at(@intCast(ipk_column)).expr, cols_reg);
             }
             const addr1 = aux.emit(v, .NotNull, .{cols_reg});
             _ = aux.emit(v, .Integer, .{ -1, cols_reg });
@@ -854,7 +854,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         // A view takes the values as they are.
         if (!is_view) tableAffinity(p, t, cols_reg.at(1).int());
         trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_BEFORE, t, cols_reg.int() - n_col - 1, on_error, end_of_loop.int());
-        expr_mod.releaseTempRange(p, cols_reg.int(), n_col + 1);
+        expr_mod.releaseTempRange(p, cols_reg, n_col + 1);
     }
 
     var append_flag = false;
@@ -876,7 +876,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                     _ = aux.emit(v, .NewRowid, .{ data_cur, rowid, autoinc });
                     append_flag = true;
                 } else {
-                    ec.exprCode(p, ipk, rowid.int());
+                    ec.exprCode(p, ipk, rowid);
                 }
             }
             // A NULL rowid gets a new one.
@@ -899,7 +899,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             // xqlite: a typed dialect's INTEGER PRIMARY KEY left out takes
             // its DEFAULT (PostgreSQL's `id int PRIMARY KEY DEFAULT 99`;
             // SQLite gives a new rowid), a new rowid where it is NULL.
-            ec.exprCode(p, dflt, rowid.int());
+            ec.exprCode(p, dflt, rowid);
             const addr1 = aux.emit(v, .NotNull, .{rowid});
             _ = aux.emit(v, .NewRowid, .{ data_cur, rowid, autoinc });
             aux.landHere(v, addr1);
@@ -1105,9 +1105,9 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
     const dest_cur: Cursor = .from(p.n_tab);
     p.n_tab += 1;
     const autoinc = autoIncBegin(p, i_db_dest, dest);
-    const data: Reg = .from(expr_mod.getTempReg(p));
+    const data: Reg = expr_mod.getTempReg(p);
     _ = aux.emit(v, .Null, .{ 0, data });
-    const rowid: Reg = .from(expr_mod.getTempReg(p));
+    const rowid: Reg = expr_mod.getTempReg(p);
     openTable(p, dest_cur.int(), i_db_dest, dest, OP.OpenWrite);
     std.debug.assert(dest.hasRowid() or dest_has_unique_idx);
     var empty_dest_test: ?Addr = null;
@@ -1200,8 +1200,8 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         _ = aux.emit(v, .Close, .{ dest_cur, 0 });
     }
     if (empty_src_test) |addr| aux.landHere(v, addr);
-    expr_mod.releaseTempReg(p, rowid.int());
-    expr_mod.releaseTempReg(p, data.int());
+    expr_mod.releaseTempReg(p, rowid);
+    expr_mod.releaseTempReg(p, data);
     if (empty_dest_test) |addr| {
         autoincrementEnd(p);
         _ = aux.emit(v, .Halt, .{ RC.OK, 0 });
@@ -1331,7 +1331,7 @@ fn generateConstraintChecksImpl(
                     OE.Replace => {
                         const addr1 = aux.emit(v, .NotNull, .{col_reg});
                         n_seen_replace += 1;
-                        ec.codeCopy(p, build.columnExprAuth(t, c, p), col_reg.int());
+                        ec.codeCopy(p, build.columnExprAuth(t, c, p), col_reg);
                         aux.landHere(v, addr1);
                     },
                     OE.Abort, OE.Rollback, OE.Fail => {
@@ -1369,7 +1369,7 @@ fn generateConstraintChecksImpl(
             }
             const all_ok = aux.newLabel(p);
             const copy = try expr_mod.exprDup(p.arena, e);
-            if (!db.malloc_failed) ec.exprIfTrue(p, copy, all_ok.int(), vi.SQLITE_JUMPIFNULL);
+            if (!db.malloc_failed) ec.exprIfTrue(p, copy, .of(all_ok), vi.SQLITE_JUMPIFNULL);
             if (on_error == OE.Ignore) {
                 _ = aux.emit(v, .Goto, .{ 0, ignore });
             } else {
@@ -1580,7 +1580,7 @@ fn generateConstraintChecksImpl(
         if (idx.part_idx_where) |w| {
             _ = aux.emit(v, .Null, .{ 0, idx_rec });
             p.i_self_tab = -(reg_new_data + 1);
-            ec.exprIfFalseDup(p, w, unique_ok.int(), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalseDup(p, w, .of(unique_ok), vi.SQLITE_JUMPIFNULL);
             p.i_self_tab = 0;
         }
 
@@ -1591,7 +1591,7 @@ fn generateConstraintChecksImpl(
             const i_field = idx.ai_column[ii];
             if (i_field == int.XN_EXPR) {
                 p.i_self_tab = -(reg_new_data + 1);
-                ec.codeCopy(p, idx.col_expr.?.at(ii).expr, key_reg.at(i).int());
+                ec.codeCopy(p, idx.col_expr.?.at(ii).expr, key_reg.at(i));
                 p.i_self_tab = 0;
             } else if (i_field == int.XN_ROWID or i_field == t.i_pkey) {
                 _ = aux.emit(v, .IntCopy, .{ new_data, key_reg.at(i) });
@@ -1636,7 +1636,7 @@ fn generateConstraintChecksImpl(
         var addr_conflict_ck = aux.emitInt(v, .NoConflict, .{ this_cur, unique_ok, key_reg }, idx.n_key_col);
 
         // On a collision, the key of the other row goes to other_key.
-        const other_key: Reg = if (idx == pk) key_reg else .from(expr_mod.getTempRange(p, n_pk_field));
+        const other_key: Reg = if (idx == pk) key_reg else expr_mod.getTempRange(p, n_pk_field);
         if (is_update or on_error == OE.Replace) {
             if (t.hasRowid()) {
                 _ = aux.emit(v, .IdxRowid, .{ this_cur, other_key });
@@ -1720,7 +1720,7 @@ fn generateConstraintChecksImpl(
             aux.landHere(v, addr_bypass);
         }
         aux.place(v, unique_ok);
-        if (other_key != key_reg) expr_mod.releaseTempRange(p, other_key.int(), n_pk_field);
+        if (other_key != key_reg) expr_mod.releaseTempRange(p, other_key, n_pk_field);
         if (upsert_clause) |uc| if (upsert_ipk_return) |ret| if (upsert_mod.nextIsIpk(uc)) {
             _ = aux.emit(v, .Goto, .{ 0, upsert_ipk_delay.?.plus(1) });
             aux.landHere(v, ret);

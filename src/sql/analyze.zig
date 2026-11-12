@@ -686,7 +686,7 @@ pub fn optimize(p: *Parse, v: *Vdbe, i_db_arg: usize, all_dbs: bool, right: ?[]c
             }
             const sub_sql = try build.mprintf(p, "ANALYZE \"%w\".\"%w\"", &.{ .{ .str = db.dbs.items[i_db].name }, .{ .str = t.name } });
             if (op_mask & 0x01 != 0) {
-                const r1: Reg = .from(expr.getTempReg(p));
+                const r1: Reg = expr.getTempReg(p);
                 _ = aux.emitStr(v, .String8, .{ 0, r1 }, sub_sql);
                 _ = aux.emit(v, .ResultRow, .{ r1, 1 });
             } else {

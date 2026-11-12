@@ -210,13 +210,13 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         var key: Reg = undefined;
         if (pk) |k| {
             for (0..k.n_key_col) |i| {
-                ec.codeGetColumnOfTable(v, t, i_tab_cur, k.ai_column[i], pk_reg.at(i).int());
+                ec.codeGetColumnOfTable(v, t, .from(i_tab_cur), k.ai_column[i], pk_reg.at(i));
             }
             key = pk_reg;
         } else {
             p.n_mem += 1;
             key = .from(p.n_mem);
-            ec.codeGetColumnOfTable(v, t, i_tab_cur, -1, key.int());
+            ec.codeGetColumnOfTable(v, t, .from(i_tab_cur), -1, key);
         }
 
         var n_key: i16 = undefined;
@@ -364,7 +364,7 @@ pub fn generateRowDelete(
         for (0..t.cols.len) |i_col| {
             if (mask == 0xffffffff or (i_col <= 31 and mask & (@as(u32, 1) << @intCast(i_col)) != 0)) {
                 const kk = build.tableColumnToStorage(t, @intCast(i_col));
-                ec.codeGetColumnOfTable(v, t, i_data_cur, @intCast(i_col), i_old + kk + 1);
+                ec.codeGetColumnOfTable(v, t, .from(i_data_cur), @intCast(i_col), .from(i_old + kk + 1));
             }
         }
         const addr_start = aux.currentAddr(v);
@@ -437,7 +437,7 @@ pub fn generateIndexKey(p: *Parse, idx: *Index, i_data_cur: i32, reg_out: i32, p
         if (idx.part_idx_where) |w| {
             lbl.* = aux.makeLabel(p);
             p.i_self_tab = i_data_cur + 1;
-            ec.exprIfFalseDup(p, w, lbl.*, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalseDup(p, w, .from(lbl.*), vi.SQLITE_JUMPIFNULL);
             p.i_self_tab = 0;
             // The WHERE clause may have clobbered the prior key.
             prior = null;
@@ -447,19 +447,19 @@ pub fn generateIndexKey(p: *Parse, idx: *Index, i_data_cur: i32, reg_out: i32, p
     }
     const n_col: i32 = if (prefix_only and idx.uniq_not_null) idx.n_key_col else idx.n_column;
     const reg_base = expr_mod.getTempRange(p, n_col);
-    if (prior) |pr| if (reg_base != reg_prior or pr.part_idx_where != null) {
+    if (prior) |pr| if (reg_base.int() != reg_prior or pr.part_idx_where != null) {
         prior = null;
     };
     for (0..@intCast(n_col)) |j| {
         if (prior) |pr| if (pr.ai_column[j] == idx.ai_column[j] and pr.ai_column[j] != int.XN_EXPR) continue;
-        ec.codeLoadIndexColumn(p, idx, i_data_cur, j, reg_base + @as(i32, @intCast(j)));
+        ec.codeLoadIndexColumn(p, idx, .from(i_data_cur), j, reg_base.at(j));
         // A REAL column stored as an integer goes back into the index as
         // an integer.
         if (idx.ai_column[j] >= 0) _ = aux.deletePriorOpcode(v, OP.RealAffinity);
     }
-    if (reg_out != 0) _ = aux.emit(v, .MakeRecord, .{ Reg.from(reg_base), n_col, Reg.from(reg_out) });
+    if (reg_out != 0) _ = aux.emit(v, .MakeRecord, .{ reg_base, n_col, Reg.from(reg_out) });
     expr_mod.releaseTempRange(p, reg_base, n_col);
-    return reg_base;
+    return reg_base.int();
 }
 
 /// Port of sqlite3ResolvePartIdxLabel().

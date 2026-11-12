@@ -11,6 +11,7 @@ const select_mod = @import("select.zig");
 const window = @import("window.zig");
 const callback = @import("callback.zig");
 const aux = @import("../vdbe/aux.zig");
+const Reg = aux.operand.Reg;
 const mem = @import("../vdbe/mem.zig");
 const serial = @import("../vdbe/serial.zig");
 const ENC = @import("../vdbe/vdbe_int.zig").ENC;
@@ -1746,26 +1747,29 @@ pub fn aggInfoPersistWalker(p: *Parse) Walker {
 
 // ===================================================== temp registers
 
-/// Port of sqlite3GetTempReg().
-pub fn getTempReg(p: *Parse) i32 {
+/// Port of sqlite3GetTempReg(): a register for a value that is not
+/// needed for long.
+pub fn getTempReg(p: *Parse) Reg {
     if (p.n_temp_reg == 0) {
         p.n_mem += 1;
-        return p.n_mem;
+        return .from(p.n_mem);
     }
     p.n_temp_reg -= 1;
-    return p.temp_regs[p.n_temp_reg];
+    return .from(p.temp_regs[p.n_temp_reg]);
 }
 
-/// Port of sqlite3ReleaseTempReg().
-pub fn releaseTempReg(p: *Parse, reg: i32) void {
-    if (reg != 0 and p.n_temp_reg < p.temp_regs.len) {
-        p.temp_regs[p.n_temp_reg] = reg;
+/// Port of sqlite3ReleaseTempReg(): give back a register of
+/// getTempReg() (`.none`: nothing).
+pub fn releaseTempReg(p: *Parse, reg: Reg) void {
+    if (!reg.isNone() and p.n_temp_reg < p.temp_regs.len) {
+        p.temp_regs[p.n_temp_reg] = reg.int();
         p.n_temp_reg += 1;
     }
 }
 
-/// Port of sqlite3GetTempRange().
-pub fn getTempRange(p: *Parse, n_reg: i32) i32 {
+/// Port of sqlite3GetTempRange(): the first of `n_reg` registers in a
+/// row.
+pub fn getTempRange(p: *Parse, n_reg: i32) Reg {
     if (n_reg == 1) return getTempReg(p);
     var i = p.i_range_reg;
     if (n_reg <= p.n_range_reg) {
@@ -1775,15 +1779,15 @@ pub fn getTempRange(p: *Parse, n_reg: i32) i32 {
         i = p.n_mem + 1;
         p.n_mem += n_reg;
     }
-    return i;
+    return .from(i);
 }
 
 /// Port of sqlite3ReleaseTempRange().
-pub fn releaseTempRange(p: *Parse, reg: i32, n_reg: i32) void {
+pub fn releaseTempRange(p: *Parse, reg: Reg, n_reg: i32) void {
     if (n_reg == 1) return releaseTempReg(p, reg);
     if (n_reg > p.n_range_reg) {
         p.n_range_reg = n_reg;
-        p.i_range_reg = reg;
+        p.i_range_reg = reg.int();
     }
 }
 

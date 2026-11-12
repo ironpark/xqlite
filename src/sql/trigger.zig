@@ -688,7 +688,7 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) Oom!?*Tr
         if (!db.malloc_failed) if (resolve.resolveExprNames(&nc, w)) |_| {
             const end = aux.newLabel(&sub);
             end_trigger = end;
-            ec.exprIfFalse(&sub, w, end.int(), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(&sub, w, .of(end), vi.SQLITE_JUMPIFNULL);
         } else |_| {};
     }
 
@@ -922,7 +922,7 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_
             for (new.slice(), 0..) |*item, i| {
                 const col = item.expr.?;
                 const r = reg.at(i);
-                ec.codeFactorable(p, col, r.int());
+                ec.codeFactorable(p, col, r);
                 if (expr_mod.affinity(col) == Aff.real) _ = aux.emit(v, .RealAffinity, .{r});
             }
             _ = aux.emit(v, .MakeRecord, .{ reg, n_col, reg.at(n_col) });

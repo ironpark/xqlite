@@ -376,7 +376,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // The INSERT left the data cursor on the row to update: no
             // search, only the WHERE of the DO UPDATE.
             e_one_pass = ONEPASS.SINGLE;
-            ec.exprIfFalse(p, where, label_break.int(), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, where, .of(label_break), vi.SQLITE_JUMPIFNULL);
             b_finish_seek = false;
         } else {
             // The rows to update. A one-pass update of several rows is not
@@ -413,7 +413,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // The PRIMARY KEY of the row: a record in the ephemeral table
             // for two passes.
             const k = pk.?;
-            for (0..k.n_key_col) |i| ec.codeGetColumnOfTable(v, t, data_cur.int(), k.ai_column[i], pk_reg.at(i).int());
+            for (0..k.n_key_col) |i| ec.codeGetColumnOfTable(v, t, data_cur, k.ai_column[i], pk_reg.at(i));
             if (e_one_pass != ONEPASS.OFF) {
                 if (addr_open) |a| _ = aux.changeToNoop(v, a.int());
                 n_key = n_pk;
@@ -480,7 +480,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     // The new rowid.
     if (chng_rowid) {
         if (n_change_from == 0) {
-            ec.exprCode(p, rowid_expr, new_rowid.int());
+            ec.exprCode(p, rowid_expr, new_rowid);
         } else {
             _ = aux.emit(v, .Column, .{ eph_cur, i_rowid_expr, new_rowid });
         }
@@ -495,7 +495,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         for (t.cols, 0..) |c, i| {
             const k = reg_old.at(build.tableColumnToStorage(t, @intCast(i)));
             if (oldmask == 0xffffffff or (i < 32 and oldmask & (@as(u32, 1) << @intCast(i)) != 0) or c.col_flags.PRIMKEY) {
-                ec.codeGetColumnOfTable(v, t, data_cur.int(), @intCast(i), k.int());
+                ec.codeGetColumnOfTable(v, t, data_cur, @intCast(i), k);
             } else {
                 _ = aux.emit(v, .Null, .{ 0, k });
             }
@@ -523,7 +523,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                         const n_off: i32 = if (is_view) @intCast(t.cols.len) else n_pk;
                         _ = aux.emit(v, .Column, .{ eph_cur, n_off + j, k });
                     } else {
-                        ec.exprCode(p, changes.at(@intCast(j)).expr, k.int());
+                        ec.exprCode(p, changes.at(@intCast(j)).expr, k);
                     }
                     if (stores) |f| if (f[i]) |st| {
                         const x = changes.at(@intCast(j)).expr.?;
@@ -538,7 +538,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                         }
                     };
                 } else if (tmask & int.TRIGGER_BEFORE == 0 or i > 31 or newmask & (@as(u32, 1) << @intCast(i)) != 0) {
-                    ec.codeGetColumnOfTable(v, t, data_cur.int(), @intCast(i), k.int());
+                    ec.codeGetColumnOfTable(v, t, data_cur, @intCast(i), k);
                     b_finish_seek = false;
                 } else {
                     _ = aux.emit(v, .Null, .{ 0, k });
@@ -568,7 +568,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                 if (c.col_flags.intersects(COLFLAG.GENERATED)) {
                     if (c.col_flags.VIRTUAL) k = k.at(-1);
                 } else if (ax_ref[i] < 0 and @as(i32, @intCast(i)) != t.i_pkey) {
-                    ec.codeGetColumnOfTable(v, t, data_cur.int(), @intCast(i), k.int());
+                    ec.codeGetColumnOfTable(v, t, data_cur, @intCast(i), k);
                 }
             }
             if (t.tab_flags.intersects(TF.HasGenerated)) insert.computeGeneratedColumns(p, reg_new.int(), t);
@@ -683,7 +683,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
             const i: i32 = @intCast(ii);
             std.debug.assert(!c.col_flags.intersects(COLFLAG.GENERATED));
             if (ax_ref[ii] >= 0) {
-                ec.exprCode(p, changes.at(@intCast(ax_ref[ii])).expr, reg_arg.at(2 + i).int());
+                ec.exprCode(p, changes.at(@intCast(ax_ref[ii])).expr, reg_arg.at(2 + i));
             } else {
                 _ = aux.emit(v, .VColumn, .{ csr, i, reg_arg.at(2 + i) });
                 // For sqlite3_vtab_nochange().
@@ -693,7 +693,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
         if (t.hasRowid()) {
             _ = aux.emit(v, .Rowid, .{ csr, reg_arg });
             if (rowid) |r| {
-                ec.exprCode(p, r, reg_arg.at(1).int());
+                ec.exprCode(p, r, reg_arg.at(1));
             } else {
                 _ = aux.emit(v, .Rowid, .{ csr, reg_arg.at(1) });
             }

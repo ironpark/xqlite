@@ -334,10 +334,10 @@ fn codeAttach(p: *Parse, typ: AuthCode, func: *const FuncDef, auth_arg: ?*Expr, 
     const v = build.getVdbe(p);
     const reg_args = expr_mod.getTempRange(p, 4);
     expr_code.exprCode(p, filename, reg_args);
-    expr_code.exprCode(p, dbname, reg_args + 1);
-    expr_code.exprCode(p, key, reg_args + 2);
+    expr_code.exprCode(p, dbname, reg_args.at(1));
+    expr_code.exprCode(p, key, reg_args.at(2));
     if (v) |vm| {
-        _ = aux.addFunctionCall(p, 0, reg_args + 3 - func.n_arg, reg_args + 3, func.n_arg, func, 0);
+        _ = aux.addFunctionCall(p, 0, reg_args.at(3 - func.n_arg).int(), reg_args.at(3).int(), func.n_arg, func, 0);
         // ATTACH expires only this statement, DETACH all of them.
         _ = aux.emit(vm, .Expire, .{typ == .attach});
     }

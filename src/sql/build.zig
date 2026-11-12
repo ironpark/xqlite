@@ -406,7 +406,7 @@ pub fn finishCoding(p: *Parse) void {
             p.ok_const_factor = false;
             for (el.slice()) |*item| {
                 std.debug.assert(item.u.const_expr_reg > 0);
-                @import("expr_code.zig").exprCode(p, item.expr, item.u.const_expr_reg);
+                @import("expr_code.zig").exprCode(p, item.expr, .from(item.u.const_expr_reg));
             }
         }
 
@@ -2696,7 +2696,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     _ = aux.emit4(v, .SorterOpen, .{ sorter, 0, idx.n_key_col }, key_p4);
     insert_mod.openTable(p, tab_cur.int(), @intCast(i_db), t, OP.OpenRead);
     var addr1 = aux.emit(v, .Rewind, .{tab_cur});
-    const record: Reg = .from(expr_mod.getTempReg(p));
+    const record: Reg = expr_mod.getTempReg(p);
     main_mod.multiWrite(p);
     var part_idx_label: i32 = 0;
     _ = delete_mod.generateIndexKey(p, idx, tab_cur.int(), record.int(), false, &part_idx_label, null, 0);
@@ -2728,7 +2728,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     if (!idx.asc_key_bug) _ = aux.emit(v, .SeekEnd, .{idx_cur});
     _ = aux.emit(v, .IdxInsert, .{ idx_cur, record });
     aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
-    expr_mod.releaseTempReg(p, record.int());
+    expr_mod.releaseTempReg(p, record);
     _ = aux.emit(v, .SorterNext, .{ sorter, addr2 });
     aux.landHere(v, addr1);
     _ = aux.emit(v, .Close, .{tab_cur});
@@ -2920,7 +2920,7 @@ pub fn keyInfoOfIndex(p: *Parse, idx: *Index) ?*vi.KeyInfo {
 /// one's sqlite_schema row.
 fn destroyRootPage(p: *Parse, i_table: int.Pgno, i_db: usize) void {
     const v = getVdbe(p) orelse return;
-    const r1: Reg = .from(expr_mod.getTempReg(p));
+    const r1: Reg = expr_mod.getTempReg(p);
     if (i_table < 2) util.errorMsg(p, "corrupt schema", .{});
     _ = aux.emit(v, .Destroy, .{ i_table, r1, i_db });
     main_mod.mayAbort(p);
@@ -2930,7 +2930,7 @@ fn destroyRootPage(p: *Parse, i_table: int.Pgno, i_db: usize) void {
         .{ .int = r1.int() },
         .{ .int = r1.int() },
     });
-    expr_mod.releaseTempReg(p, r1.int());
+    expr_mod.releaseTempReg(p, r1);
 }
 
 /// Port of destroyTable(): erase the b-trees of `t` and its indexes,

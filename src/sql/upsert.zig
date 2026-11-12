@@ -176,10 +176,10 @@ pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, i_cur: i32) Oo
     if (idx) |ix| if (cur != data_cur) {
         // Move the table cursor to the conflicting row.
         if (t.hasRowid()) {
-            const rowid: Reg = .from(expr_mod.getTempReg(p));
+            const rowid: Reg = expr_mod.getTempReg(p);
             _ = aux.emit(v, .IdxRowid, .{ cur, rowid });
             _ = aux.emit(v, .SeekRowid, .{ data_cur, 0, rowid });
-            expr_mod.releaseTempReg(p, rowid.int());
+            expr_mod.releaseTempReg(p, rowid);
         } else {
             const pk = build.primaryKeyIndex(t).?;
             const n_pk: i32 = pk.n_key_col;

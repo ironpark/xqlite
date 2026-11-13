@@ -23,20 +23,47 @@ const VdbeCursor = vi.VdbeCursor;
 const RC = int.RC;
 const OE = int.OE;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.Goto}, .f = opGoto },
+    .{ .ops = .{.Gosub}, .f = opGosub },
+    .{ .ops = .{.Return}, .f = opReturn },
+    .{ .ops = .{.InitCoroutine}, .f = opInitCoroutine },
+    .{ .ops = .{.EndCoroutine}, .f = opEndCoroutine },
+    .{ .ops = .{.Yield}, .f = opYield, .call = .always_inline },
+    .{ .ops = .{.HaltIfNull}, .f = opHaltIfNull },
+    .{ .ops = .{.Halt}, .f = opHalt },
+    .{ .ops = .{.Once}, .f = opOnce },
+    .{ .ops = .{ .Trace, .Init }, .f = opInit },
+    .{ .ops = .{.Program}, .f = opProgram },
+    .{ .ops = .{.Param}, .f = opParam },
+    .{ .ops = .{.FkCounter}, .f = opFkCounter },
+    .{ .ops = .{.FkIfZero}, .f = opFkIfZero },
+    .{ .ops = .{.MemMax}, .f = opMemMax },
+    .{ .ops = .{.IfPos}, .f = opIfPos },
+    .{ .ops = .{.OffsetLimit}, .f = opOffsetLimit },
+    .{ .ops = .{.IfNotZero}, .f = opIfNotZero },
+    .{ .ops = .{.DecrJumpZero}, .f = opDecrJumpZero },
+};
+
+pub fn opGoto(e: *Exec, op: *Op) Flow {
+    _ = e;
+    _ = op;
+    return .jump_p2_check;
+}
+
 pub fn opGosub(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(!in1.isDynamic());
     in1.flags = .{ .Int = true };
     in1.u = .{ .i = e.pc };
-    return .jump_p2_check_interrupt;
+    return .jump_p2_check;
 }
 
 pub fn opReturn(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
-    if (in1.flags.Int) {
-        e.pc = @intCast(in1.u.i);
-        return .goto_pc;
-    }
+    // The address of the OP_Gosub: continue after it.
+    if (in1.flags.Int) return .goto(@intCast(in1.u.i + 1));
     std.debug.assert(op.p3 != 0);
     return .next;
 }
@@ -55,19 +82,19 @@ pub fn opEndCoroutine(e: *Exec, op: *Op) Flow {
     std.debug.assert(in1.flags == MEM{ .Int = true });
     const caller = &e.ops[@intCast(in1.u.i)];
     std.debug.assert(caller.opcode == OP.Yield);
-    in1.u = .{ .i = e.pc - 1 };
-    e.pc = caller.p2 - 1;
-    return .goto_pc;
+    in1.u = .{ .i = @as(i64, e.pc) - 1 };
+    return .goto(@intCast(caller.p2));
 }
 
 pub fn opYield(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(!in1.isDynamic());
     in1.flags = .{ .Int = true };
+    // The register holds the address of the other side's OP_Yield (or
+    // one before its entry): continue after it, and leave ours.
     const dest = in1.u.i;
     in1.u = .{ .i = e.pc };
-    e.pc = @intCast(dest);
-    return .goto_pc;
+    return .goto(@intCast(dest + 1));
 }
 
 pub fn opHaltIfNull(e: *Exec, op: *Op) Error!Flow {
@@ -85,15 +112,12 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
         v.frame = frame.parent;
         v.n_frame -= 1;
         aux.setChanges(db, v.n_change);
-        var pcx = aux.frameRestore(frame);
-        if (op.p2 == OE.Ignore.int()) {
-            // RAISE(IGNORE): continue at P2 of the calling OP_Program.
-            pcx = v.prog[@intCast(pcx)].p2 - 1;
-        }
+        const caller = aux.frameRestore(frame);
         e.ops = v.prog;
         e.regs = v.mem;
-        e.pc = pcx;
-        return .goto_pc;
+        // After the calling OP_Program, or for RAISE(IGNORE) at its P2.
+        if (op.p2 == OE.Ignore.int()) return .frame(@intCast(v.prog[caller].p2));
+        return .frame(caller + 1);
     }
     v.rc = op.p1;
     v.error_action = .fromInt(op.p2);
@@ -146,7 +170,7 @@ pub fn opOnce(e: *Exec, op: *Op) Flow {
     const v = e.v;
     std.debug.assert(e.ops[0].opcode == OP.Init);
     if (v.frame) |frame| {
-        const addr: usize = @intCast(e.pc);
+        const addr = e.pc;
         const bit: u8 = @as(u8, 1) << @intCast(addr & 7);
         if (frame.once[addr / 8] & bit != 0) return .jump_p2;
         frame.once[addr / 8] |= bit;
@@ -158,10 +182,10 @@ pub fn opOnce(e: *Exec, op: *Op) Flow {
 }
 
 /// OP_Init and OP_Trace.
-pub fn opInit(e: *Exec, op: *Op) Flow {
+pub fn opInit(e: *Exec, op: *Op, comptime opc: OP) Flow {
     if (e.db.m_trace & (int.TRACE.STMT | int.TRACE.LEGACY) != 0 and e.v.min_write_file_format != 254) traceStmt(e, op);
     if (op.p1 >= @import("../../sql/global.zig").testctrl.once_reset_threshold) {
-        if (op.opcode == OP.Trace) return .next;
+        if (opc == .Trace) return .next;
         for (e.ops[1..]) |*o| {
             if (o.opcode == OP.Once) o.p1 = 0;
         }
@@ -225,7 +249,7 @@ fn allocFrame(e: *Exec, program: *vi.SubProgram) error{OutOfMemory}!*vi.VdbeFram
         .token = program.token,
         .last_rowid = 0,
         .aux_data = null,
-        .pc = @intCast(e.pc),
+        .pc = e.pc,
         .n_change = 0,
         .n_db_change = 0,
         .child_mem = child_mem,
@@ -250,17 +274,16 @@ pub fn opProgram(e: *Exec, op: *Op) Error!Flow {
         aux.vdbeError(v, "triggers nested too deep", .{});
         return error.Error;
     }
-    var frame: *vi.VdbeFrame = undefined;
-    if (!rt.flags.Blob) {
-        frame = try allocFrame(e, program);
+    // The frame is made on the first run and kept in register P3.
+    const frame = if (rt.flags.Blob) mem.dynObject(rt, frameMemDel).? else blk: {
+        const f = try allocFrame(e, program);
         mem.release(rt);
         rt.flags = .{ .Blob = true, .Dyn = true };
-        rt.z = @ptrCast(frame);
+        rt.z = @ptrCast(f);
         rt.n = @sizeOf(vi.VdbeFrame);
         rt.x_del = int.destructor(frameMemDel);
-    } else {
-        frame = mem.dynObject(rt, frameMemDel).?;
-    }
+        break :blk f;
+    };
     v.n_frame += 1;
     frame.parent = v.frame;
     frame.last_rowid = db.last_rowid;
@@ -276,14 +299,13 @@ pub fn opProgram(e: *Exec, op: *Op) Error!Flow {
     v.prog = program.ops;
     e.ops = program.ops;
     e.regs = v.mem;
-    e.pc = -1;
-    return .goto_pc_check_interrupt;
+    return .frameCheck(0);
 }
 
 pub fn opParam(e: *Exec, op: *Op) Flow {
     const out = e.out2Prerelease(op);
     const frame = e.v.frame.?;
-    const in_ = &frame.mem[@intCast(op.p1 + frame.ops[@intCast(frame.pc)].p1)];
+    const in_ = &frame.mem[@intCast(op.p1 + frame.ops[frame.pc].p1)];
     mem.shallowCopy(out, in_, .{ .Ephem = true });
     return .next;
 }

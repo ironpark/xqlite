@@ -26,6 +26,16 @@ const VdbeCursor = vi.VdbeCursor;
 const RC = int.RC;
 const Aff = int.Aff;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.IsType}, .f = opIsType },
+    // The most frequent opcode (3-6% on column-heavy loops in line).
+    .{ .ops = .{.Column}, .f = opColumn, .call = .always_inline },
+    .{ .ops = .{.TypeCheck}, .f = opTypeCheck },
+    .{ .ops = .{.Affinity}, .f = opAffinity },
+    .{ .ops = .{.MakeRecord}, .f = opMakeRecord, .call = .always_inline },
+};
+
 /// vdbeMemTypeName().
 fn memTypeName(m: *const Mem) []const u8 {
     const names = [_][]const u8{ "INT", "REAL", "TEXT", "BLOB", "NULL" };
@@ -36,23 +46,14 @@ fn memTypeName(m: *const Mem) []const u8 {
 pub const std_type = [_][]const u8{ "ANY", "BLOB", "INT", "INTEGER", "REAL", "TEXT" };
 
 pub fn opIsType(e: *Exec, op: *Op) Flow {
-    var type_mask: u16 = undefined;
-    if (op.p1 >= 0) {
+    const type_mask: u16 = if (op.p1 >= 0) blk: {
         const c = e.csr(op.p1);
-        if (op.p3 < c.n_hdr_parsed) {
-            const st = c.types[@intCast(op.p3)];
-            if (st >= 12) {
-                type_mask = if (st & 1 != 0) 0x04 else 0x08;
-            } else {
-                const masks = [_]u16{ 0x10, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x2, 0x01, 0x01, 0x10, 0x10 };
-                type_mask = masks[st];
-            }
-        } else {
-            type_mask = @as(u16, 1) << @intCast(op.p4As(.int32) - 1);
-        }
-    } else {
-        type_mask = @as(u16, 1) << @intCast(mem.valueType(e.reg(op.p3)) - 1);
-    }
+        if (op.p3 >= c.n_hdr_parsed) break :blk @as(u16, 1) << @intCast(op.p4As(.int32) - 1);
+        const st = c.types[@intCast(op.p3)];
+        if (st >= 12) break :blk if (st & 1 != 0) 0x04 else 0x08;
+        const masks = [_]u16{ 0x10, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x2, 0x01, 0x01, 0x10, 0x10 };
+        break :blk masks[st];
+    } else @as(u16, 1) << @intCast(mem.valueType(e.reg(op.p3)) - 1);
     return if (type_mask & op.p5 != 0) .jump_p2 else .next;
 }
 
@@ -60,10 +61,7 @@ pub fn opIsType(e: *Exec, op: *Op) Flow {
 
 /// The op_column_corrupt exit.
 fn columnCorrupt(e: *Exec) Error!Flow {
-    if (e.ops[0].p3 > 0) {
-        e.pc = e.ops[0].p3 - 1;
-        return .goto_pc;
-    }
+    if (e.ops[0].p3 > 0) return .goto(@intCast(e.ops[0].p3));
     return error.Corrupt;
 }
 
@@ -278,15 +276,9 @@ pub fn opTypeCheck(e: *Exec, op: *Op) Error!Flow {
     const tab = op.p4As(.table);
     const cols = tab.cols;
     var in1: i32 = op.p1;
-    var i: usize = undefined;
-    var n_col: usize = undefined;
-    if (op.p3 < 2) {
-        i = 0;
-        n_col = cols.len;
-    } else {
-        i = @intCast(op.p3 - 2);
-        n_col = i + 1;
-    }
+    // P3 below 2: every column; otherwise only column P3-2.
+    var i: usize = if (op.p3 < 2) 0 else @intCast(op.p3 - 2);
+    const n_col: usize = if (op.p3 < 2) cols.len else i + 1;
     while (i < n_col) : (i += 1) {
         const col = &cols[i];
         if (col.col_flags.intersects(int.COLFLAG.GENERATED) and op.p3 < 2) {

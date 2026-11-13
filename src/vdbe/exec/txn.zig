@@ -24,6 +24,33 @@ const Sqlite3 = int.Sqlite3;
 const RC = int.RC;
 const OE = int.OE;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.Savepoint}, .f = opSavepoint },
+    .{ .ops = .{.AutoCommit}, .f = opAutoCommit },
+    .{ .ops = .{.Transaction}, .f = opTransaction },
+    .{ .ops = .{.ReadCookie}, .f = opReadCookie },
+    .{ .ops = .{.SetCookie}, .f = opSetCookie },
+    .{ .ops = .{.Destroy}, .f = opDestroy },
+    .{ .ops = .{.Clear}, .f = opClear },
+    .{ .ops = .{.CreateBtree}, .f = opCreateBtree },
+    .{ .ops = .{.SqlExec}, .f = opSqlExec },
+    .{ .ops = .{.ParseSchema}, .f = opParseSchema },
+    .{ .ops = .{.LoadAnalysis}, .f = opLoadAnalysis },
+    .{ .ops = .{.DropTable}, .f = opDropTable },
+    .{ .ops = .{.DropIndex}, .f = opDropIndex },
+    .{ .ops = .{.DropTrigger}, .f = opDropTrigger },
+    .{ .ops = .{.IntegrityCk}, .f = opIntegrityCk },
+    .{ .ops = .{.Vacuum}, .f = opVacuum },
+    .{ .ops = .{.Checkpoint}, .f = opCheckpoint },
+    .{ .ops = .{.JournalMode}, .f = opJournalMode },
+    .{ .ops = .{.IncrVacuum}, .f = opIncrVacuum },
+    .{ .ops = .{.TableLock}, .f = opTableLock },
+    .{ .ops = .{.Expire}, .f = opExpire },
+    .{ .ops = .{.Pagecount}, .f = opPagecount },
+    .{ .ops = .{.MaxPgcnt}, .f = opMaxPgcnt },
+};
+
 // ============================================================ transactions
 
 pub fn opAutoCommit(e: *Exec, op: *Op) Error!Flow {
@@ -297,20 +324,18 @@ pub fn opDestroy(e: *Exec, op: *Op) Error!Flow {
     out.u = .{ .i = moved };
     if (moved != 0) {
         @import("../../sql/build.zig").rootPageMoved(db, i_db, moved, @intCast(op.p1));
-        e.reset_schema_on_fault = @intCast(i_db + 1);
+        e.reset_schema_on_fault = @intCast(i_db);
     }
     return .next;
 }
 
 pub fn opClear(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
-    const res = e.db.dbs.items[@intCast(op.p2)].bt.?.clearTable(@intCast(op.p1));
-    const n_change = res catch 0;
+    const n_change = try e.db.dbs.items[@intCast(op.p2)].bt.?.clearTable(@intCast(op.p1));
     if (op.p3 != 0) {
         v.n_change += n_change;
         if (op.p3 > 0) e.reg(op.p3).u.i += n_change;
     }
-    _ = try res;
     return .next;
 }
 
@@ -461,7 +486,7 @@ pub fn opIntegrityCk(e: *Exec, op: *Op) Error!Flow {
         try mem.setStr(in1, report.message, ENC.UTF8, .transient);
     }
     try mem.changeEncoding(in1, e.encoding);
-    return .check_interrupt;
+    return .next_check;
 }
 
 // ========================================================= database files

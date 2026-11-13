@@ -18,6 +18,17 @@ const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.RowSetAdd}, .f = opRowSetAdd },
+    .{ .ops = .{.RowSetRead}, .f = opRowSetRead },
+    .{ .ops = .{.RowSetTest}, .f = opRowSetTest },
+    .{ .ops = .{.FilterAdd}, .f = opFilterAdd },
+    .{ .ops = .{.Filter}, .f = opFilter },
+    .{ .ops = .{ .Noop, .Explain, .CursorHint, .Abortable, .ReleaseReg, .Permutation }, .f = opNoop },
+    .{ .ops = .{ .Offset, .ColumnsUsed }, .f = opNotSupported },
+};
+
 // ================================================================ row sets
 
 pub fn opRowSetAdd(e: *Exec, op: *Op) Error!Flow {
@@ -35,10 +46,10 @@ pub fn opRowSetRead(e: *Exec, op: *Op) Error!Flow {
         try rowset.fromMem(in1).next();
     if (val) |x| {
         mem.setInt64(e.reg(op.p3), x);
-        return .check_interrupt;
+        return .next_check;
     }
     mem.setNull(in1);
-    return .jump_p2_check_interrupt;
+    return .jump_p2_check;
 }
 
 pub fn opRowSetTest(e: *Exec, op: *Op) Error!Flow {
@@ -111,6 +122,15 @@ pub fn opFilter(e: *Exec, op: *Op) Flow {
         return .jump_p2;
     }
     e.v.counters[vi.STMTSTATUS.FILTER_MISS] += 1;
+    return .next;
+}
+
+/// The opcodes that only mark the program for others: OP_Noop,
+/// OP_Explain, OP_CursorHint, OP_Abortable, OP_ReleaseReg, and
+/// OP_Permutation (read by the OP_Compare that follows).
+pub fn opNoop(e: *Exec, op: *Op) Flow {
+    _ = e;
+    _ = op;
     return .next;
 }
 

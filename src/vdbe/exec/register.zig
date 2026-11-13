@@ -17,6 +17,28 @@ const OP = vi.OP;
 const ENC = vi.ENC;
 const RC = int.RC;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.Integer}, .f = opInteger, .call = .always_inline },
+    .{ .ops = .{.Int64}, .f = opInt64 },
+    .{ .ops = .{.Real}, .f = opReal },
+    .{ .ops = .{.String8}, .f = opString8 },
+    .{ .ops = .{.String}, .f = opString },
+    .{ .ops = .{ .BeginSubrtn, .Null }, .f = opNull },
+    .{ .ops = .{.SoftNull}, .f = opSoftNull },
+    .{ .ops = .{.Blob}, .f = opBlob },
+    .{ .ops = .{.Variable}, .f = opVariable },
+    .{ .ops = .{.Move}, .f = opMove },
+    .{ .ops = .{.Copy}, .f = opCopy, .call = .always_inline },
+    .{ .ops = .{.SCopy}, .f = opSCopy, .call = .always_inline },
+    .{ .ops = .{.IntCopy}, .f = opIntCopy },
+    .{ .ops = .{.FkCheck}, .f = opFkCheck },
+    .{ .ops = .{.ResultRow}, .f = opResultRow, .call = .always_inline },
+    .{ .ops = .{.ClrSubtype}, .f = opClrSubtype },
+    .{ .ops = .{.GetSubtype}, .f = opGetSubtype },
+    .{ .ops = .{.SetSubtype}, .f = opSetSubtype },
+};
+
 /// INT32_TO_64(): P1 is the low half, P3 the high half.
 fn int32To64(lo: i32, hi: i32) i64 {
     return @bitCast(@as(u64, @as(u32, @bitCast(hi))) << 32 | @as(u32, @bitCast(lo)));

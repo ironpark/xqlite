@@ -20,6 +20,21 @@ const MEM = vi.MEM;
 const RC = int.RC;
 const OE = int.OE;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.VBegin}, .f = opVBegin },
+    .{ .ops = .{.VCreate}, .f = opVCreate },
+    .{ .ops = .{.VDestroy}, .f = opVDestroy },
+    .{ .ops = .{.VOpen}, .f = opVOpen },
+    .{ .ops = .{.VCheck}, .f = opVCheck },
+    .{ .ops = .{.VInitIn}, .f = opVInitIn },
+    .{ .ops = .{.VFilter}, .f = opVFilter },
+    .{ .ops = .{.VColumn}, .f = opVColumn },
+    .{ .ops = .{.VNext}, .f = opVNext },
+    .{ .ops = .{.VRename}, .f = opVRename },
+    .{ .ops = .{.VUpdate}, .f = opVUpdate },
+};
+
 pub fn opVBegin(e: *Exec, op: *Op) Error!Flow {
     const vt: ?*int.VTable = if (op.p4type == .vtab) op.p4As(.vtab) else null;
     const rc = vtab_mod.begin(e.db, vt);
@@ -178,7 +193,7 @@ pub fn opVNext(e: *Exec, op: *Op) Error!Flow {
     vtab_mod.importErrmsg(e.v, vtab);
     try e.check(rc);
     const res = module.x_eof.?(cur.uc.vtab);
-    return if (!res) .jump_p2_check_interrupt else .check_interrupt;
+    return if (!res) .jump_p2_check else .next_check;
 }
 
 pub fn opVRename(e: *Exec, op: *Op) Error!Flow {

@@ -477,7 +477,8 @@ pub const VdbeFrame = struct {
     token: ?*anyopaque,
     last_rowid: i64,
     aux_data: ?*AuxData,
-    pc: i32,
+    /// The address of the OP_Program that called the frame.
+    pc: u32,
     n_change: i64,
     n_db_change: i64,
     /// The child frame's registers and cursors.

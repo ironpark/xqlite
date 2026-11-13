@@ -17,6 +17,13 @@ const MEM = vi.MEM;
 const OP = vi.OP;
 const RC = int.RC;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{ .PureFunc, .Function }, .f = opFunction, .call = .always_inline },
+    .{ .ops = .{ .AggInverse, .AggStep, .AggStep1 }, .f = opAggStep, .call = .always_inline },
+    .{ .ops = .{ .AggValue, .AggFinal }, .f = opAggFinal },
+};
+
 /// OP_Function and OP_PureFunc.
 pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
@@ -82,8 +89,8 @@ fn aggStepInit(e: *Exec, op: *Op) error{OutOfMemory}!void {
 
 /// OP_AggStep, OP_AggInverse and OP_AggStep1: as in C, where the first
 /// two fall through into the last once they have become it.
-pub fn opAggStep(e: *Exec, op: *Op) Error!Flow {
-    if (op.opcode != OP.AggStep1) try aggStepInit(e, op);
+pub fn opAggStep(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
+    if (opc != .AggStep1) try aggStepInit(e, op);
     const v = e.v;
     const ctx = op.p4As(.funcctx);
     const m = e.reg(op.p3);
@@ -106,7 +113,7 @@ pub fn opAggStep(e: *Exec, op: *Op) Error!Flow {
         }
         ctx.err_state = null;
         if (ctx.skip_flag) {
-            const i = e.ops[@intCast(e.pc - 1)].p1;
+            const i = e.ops[e.pc - 1].p1;
             if (i != 0) mem.setInt64(e.reg(i), 1);
             ctx.skip_flag = false;
         }

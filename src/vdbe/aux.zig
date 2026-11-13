@@ -1050,7 +1050,7 @@ fn closeCursorsInFrame(v: *Vdbe) void {
 
 /// Port of sqlite3VdbeFrameRestore(): return from a trigger program to its
 /// caller. Returns the caller's program counter.
-pub fn frameRestore(frame: *VdbeFrame) i32 {
+pub fn frameRestore(frame: *VdbeFrame) u32 {
     const v = frame.v;
     closeCursorsInFrame(v);
     v.prog = frame.ops;

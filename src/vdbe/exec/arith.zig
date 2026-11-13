@@ -22,6 +22,32 @@ const OP = vi.OP;
 const RC = int.RC;
 const Aff = int.Aff;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.Concat}, .f = opConcat },
+    .{ .ops = .{ .Add, .Subtract, .Multiply, .Divide, .Remainder }, .f = opArith, .call = .always_inline },
+    .{ .ops = .{.CollSeq}, .f = opCollSeq },
+    .{ .ops = .{ .BitAnd, .BitOr, .ShiftLeft, .ShiftRight }, .f = opBit },
+    .{ .ops = .{.AddImm}, .f = opAddImm },
+    .{ .ops = .{.MustBeInt}, .f = opMustBeInt },
+    .{ .ops = .{.RealAffinity}, .f = opRealAffinity },
+    .{ .ops = .{.Cast}, .f = opCast },
+    .{ .ops = .{ .Eq, .Ne, .Lt, .Le, .Gt, .Ge }, .f = opCompareJump, .call = .always_inline },
+    .{ .ops = .{.ElseEq}, .f = opElseEq },
+    .{ .ops = .{.Compare}, .f = opCompare },
+    .{ .ops = .{.Jump}, .f = opJump },
+    .{ .ops = .{ .And, .Or }, .f = opAndOr },
+    .{ .ops = .{.IsTrue}, .f = opIsTrue },
+    .{ .ops = .{.Not}, .f = opNot },
+    .{ .ops = .{.BitNot}, .f = opBitNot },
+    .{ .ops = .{.If}, .f = opIf, .call = .always_inline },
+    .{ .ops = .{.IfNot}, .f = opIfNot, .call = .always_inline },
+    .{ .ops = .{.IsNull}, .f = opIsNull, .call = .always_inline },
+    .{ .ops = .{.ZeroOrNull}, .f = opZeroOrNull },
+    .{ .ops = .{.NotNull}, .f = opNotNull, .call = .always_inline },
+    .{ .ops = .{.IfNullRow}, .f = opIfNullRow },
+};
+
 pub fn opConcat(e: *Exec, op: *Op) Error!Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
@@ -97,7 +123,7 @@ fn rangeError(e: *Exec, w: u16, v: ?i64) ?Error {
 /// that is not 0 is the width of the integer type of the result
 /// (dialect.Arith.range()): an integer result outside it is the
 /// dialect's error.
-pub fn opArith(e: *Exec, op: *Op) Error!Flow {
+pub fn opArith(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
     const out = e.reg(op.p3);
@@ -114,8 +140,8 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
     if (type1.only(type2).Int) int_math: {
         const ia = in1.u.i;
         var ib = in2.u.i;
-        switch (op.opcode) {
-            OP.Add => {
+        switch (opc) {
+            .Add => {
                 const r = @addWithOverflow(ib, ia);
                 if (r[1] != 0) {
                     if (op.p5 != 0) if (rangeError(e, op.p5, null)) |err| return err;
@@ -124,7 +150,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
                 }
                 ib = r[0];
             },
-            OP.Subtract => {
+            .Subtract => {
                 const r = @subWithOverflow(ib, ia);
                 if (r[1] != 0) {
                     if (op.p5 != 0) if (rangeError(e, op.p5, null)) |err| return err;
@@ -133,7 +159,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
                 }
                 ib = r[0];
             },
-            OP.Multiply => {
+            .Multiply => {
                 const r = @mulWithOverflow(ib, ia);
                 if (r[1] != 0) {
                     if (op.p5 != 0) if (rangeError(e, op.p5, null)) |err| return err;
@@ -142,7 +168,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
                 }
                 ib = r[0];
             },
-            OP.Divide => {
+            .Divide => {
                 if (ia == 0) {
                     if (arithError(e, .div_zero)) |err| return err;
                     mem.setNull(out);
@@ -172,11 +198,11 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
     // fp_math:
     const ra = mem.realValue(in1);
     var rb = mem.realValue(in2);
-    switch (op.opcode) {
-        OP.Add => rb += ra,
-        OP.Subtract => rb -= ra,
-        OP.Multiply => rb *= ra,
-        OP.Divide => {
+    switch (opc) {
+        .Add => rb += ra,
+        .Subtract => rb -= ra,
+        .Multiply => rb *= ra,
+        .Divide => {
             if (ra == 0.0) {
                 if (arithError(e, .div_zero)) |err| return err;
                 mem.setNull(out);
@@ -211,7 +237,7 @@ pub fn opCollSeq(e: *Exec, op: *Op) Flow {
 }
 
 /// OP_BitAnd, OP_BitOr, OP_ShiftLeft and OP_ShiftRight.
-pub fn opBit(e: *Exec, op: *Op) Flow {
+pub fn opBit(e: *Exec, op: *Op, comptime opc: OP) Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
     const out = e.reg(op.p3);
@@ -221,23 +247,23 @@ pub fn opBit(e: *Exec, op: *Op) Flow {
     }
     var ia = mem.intValue(in2);
     var ib = mem.intValue(in1);
-    var opc = op.opcode;
-    if (opc == OP.BitAnd) {
+    if (opc == .BitAnd) {
         ia &= ib;
-    } else if (opc == OP.BitOr) {
+    } else if (opc == .BitOr) {
         ia |= ib;
     } else if (ib != 0) {
         // A negative shift goes the other way.
+        var left = opc == .ShiftLeft;
         if (ib < 0) {
-            opc = if (opc == .ShiftLeft) .ShiftRight else .ShiftLeft;
+            left = !left;
             ib = if (ib > -64) -ib else 64;
         }
         if (ib >= 64) {
-            ia = if (ia >= 0 or opc == OP.ShiftLeft) 0 else -1;
+            ia = if (ia >= 0 or left) 0 else -1;
         } else {
             var ua: u64 = @bitCast(ia);
             const sh = cast.intCast(u6, ib);
-            if (opc == OP.ShiftLeft) {
+            if (left) {
                 ua <<= sh;
             } else {
                 ua >>= sh;
@@ -304,12 +330,12 @@ const cmp_eq = [6]bool{ false, true, false, true, false, true };
 const cmp_gt = [6]bool{ true, false, true, false, false, true };
 
 /// OP_Eq, OP_Ne, OP_Lt, OP_Le, OP_Gt and OP_Ge.
-pub fn opCompareJump(e: *Exec, op: *Op) Error!Flow {
+pub fn opCompareJump(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
     var flags1 = in1.flags;
     var flags3 = in3.flags;
-    const k = op.opcode.compareIndex();
+    const k = comptime opc.compareIndex();
     if (flags1.only(flags3).Int) {
         // The common case of two integers.
         if (in3.u.i > in1.u.i) {
@@ -384,7 +410,7 @@ pub fn opElseEq(e: *Exec, op: *Op) Flow {
 
 pub fn opCompare(e: *Exec, op: *Op) Flow {
     // The OP_Permutation before, if P5 says so, orders the fields.
-    const permute: ?[]u32 = if (op.p5 & vi.OPFLAG.PERMUTE != 0) e.ops[@intCast(e.pc - 1)].p4IntArray() else null;
+    const permute: ?[]u32 = if (op.p5 & vi.OPFLAG.PERMUTE != 0) e.ops[e.pc - 1].p4IntArray() else null;
     const n: usize = @intCast(op.p3);
     const ki = op.p4As(.keyinfo);
     for (0..n) |i| {
@@ -405,14 +431,8 @@ pub fn opCompare(e: *Exec, op: *Op) Flow {
 }
 
 pub fn opJump(e: *Exec, op: *Op) Flow {
-    if (e.i_compare < 0) {
-        e.pc = op.p1 - 1;
-    } else if (e.i_compare == 0) {
-        e.pc = op.p2 - 1;
-    } else {
-        e.pc = op.p3 - 1;
-    }
-    return .goto_pc;
+    const to = if (e.i_compare < 0) op.p1 else if (e.i_compare == 0) op.p2 else op.p3;
+    return .goto(@intCast(to));
 }
 
 // ================================================================== logic
@@ -427,10 +447,10 @@ fn boolOrNull(m: *Mem) usize {
 }
 
 /// OP_And and OP_Or.
-pub fn opAndOr(e: *Exec, op: *Op) Flow {
+pub fn opAndOr(e: *Exec, op: *Op, comptime opc: OP) Flow {
     const v1 = boolOrNull(e.reg(op.p1));
     const v2 = boolOrNull(e.reg(op.p2));
-    const r = if (op.opcode == OP.And) and_logic[v1 * 3 + v2] else or_logic[v1 * 3 + v2];
+    const r = if (opc == .And) and_logic[v1 * 3 + v2] else or_logic[v1 * 3 + v2];
     const out = e.reg(op.p3);
     if (r == 2) {
         out.setTypeFlag(.{ .Null = true });

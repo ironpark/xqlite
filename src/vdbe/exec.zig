@@ -15,15 +15,25 @@
 //!   vtab_ops.zig   virtual tables
 //!   misc.zig       row sets, Bloom filters, unsupported opcodes
 //!
+//! Each module lists the opcodes it runs in `handlers` (see `modules`),
+//! and the run loop switches on the opcode with an arm per opcode, made
+//! at compile time from those lists: an opcode without a handler, or
+//! with two, does not compile. A handler that runs several opcodes and
+//! tells them apart takes the opcode as a comptime parameter, so that
+//! each arm gets its own copy without the test.
+//!
 //! Each handler returns a `Flow`, which stands in for the gotos of the C
-//! code: `.next` continues, `.jump_p2` goes to P2, `.goto_pc` goes on
-//! after the instruction the handler set `Exec.pc` to (as C handlers set
-//! pOp), and `.ret` leaves the run (vdbe_return). A handler that can fail
-//! returns `Error!Flow`: the errors of the layers below are propagated
-//! with `try`, and every error ends up in abortDueToError(), the one
-//! place that turns it into the statement's result code (C's labels
-//! no_mem, too_big, abort_due_to_interrupt and abort_due_to_error). An
-//! extended code is recorded in Vdbe.rc next to its error (see abort()).
+//! code: `.next` continues, `.jump_p2` goes to P2, `.goto` to the address
+//! it carries, `.frame` to an address of the program the handler
+//! switched to (in and out of trigger programs), the `_check` variants
+//! after a check for an interrupt, and `.ret` leaves the run
+//! (vdbe_return). Handlers read the address of their instruction in
+//! `Exec.pc` but never change it. A handler that can fail returns
+//! `Error!Flow`: the errors of the layers below are propagated with
+//! `try`, and every error ends up in abortDueToError(), the one place
+//! that turns it into the statement's result code (C's labels no_mem,
+//! too_big, abort_due_to_interrupt and abort_due_to_error). An extended
+//! code is recorded in Vdbe.rc next to its error (see abort()).
 
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
@@ -55,19 +65,103 @@ const RC = int.RC;
 /// The errors that end a run.
 pub const Error = int.Error;
 
-pub const Flow = enum {
-    next,
-    /// Check for an interrupt, then continue.
-    check_interrupt,
-    jump_p2,
-    jump_p2_check_interrupt,
-    /// Continue after the instruction at Exec.pc, which the handler set
-    /// (possibly in another program, Exec.ops).
-    goto_pc,
-    goto_pc_check_interrupt,
-    /// vdbe_return: leave with Exec.rc.
-    ret,
+/// What a handler tells the run loop to do next. A packed struct (an
+/// integer to LLVM) rather than a tagged union: with the union the loop
+/// was about 4% slower on cte. Handlers write `.next`, `.jump_p2`, ...
+/// and `.goto(address)` (decl literals).
+pub const Flow = packed struct(u64) {
+    kind: Kind,
+    /// The address of `.goto`, `.frame` and `.frame_check`.
+    to: u32 = 0,
+    _: u24 = 0,
+
+    pub const Kind = enum(u8) {
+        /// Continue with the next instruction.
+        next,
+        /// Check for an interrupt (and call the progress handler if it
+        /// is due), then continue with the next instruction.
+        next_check,
+        /// Continue at P2.
+        jump_p2,
+        /// Continue at P2 after the check of `.next_check`.
+        jump_p2_check,
+        /// Continue at `to` in the same program.
+        goto,
+        /// Continue at `to` in the program the handler switched to
+        /// (Exec.ops and Exec.regs): returning from a trigger program.
+        frame,
+        /// `.frame` after the check of `.next_check`: entering one.
+        frame_check,
+        /// vdbe_return: leave with Exec.rc.
+        ret,
+    };
+
+    pub const next: Flow = .{ .kind = .next };
+    pub const next_check: Flow = .{ .kind = .next_check };
+    pub const jump_p2: Flow = .{ .kind = .jump_p2 };
+    pub const jump_p2_check: Flow = .{ .kind = .jump_p2_check };
+    pub const ret: Flow = .{ .kind = .ret };
+
+    pub fn goto(to: u32) Flow {
+        return .{ .kind = .goto, .to = to };
+    }
+
+    pub fn frame(to: u32) Flow {
+        return .{ .kind = .frame, .to = to };
+    }
+
+    pub fn frameCheck(to: u32) Flow {
+        return .{ .kind = .frame_check, .to = to };
+    }
 };
+
+/// The modules of handlers. Each declares `handlers`, a tuple of entries
+/// `.{ .ops = .{ .Add, .Subtract, ... }, .f = opArith }` naming the
+/// opcodes a function runs, with `.call = .always_inline` where the run
+/// loop is to inline it. The function is `fn (*Exec, *Op) Flow` (or
+/// `Error!Flow`), or takes a third parameter `comptime opc: OP`, the
+/// opcode it runs, if it runs several and tells them apart.
+///
+/// Inlined are the handlers of the opcodes of inner loops (stepping and
+/// seeking cursors, OP_Column, register copies, arithmetic, comparisons,
+/// jumps, co-routines, aggregate steps and functions, building and
+/// inserting rows): measured with `xqt bench`, 15% on cte and 6-7% on
+/// insert, scan and pklookup; inlining only the small ones of them gave
+/// about half of that.
+const modules = .{ control, register, arith, record, txn, cursor, btree_ops, agg, vtab_ops, misc };
+
+const HandlerAt = struct { module: usize, entry: usize };
+
+/// For each opcode (by value), the module and entry of its handler. An
+/// opcode with no handler or with two is a compile error.
+const handler_index: [256]?HandlerAt = blk: {
+    @setEvalBranchQuota(100_000);
+    var index: [256]?HandlerAt = @splat(null);
+    for (modules, 0..) |m, mi| {
+        for (m.handlers, 0..) |h, hi| {
+            for (h.ops) |o| {
+                const opc: OP = o;
+                if (index[@backingInt(opc)] != null) @compileError("two handlers for OP_" ++ @tagName(opc));
+                index[@backingInt(opc)] = .{ .module = mi, .entry = hi };
+            }
+        }
+    }
+    const info = @typeInfo(OP).@"enum";
+    for (info.field_names, info.field_values) |name, value| {
+        if (index[value] == null) @compileError("no handler for OP_" ++ name);
+    }
+    break :blk index;
+};
+
+/// The handler of opcode `opc` and how the run loop calls it.
+fn handler(comptime opc: OP) type {
+    const at = handler_index[@backingInt(opc)].?;
+    const entry = modules[at.module].handlers[at.entry];
+    return struct {
+        const f = entry.f;
+        const call: std.builtin.CallModifier = if (@hasField(@TypeOf(entry), "call")) entry.call else .auto;
+    };
+}
 
 /// Port of sqlite3VdbeExec(): run the program until it produces a row
 /// (RC.ROW), finishes (RC.DONE) or fails (RC.ERROR and others).
@@ -78,7 +172,7 @@ pub fn exec(v: *Vdbe) i32 {
         .db = v.db,
         .ops = v.prog,
         .regs = v.mem,
-        .pc = v.pc,
+        .pc = @intCast(v.pc),
         .encoding = v.db.enc,
     };
     aux.vdbeEnter(v);
@@ -118,16 +212,16 @@ pub const Exec = struct {
     /// The program and registers of the current frame (aOp, aMem).
     ops: []Op,
     regs: []Mem,
-    /// Address of the current instruction. A handler that changes it
-    /// returns `.goto_pc`.
-    pc: isize,
+    /// Address of the current instruction (handlers read it; the Flow
+    /// they return says where to continue).
+    pc: u32,
     /// The result of a `.ret` flow: ROW, DONE, BUSY or an error code.
     rc: i32 = RC.OK,
     encoding: u8,
     /// Result of the last OP_Compare.
     i_compare: i32 = 0,
-    /// Reset this schema (plus one) after an error.
-    reset_schema_on_fault: u8 = 0,
+    /// Reset this schema after an error (OP_Destroy moved a root page).
+    reset_schema_on_fault: ?u8 = null,
     /// The run's nProgressLimit as of its last change, for vdbe_return
     /// (the run loop keeps its own copy in a local).
     progress_limit: u64 = std.math.maxInt(u64),
@@ -171,6 +265,8 @@ pub const Exec = struct {
     }
 
     fn run(e: *Exec, comptime scan: bool) i32 {
+        // The switch below has an arm for each opcode (inline else).
+        @setEvalBranchQuota(10_000);
         const v = e.v;
         const db = e.db;
         if (v.rc == RC.NOMEM) return e.abortDueToError(error.OutOfMemory, 0);
@@ -179,11 +275,12 @@ pub const Exec = struct {
         db.busy_handler.n_busy = 0;
         if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, 0);
         // As in C, the address, the program and the step count are locals
-        // (pOp, aOp, nVmStep) rather than memory the handlers may change:
-        // the handlers see the address in e.pc and report a change with
-        // .goto_pc.
+        // (pOp, aOp, nVmStep): the handlers see the address in e.pc and
+        // return the one to continue at in their Flow. The address is a
+        // usize here: as a u32 (the type of Exec.pc) LLVM kept it on the
+        // stack, in the chain of every dispatch (6-10% on cte, pklookup).
         var ops = e.ops.ptr;
-        var pc: usize = @intCast(e.pc);
+        var pc: usize = e.pc;
         var n_vm_step: u64 = 0;
         // The progress handler runs every n_progress_ops instructions,
         // counted across the calls of sqlite3_step() (nProgressLimit).
@@ -194,244 +291,65 @@ pub const Exec = struct {
             e.progress_limit = progress_limit;
         }
         const main_ops = v.ops.items.ptr;
-        while (true) {
-            const op = &ops[pc];
-            n_vm_step += 1;
-            e.pc = @intCast(pc);
-            // pOp->nExec and pOp->nCycle, for the main program.
-            var stat: ?*vi.OpStat = null;
-            var t0: u64 = 0;
-            if (scan and ops == main_ops) {
-                stat = &v.op_stats[pc];
-                stat.?.n_exec += 1;
-                t0 = hwtime();
-            }
-            // A handler that can fail has its error caught on its own arm,
-            // so that the others yield a plain Flow: a catch after the
-            // switch would test for an error after every instruction
-            // (about 10% on tight loops).
-            const flow: Flow = switch (op.opcode) {
-                // Jumps, subroutines, co-routines and halting.
-                OP.Goto => .jump_p2_check_interrupt,
-                OP.Gosub => control.opGosub(e, op),
-                OP.Return => control.opReturn(e, op),
-                OP.InitCoroutine => control.opInitCoroutine(e, op),
-                OP.EndCoroutine => control.opEndCoroutine(e, op),
-                OP.Yield => control.opYield(e, op),
-                OP.HaltIfNull => control.opHaltIfNull(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Halt => control.opHalt(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // Constants and registers.
-                OP.Integer => register.opInteger(e, op),
-                OP.Int64 => register.opInt64(e, op),
-                OP.Real => register.opReal(e, op),
-                OP.String8 => register.opString8(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.String => register.opString(e, op),
-                OP.BeginSubrtn, OP.Null => register.opNull(e, op),
-                OP.SoftNull => register.opSoftNull(e, op),
-                OP.Blob => register.opBlob(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Variable => register.opVariable(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Move => register.opMove(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Copy => register.opCopy(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SCopy => register.opSCopy(e, op),
-                OP.IntCopy => register.opIntCopy(e, op),
-                OP.FkCheck => register.opFkCheck(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.ResultRow => register.opResultRow(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // Arithmetic, comparisons and logic.
-                OP.Concat => arith.opConcat(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Add, OP.Subtract, OP.Multiply, OP.Divide, OP.Remainder => arith.opArith(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.CollSeq => arith.opCollSeq(e, op),
-                OP.BitAnd, OP.BitOr, OP.ShiftLeft, OP.ShiftRight => arith.opBit(e, op),
-                OP.AddImm => arith.opAddImm(e, op),
-                OP.MustBeInt => arith.opMustBeInt(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.RealAffinity => arith.opRealAffinity(e, op),
-                OP.Cast => arith.opCast(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Eq, OP.Ne, OP.Lt, OP.Le, OP.Gt, OP.Ge => arith.opCompareJump(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.ElseEq => arith.opElseEq(e, op),
-                // Only marks the OP_Compare that follows (P4_INTARRAY).
-                OP.Permutation => .next,
-                OP.Compare => arith.opCompare(e, op),
-                OP.Jump => arith.opJump(e, op),
-                OP.And, OP.Or => arith.opAndOr(e, op),
-                OP.IsTrue => arith.opIsTrue(e, op),
-                OP.Not => arith.opNot(e, op),
-                OP.BitNot => arith.opBitNot(e, op),
-                OP.Once => control.opOnce(e, op),
-                OP.If => arith.opIf(e, op),
-                OP.IfNot => arith.opIfNot(e, op),
-                OP.IsNull => arith.opIsNull(e, op),
-                OP.IsType => record.opIsType(e, op),
-                OP.ZeroOrNull => arith.opZeroOrNull(e, op),
-                OP.NotNull => arith.opNotNull(e, op),
-                OP.IfNullRow => arith.opIfNullRow(e, op),
-
-                // Records.
-                // In line: the most frequent opcode (3-6% on column-heavy loops).
-                OP.Column => @call(.always_inline, record.opColumn, .{ e, op }) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.TypeCheck => record.opTypeCheck(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Affinity => record.opAffinity(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.MakeRecord => record.opMakeRecord(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Count => btree_ops.opCount(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // Transactions.
-                OP.Savepoint => txn.opSavepoint(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.AutoCommit => txn.opAutoCommit(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Transaction => txn.opTransaction(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.ReadCookie => txn.opReadCookie(e, op),
-                OP.SetCookie => txn.opSetCookie(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // Opening, positioning and stepping cursors.
-                OP.ReopenIdx => cursor.opReopenIdx(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.OpenRead, OP.OpenWrite => cursor.opOpen(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.OpenDup => cursor.opOpenDup(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.OpenAutoindex, OP.OpenEphemeral => cursor.opOpenEphemeral(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SorterOpen => cursor.opSorterOpen(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SequenceTest => cursor.opSequenceTest(e, op),
-                OP.OpenPseudo => cursor.opOpenPseudo(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Close => cursor.opClose(e, op),
-                OP.SeekLT, OP.SeekLE, OP.SeekGE, OP.SeekGT => cursor.opSeek(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SeekScan => cursor.opSeekScan(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SeekHit => cursor.opSeekHit(e, op),
-                OP.IfNoHope => cursor.opIfNoHope(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.NoConflict, OP.NotFound, OP.Found => cursor.opFound(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SeekRowid => cursor.opSeekRowid(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.NotExists => cursor.opNotExists(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Sequence => cursor.opSequence(e, op),
-
-                // Writing and reading rows.
-                OP.NewRowid => btree_ops.opNewRowid(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Insert => btree_ops.opInsert(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Delete => btree_ops.opDelete(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.ResetCount => btree_ops.opResetCount(e, op),
-                OP.SorterCompare => btree_ops.opSorterCompare(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SorterData => btree_ops.opSorterData(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.RowData => btree_ops.opRowData(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Rowid => cursor.opRowid(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.NullRow => cursor.opNullRow(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SeekEnd, OP.Last => cursor.opLast(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.IfSizeBetween => cursor.opIfSizeBetween(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SorterSort, OP.Sort => cursor.opSort(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Rewind => cursor.opRewind(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.IfEmpty => cursor.opIfEmpty(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SorterNext => cursor.opSorterNext(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Prev => cursor.opPrev(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Next => cursor.opNext(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.IdxInsert => btree_ops.opIdxInsert(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SorterInsert => btree_ops.opSorterInsert(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.IdxDelete => btree_ops.opIdxDelete(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.DeferredSeek, OP.IdxRowid => cursor.opIdxRowid(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.FinishSeek => cursor.opFinishSeek(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.IdxLE, OP.IdxGT, OP.IdxLT, OP.IdxGE => cursor.opIdxCompare(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // The schema.
-                OP.Destroy => txn.opDestroy(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Clear => txn.opClear(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.ResetSorter => btree_ops.opResetSorter(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.CreateBtree => txn.opCreateBtree(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.SqlExec => txn.opSqlExec(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.ParseSchema => txn.opParseSchema(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.LoadAnalysis => txn.opLoadAnalysis(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.DropTable => txn.opDropTable(e, op),
-                OP.DropIndex => txn.opDropIndex(e, op),
-                OP.DropTrigger => txn.opDropTrigger(e, op),
-                OP.IntegrityCk => txn.opIntegrityCk(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // Row sets.
-                OP.RowSetAdd => misc.opRowSetAdd(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.RowSetRead => misc.opRowSetRead(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.RowSetTest => misc.opRowSetTest(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // Trigger programs and counters.
-                OP.Program => control.opProgram(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Param => control.opParam(e, op),
-                OP.FkCounter => control.opFkCounter(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.FkIfZero => control.opFkIfZero(e, op),
-                OP.MemMax => control.opMemMax(e, op),
-                OP.IfPos => control.opIfPos(e, op),
-                OP.OffsetLimit => control.opOffsetLimit(e, op),
-                OP.IfNotZero => control.opIfNotZero(e, op),
-                OP.DecrJumpZero => control.opDecrJumpZero(e, op),
-
-                // Aggregates.
-                OP.AggInverse, OP.AggStep, OP.AggStep1 => agg.opAggStep(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.AggValue, OP.AggFinal => agg.opAggFinal(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // The database files.
-                OP.Checkpoint => txn.opCheckpoint(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.JournalMode => txn.opJournalMode(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.IncrVacuum => txn.opIncrVacuum(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Expire => txn.opExpire(e, op),
-                OP.CursorLock, OP.CursorUnlock => cursor.opCursorLock(e, op),
-
-                // Virtual tables.
-                OP.VBegin => vtab_ops.opVBegin(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VCreate => vtab_ops.opVCreate(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VDestroy => vtab_ops.opVDestroy(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VOpen => vtab_ops.opVOpen(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VCheck => vtab_ops.opVCheck(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VInitIn => vtab_ops.opVInitIn(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VFilter => vtab_ops.opVFilter(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VColumn => vtab_ops.opVColumn(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VNext => vtab_ops.opVNext(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VRename => vtab_ops.opVRename(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.VUpdate => vtab_ops.opVUpdate(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-
-                // The rest.
-                OP.Pagecount => txn.opPagecount(e, op),
-                OP.MaxPgcnt => txn.opMaxPgcnt(e, op),
-                OP.PureFunc, OP.Function => agg.opFunction(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.ClrSubtype => register.opClrSubtype(e, op),
-                OP.GetSubtype => register.opGetSubtype(e, op),
-                OP.SetSubtype => register.opSetSubtype(e, op),
-                OP.FilterAdd => misc.opFilterAdd(e, op),
-                OP.Filter => misc.opFilter(e, op),
-                OP.Trace, OP.Init => control.opInit(e, op),
-                OP.IFindKey => cursor.opIFindKey(e, op),
-                OP.Noop, OP.Explain, OP.CursorHint, OP.Abortable, OP.ReleaseReg => .next,
-                OP.RowCell => btree_ops.opRowCell(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Vacuum => txn.opVacuum(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.TableLock => txn.opTableLock(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                // Only in C builds with SQLITE_ENABLE_OFFSET_SQL_FUNC
-                // (Offset) or SQLITE_ENABLE_COLUMN_USED_MASK (ColumnsUsed);
-                // never coded.
-                OP.Offset, OP.ColumnsUsed => misc.opNotSupported(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-            };
-            if (scan) if (stat) |st| {
-                st.n_cycle +%= hwtime() -% t0;
-            };
-            switch (flow) {
-                .next, .jump_p2, .check_interrupt, .jump_p2_check_interrupt => {
-                    // A handler that moved the address must say so.
-                    if (std.debug.runtime_safety) std.debug.assert(e.pc == pc and e.ops.ptr == ops);
-                },
-                .goto_pc, .goto_pc_check_interrupt, .ret => {},
-            }
-            switch (flow) {
-                .next => pc += 1,
-                .jump_p2 => pc = @intCast(op.p2),
-                .check_interrupt => {
-                    if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                    if (n_vm_step >= progress_limit and e.progressInterrupts(&progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                    pc += 1;
-                },
-                .jump_p2_check_interrupt => {
-                    pc = @intCast(op.p2);
-                    if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                    if (n_vm_step >= progress_limit and e.progressInterrupts(&progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                },
-                .goto_pc => {
-                    ops = e.ops.ptr;
-                    pc = @intCast(e.pc + 1);
-                },
-                .goto_pc_check_interrupt => {
-                    ops = e.ops.ptr;
-                    pc = @intCast(e.pc + 1);
-                    if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                    if (n_vm_step >= progress_limit and e.progressInterrupts(&progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                },
-                .ret => return e.vdbeReturn(n_vm_step),
-            }
+        // Each arm ends in its own dispatch of the next instruction
+        // (continue :dispatch), so that each opcode has its own indirect
+        // branch, which the CPU predicts from that opcode (8-12% on scan
+        // and cte against one shared dispatch at the top of a loop).
+        dispatch: switch (ops[pc].opcode) {
+            // Every opcode has its own arm, which calls its handler (with
+            // the opcode as a comptime argument if it takes one) and, only
+            // if the handler can fail, catches its error: a catch after
+            // the call of any handler would test for an error after every
+            // instruction (about 10% on tight loops).
+            inline else => |opc| {
+                const op = &ops[pc];
+                n_vm_step += 1;
+                e.pc = @intCast(pc);
+                // pOp->nExec and pOp->nCycle, for the main program.
+                var stat: ?*vi.OpStat = null;
+                var t0: u64 = 0;
+                if (scan and ops == main_ops) {
+                    stat = &v.op_stats[pc];
+                    stat.?.n_exec += 1;
+                    t0 = hwtime();
+                }
+                const h = handler(opc);
+                const r = if (comptime @typeInfo(@TypeOf(h.f)).@"fn".param_types.len == 3)
+                    @call(h.call, h.f, .{ e, op, opc })
+                else
+                    @call(h.call, h.f, .{ e, op });
+                const flow: Flow = if (@typeInfo(@TypeOf(r)) == .error_union)
+                    r catch |err| return e.abortDueToError(err, n_vm_step)
+                else
+                    r;
+                if (scan) if (stat) |st| {
+                    st.n_cycle +%= hwtime() -% t0;
+                };
+                switch (flow.kind) {
+                    .next => pc += 1,
+                    .jump_p2 => pc = @intCast(op.p2),
+                    .goto => pc = flow.to,
+                    .frame => {
+                        ops = e.ops.ptr;
+                        pc = flow.to;
+                    },
+                    .next_check => {
+                        pc += 1;
+                        if (e.interrupted(n_vm_step, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    },
+                    .jump_p2_check => {
+                        pc = @intCast(op.p2);
+                        if (e.interrupted(n_vm_step, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    },
+                    .frame_check => {
+                        ops = e.ops.ptr;
+                        pc = flow.to;
+                        if (e.interrupted(n_vm_step, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    },
+                    .ret => return e.vdbeReturn(n_vm_step),
+                }
+                continue :dispatch ops[pc].opcode;
+            },
         }
     }
 
@@ -466,9 +384,7 @@ pub const Exec = struct {
         if (v.e_vdbe_state == .run) aux.halt(v) catch {};
         if (rc == RC.CORRUPT and !db.auto_commit) db.flags.CorruptRdOnly = true;
         e.rc = RC.ERROR;
-        if (e.reset_schema_on_fault > 0) {
-            @import("../sql/build.zig").resetOneSchema(db, e.reset_schema_on_fault - 1);
-        }
+        if (e.reset_schema_on_fault) |i_db| @import("../sql/build.zig").resetOneSchema(db, i_db);
         return e.vdbeReturn(n_vm_step);
     }
 
@@ -494,6 +410,14 @@ pub const Exec = struct {
             prefix,
             if (v.sql) |s| @as([]const u8, s) else "(null)",
         });
+    }
+
+    /// check_for_interrupt: whether the statement was interrupted, or the
+    /// progress handler, if it is due (`limit` is the run loop's copy of
+    /// the limit), asks to interrupt it.
+    inline fn interrupted(e: *Exec, n_vm_step: u64, limit: *u64) bool {
+        if (e.db.is_interrupted.load(.monotonic)) return true;
+        return n_vm_step >= limit.* and e.progressInterrupts(limit);
     }
 
     /// Call the progress handler, whose limit `limit` (the run loop's

@@ -25,6 +25,41 @@ const OP = vi.OP;
 const VdbeCursor = vi.VdbeCursor;
 const RC = int.RC;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.ReopenIdx}, .f = opReopenIdx },
+    .{ .ops = .{ .OpenRead, .OpenWrite }, .f = opOpen },
+    .{ .ops = .{.OpenDup}, .f = opOpenDup },
+    .{ .ops = .{ .OpenAutoindex, .OpenEphemeral }, .f = opOpenEphemeral },
+    .{ .ops = .{.SorterOpen}, .f = opSorterOpen },
+    .{ .ops = .{.SequenceTest}, .f = opSequenceTest },
+    .{ .ops = .{.OpenPseudo}, .f = opOpenPseudo },
+    .{ .ops = .{.Close}, .f = opClose },
+    .{ .ops = .{ .SeekLT, .SeekLE, .SeekGE, .SeekGT }, .f = opSeek, .call = .always_inline },
+    .{ .ops = .{.SeekScan}, .f = opSeekScan },
+    .{ .ops = .{.SeekHit}, .f = opSeekHit },
+    .{ .ops = .{.IfNoHope}, .f = opIfNoHope },
+    .{ .ops = .{ .NoConflict, .NotFound, .Found }, .f = opFound, .call = .always_inline },
+    .{ .ops = .{.SeekRowid}, .f = opSeekRowid, .call = .always_inline },
+    .{ .ops = .{.NotExists}, .f = opNotExists, .call = .always_inline },
+    .{ .ops = .{.Sequence}, .f = opSequence },
+    .{ .ops = .{.Rowid}, .f = opRowid },
+    .{ .ops = .{ .CursorLock, .CursorUnlock }, .f = opCursorLock },
+    .{ .ops = .{.NullRow}, .f = opNullRow, .call = .always_inline },
+    .{ .ops = .{ .SeekEnd, .Last }, .f = opLast },
+    .{ .ops = .{.IfSizeBetween}, .f = opIfSizeBetween },
+    .{ .ops = .{ .SorterSort, .Sort }, .f = opSort },
+    .{ .ops = .{.Rewind}, .f = opRewind, .call = .always_inline },
+    .{ .ops = .{.IfEmpty}, .f = opIfEmpty },
+    .{ .ops = .{.SorterNext}, .f = opSorterNext },
+    .{ .ops = .{.Prev}, .f = opPrev, .call = .always_inline },
+    .{ .ops = .{.Next}, .f = opNext, .call = .always_inline },
+    .{ .ops = .{ .DeferredSeek, .IdxRowid }, .f = opIdxRowid },
+    .{ .ops = .{.FinishSeek}, .f = opFinishSeek },
+    .{ .ops = .{ .IdxLE, .IdxGT, .IdxLT, .IdxGE }, .f = opIdxCompare, .call = .always_inline },
+    .{ .ops = .{.IFindKey}, .f = opIFindKey },
+};
+
 /// BTREE_UNORDERED: an ephemeral table whose order does not matter.
 const BTREE_UNORDERED: u16 = 8;
 
@@ -79,11 +114,11 @@ pub fn opReopenIdx(e: *Exec, op: *Op) Error!Flow {
             return .next;
         }
     }
-    return opOpen(e, op);
+    return opOpen(e, op, .OpenRead);
 }
 
 /// OP_OpenRead and OP_OpenWrite.
-pub fn opOpen(e: *Exec, op: *Op) Error!Flow {
+pub fn opOpen(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const v = e.v;
     const db = e.db;
     if (v.expired == 1) return e.abort(RC.ABORT_ROLLBACK);
@@ -92,7 +127,7 @@ pub fn opOpen(e: *Exec, op: *Op) Error!Flow {
     const pdb = &db.dbs.items[@intCast(i_db)];
     const bt = pdb.bt.?;
     var write = false;
-    if (op.opcode == OP.OpenWrite) {
+    if (opc == .OpenWrite) {
         write = true;
         if (pdb.schema.file_format < v.min_write_file_format) v.min_write_file_format = pdb.schema.file_format;
         if (op.p5 & vi.OPFLAG.P2ISREG != 0) {
@@ -240,10 +275,11 @@ pub fn opClose(e: *Exec, op: *Op) Flow {
 // ================================================================ seeking
 
 /// OP_SeekLT, OP_SeekLE, OP_SeekGE and OP_SeekGT.
-pub fn opSeek(e: *Exec, op: *Op) Error!Flow {
+pub fn opSeek(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     const cur = c.uc.cursor;
-    var oc = op.opcode;
+    // A REAL key may change the comparison (see below).
+    var oc = opc;
     var eq_only = false;
     c.null_row = false;
     c.deferred_moveto = false;
@@ -319,14 +355,13 @@ pub fn opSeek(e: *Exec, op: *Op) Error!Flow {
     if (res != 0) return .jump_p2;
     if (eq_only) {
         // Skip the OP_IdxLT or OP_IdxGT that follows.
-        e.pc += 1;
-        return .goto_pc;
+        return .goto(e.pc + 2);
     }
     return .next;
 }
 
 pub fn opSeekScan(e: *Exec, op: *Op) Error!Flow {
-    const next_op = &e.ops[@intCast(e.pc + 1)];
+    const next_op = &e.ops[e.pc + 1];
     std.debug.assert(next_op.opcode == OP.SeekGE);
     const c = e.csr(next_op.p1);
     const cur = c.uc.cursor;
@@ -342,18 +377,14 @@ pub fn opSeekScan(e: *Exec, op: *Op) Error!Flow {
         const res = try serial.idxKeyCompare(e.db, c, &r);
         if (res > 0 and op.p5 == 0) {
             // seekscan_search_fail: past the target; skip the SeekGE.
-            e.pc = next_op.p2 - 1;
-            return .goto_pc;
+            return .goto(@intCast(next_op.p2));
         }
         if (res >= 0) return .jump_p2;
         if (n_step <= 0) return .next;
         n_step -= 1;
         c.cache_status = vi.cache_stale;
         const more = try cur.next();
-        if (!more) {
-            e.pc = next_op.p2 - 1;
-            return .goto_pc;
-        }
+        if (!more) return .goto(@intCast(next_op.p2));
     }
 }
 
@@ -370,11 +401,11 @@ pub fn opSeekHit(e: *Exec, op: *Op) Flow {
 pub fn opIfNoHope(e: *Exec, op: *Op) Error!Flow {
     const c = e.csr(op.p1);
     if (c.seek_hit >= op.p4As(.int32)) return .next;
-    return opFound(e, op);
+    return opFound(e, op, .IfNoHope);
 }
 
 /// OP_Found, OP_NotFound, OP_NoConflict, and OP_IfNoHope after its test.
-pub fn opFound(e: *Exec, op: *Op) Error!Flow {
+pub fn opFound(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     const cur = c.uc.cursor;
     const regs = e.regs.ptr + @as(usize, @intCast(op.p3));
@@ -395,15 +426,15 @@ pub fn opFound(e: *Exec, op: *Op) Error!Flow {
     c.null_row = !exists;
     c.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
-    if (op.opcode == OP.Found) {
+    if (opc == .Found) {
         if (exists) return .jump_p2;
     } else {
         if (!exists) return .jump_p2;
-        if (op.opcode == OP.NoConflict) {
+        if (opc == .NoConflict) {
             // A key with a NULL never conflicts.
             for (regs[0..n_field]) |m| if (m.flags.Null) return .jump_p2;
         }
-        if (op.opcode == OP.IfNoHope) c.seek_hit = @intCast(op.p4As(.int32));
+        if (opc == .IfNoHope) c.seek_hit = @intCast(op.p4As(.int32));
     }
     return .next;
 }
@@ -461,26 +492,26 @@ pub fn opSequence(e: *Exec, op: *Op) Flow {
 pub fn opRowid(e: *Exec, op: *Op) Error!Flow {
     const out = e.out2Prerelease(op);
     const c = e.csr(op.p1);
-    var rowid: i64 = undefined;
     if (c.null_row) {
         out.flags = .{ .Null = true };
         return .next;
-    } else if (c.deferred_moveto) {
-        rowid = c.moveto_target;
-    } else if (c.e_cur_type == .vtab) {
+    }
+    const rowid = if (c.deferred_moveto) c.moveto_target else if (c.e_cur_type == .vtab) blk: {
         const vc = c.uc.vtab;
         const vtab = vc.vtab;
+        var rowid: i64 = 0;
         const rc = vtab.module.x_rowid.?(vc, &rowid);
         vtab_mod.importErrmsg(e.v, vtab);
         try e.check(rc);
-    } else {
+        break :blk rowid;
+    } else blk: {
         try serial.cursorRestore(c);
         if (c.null_row) {
             out.flags = .{ .Null = true };
             return .next;
         }
-        rowid = c.uc.cursor.integerKey();
-    }
+        break :blk c.uc.cursor.integerKey();
+    };
     out.u = .{ .i = rowid };
     return .next;
 }
@@ -488,25 +519,23 @@ pub fn opRowid(e: *Exec, op: *Op) Error!Flow {
 /// OP_CursorLock and OP_CursorUnlock: pin the b-tree cursor P1 to its
 /// row, so that a trigger which would move it fails with
 /// SQLITE_CONSTRAINT_PINNED, or release it.
-pub fn opCursorLock(e: *Exec, op: *Op) Flow {
+pub fn opCursorLock(e: *Exec, op: *Op, comptime opc: OP) Flow {
     const c = e.v.csr[@intCast(op.p1)].?;
     const bc = c.uc.cursor;
-    if (op.opcode == OP.CursorLock) bc.pin() else bc.unpin();
+    if (opc == .CursorLock) bc.pin() else bc.unpin();
     return .next;
 }
 
 pub fn opNullRow(e: *Exec, op: *Op) Error!Flow {
-    var c: *VdbeCursor = undefined;
-    if (e.v.csr[@intCast(op.p1)]) |cx| {
-        c = cx;
-    } else {
+    const c = e.v.csr[@intCast(op.p1)] orelse blk: {
         // A NULL row for a cursor that was never opened.
-        c = try allocateCursor(e, op.p1, 1, .pseudo);
-        c.seek_result = 0;
-        c.is_table = true;
-        c.no_reuse = true;
-        c.uc = .pseudo;
-    }
+        const cx = try allocateCursor(e, op.p1, 1, .pseudo);
+        cx.seek_result = 0;
+        cx.is_table = true;
+        cx.no_reuse = true;
+        cx.uc = .pseudo;
+        break :blk cx;
+    };
     c.null_row = op.p2 == 0;
     c.cache_status = vi.cache_stale;
     if (c.uc == .cursor) c.uc.cursor.clear();
@@ -516,18 +545,20 @@ pub fn opNullRow(e: *Exec, op: *Op) Error!Flow {
 // =============================================================== stepping
 
 /// OP_Last and OP_SeekEnd.
-pub fn opLast(e: *Exec, op: *Op) Error!Flow {
+pub fn opLast(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     const cur = c.uc.cursor;
-    if (op.opcode == OP.SeekEnd) {
+    if (opc == .SeekEnd) {
         c.seek_result = -1;
         if (!cur.eof()) return .next;
     }
-    const res = cur.last();
-    c.null_row = !(res catch false);
     c.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
-    _ = try res;
+    const has_rows = cur.last() catch |err| {
+        c.null_row = true;
+        return err;
+    };
+    c.null_row = !has_rows;
     if (op.p2 > 0 and c.null_row) return .jump_p2;
     return .next;
 }
@@ -550,16 +581,11 @@ pub fn opSort(e: *Exec, op: *Op) Error!Flow {
 
 pub fn opRewind(e: *Exec, op: *Op) Error!Flow {
     const c = e.csr(op.p1);
-    var empty: bool = undefined;
-    if (c.e_cur_type == .sorter) {
-        empty = try sorter.rewind(c);
-    } else {
-        const cur = c.uc.cursor;
-        const r = cur.first();
+    const empty = if (c.e_cur_type == .sorter) try sorter.rewind(c) else blk: {
         c.deferred_moveto = false;
         c.cache_status = vi.cache_stale;
-        empty = !try r;
-    }
+        break :blk !try c.uc.cursor.first();
+    };
     c.null_row = empty;
     if (op.p2 > 0 and empty) return .jump_p2;
     return .next;
@@ -595,21 +621,21 @@ fn nextTail(e: *Exec, op: *Op, c: *VdbeCursor, more: bool) Flow {
     if (more) {
         c.null_row = false;
         e.v.counters[op.p5] +%= 1;
-        return .jump_p2_check_interrupt;
+        return .jump_p2_check;
     }
     c.null_row = true;
-    return .check_interrupt;
+    return .next_check;
 }
 
 // ========================================================== index cursors
 
 /// OP_IdxRowid and OP_DeferredSeek.
-pub fn opIdxRowid(e: *Exec, op: *Op) Error!Flow {
+pub fn opIdxRowid(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     try serial.cursorRestore(c);
     if (!c.null_row) {
         const rowid = try serial.idxRowid(e.db, c.uc.cursor);
-        if (op.opcode == OP.DeferredSeek) {
+        if (opc == .DeferredSeek) {
             const tab_cur = e.csr(op.p3);
             tab_cur.null_row = false;
             tab_cur.moveto_target = rowid;
@@ -633,16 +659,16 @@ pub fn opFinishSeek(e: *Exec, op: *Op) Error!Flow {
 }
 
 /// OP_IdxLE, OP_IdxGT, OP_IdxLT and OP_IdxGE.
-pub fn opIdxCompare(e: *Exec, op: *Op) Error!Flow {
+pub fn opIdxCompare(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
         .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),
         .n_field = @intCast(op.p4As(.int32)),
-        .default_rc = if (op.opcode == .IdxLE or op.opcode == .IdxGT) -1 else 0,
+        .default_rc = if (opc == .IdxLE or opc == .IdxGT) -1 else 0,
     };
     var res = try serial.idxKeyCompare(e.db, c, &r);
-    if (op.opcode == .IdxLE or op.opcode == .IdxLT) {
+    if (opc == .IdxLE or opc == .IdxLT) {
         res = -res;
     } else {
         res += 1;

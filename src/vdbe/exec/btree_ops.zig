@@ -20,6 +20,23 @@ const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
 
+/// The opcodes this module runs, for the run loop (see exec.zig).
+pub const handlers = .{
+    .{ .ops = .{.Count}, .f = opCount },
+    .{ .ops = .{.NewRowid}, .f = opNewRowid, .call = .always_inline },
+    .{ .ops = .{.Insert}, .f = opInsert, .call = .always_inline },
+    .{ .ops = .{.RowCell}, .f = opRowCell },
+    .{ .ops = .{.Delete}, .f = opDelete },
+    .{ .ops = .{.ResetCount}, .f = opResetCount },
+    .{ .ops = .{.RowData}, .f = opRowData, .call = .always_inline },
+    .{ .ops = .{.IdxInsert}, .f = opIdxInsert },
+    .{ .ops = .{.IdxDelete}, .f = opIdxDelete },
+    .{ .ops = .{.SorterCompare}, .f = opSorterCompare },
+    .{ .ops = .{.SorterData}, .f = opSorterData },
+    .{ .ops = .{.SorterInsert}, .f = opSorterInsert },
+    .{ .ops = .{.ResetSorter}, .f = opResetSorter },
+};
+
 /// The largest rowid (MAX_ROWID).
 const max_rowid: i64 = std.math.maxInt(i64);
 
@@ -34,7 +51,7 @@ pub fn opCount(e: *Exec, op: *Op) Error!Flow {
     const cur = e.csr(op.p1).uc.cursor;
     const n = try if (op.p3 != 0) cur.rowCountEst() else cur.count();
     e.out2Prerelease(op).u = .{ .i = n };
-    return .check_interrupt;
+    return .next_check;
 }
 
 pub fn opNewRowid(e: *Exec, op: *Op) Error!Flow {
@@ -99,15 +116,16 @@ pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
         .data = data.bytes(),
         .n_zero = if (data.flags.Zero) @intCast(data.u.n_zero) else 0,
     };
-    const res = c.uc.cursor.insert(x, .{
-        .append = op.p5 & vi.OPFLAG.APPEND != 0,
-        .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
-        .seek_result = insertSeekResult(op, c),
-        .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
-    });
+    const seek_result = insertSeekResult(op, c);
+    // Whether the insert fails or not (the b-tree does not read them).
     c.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
-    try res;
+    try c.uc.cursor.insert(x, .{
+        .append = op.p5 & vi.OPFLAG.APPEND != 0,
+        .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
+        .seek_result = seek_result,
+        .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
+    });
     if (e.db.update_hook) |f| if (op.p4type == .table) {
         const op_code: i32 = if (op.p5 & vi.OPFLAG.ISUPDATE != 0) update_op else insert_op;
         f(e.db.update_arg, op_code, e.db.dbs.items[@intCast(c.i_db)].name, op.p4As(.table).name, rowid);
@@ -126,7 +144,7 @@ const delete_op = 9;
 /// OP_IdxInsert with OPFLAG_PREFORMAT that follows.
 pub fn opRowCell(e: *Exec, op: *Op) Error!Flow {
     if (std.debug.runtime_safety) {
-        const next = e.ops[@intCast(e.pc + 1)];
+        const next = e.ops[e.pc + 1];
         std.debug.assert(next.opcode == .Insert or next.opcode == .IdxInsert);
         std.debug.assert(next.p5 & vi.OPFLAG.PREFORMAT != 0);
     }
@@ -143,10 +161,10 @@ pub fn opDelete(e: *Exec, op: *Op) Error!Flow {
     // The rowid, for the update hook (C's movetoTarget).
     const hook_tab: ?*const int.Table = if (e.db.update_hook != null and op.p4type == .table) op.p4As(.table) else null;
     const rowid: i64 = if (hook_tab != null and c.is_table) c.uc.cursor.integerKey() else 0;
-    const res = c.uc.cursor.delete(.{ .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0 });
+    // Whether the delete fails or not (the b-tree does not read them).
     c.cache_status = vi.cache_stale;
     c.seek_result = 0;
-    try res;
+    try c.uc.cursor.delete(.{ .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0 });
     if (op.p2 & vi.OPFLAG.NCHANGE != 0) {
         v.n_change += 1;
         if (hook_tab) |t| if (t.hasRowid()) {
@@ -194,14 +212,14 @@ pub fn opIdxInsert(e: *Exec, op: *Op) Error!Flow {
         kc = .{ .r = &r, .cmp = serial.findCompare(&r) };
         seek = kc.indexKey();
     }
-    const res = c.uc.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
+    // Whether the insert fails or not (the b-tree does not read it).
+    c.cache_status = vi.cache_stale;
+    try c.uc.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
         .append = op.p5 & vi.OPFLAG.APPEND != 0,
         .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
         .seek_result = insertSeekResult(op, c),
         .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
     });
-    c.cache_status = vi.cache_stale;
-    try res;
     return .next;
 }
 

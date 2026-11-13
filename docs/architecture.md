@@ -507,28 +507,37 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 
 ## 코드 생성과 VDBE 피연산자
 
-코드 생성기(`src/sql`)는 SQLite의 C를 옮긴 것이라 레지스터, 커서, 라벨, 주소를 모두 `i32`로 다뤘습니다. 지금은 타입을 나눕니다(`src/vdbe/operand.zig`).
+코드 생성기(`src/sql`)는 SQLite의 C를 옮긴 것이지만 레지스터, 커서, 라벨, 주소를 `i32`로 다루지 않고 타입을 나눕니다(`src/vdbe/operand.zig`).
 
 | 타입 | 뜻 |
 | --- | --- |
 | `Reg` | 레지스터. `.none`(0)은 레지스터 없음. 이어진 레지스터는 `reg.at(i)` |
 | `Cursor` | 커서 번호. 테이블 뒤의 인덱스 커서는 `cur.at(i)` |
 | `Label` | 아직 주소가 정해지지 않은 자리(`aux.newLabel()`, `aux.place()`) |
-| `Addr` | 명령의 주소. `addr.plus(n)` |
-| `Jump` | `Label`이거나 `Addr`인 점프 대상. 둘 다 받는 매개변수와, 아직 `i32`인 코드에서 온 값에 씀(`Jump.of()`, `Jump.from()`) |
+| `Addr` | 명령의 주소. `addr.plus(n)`, 다음 명령의 주소는 `aux.here()` |
+| `Jump` | `Label`이거나 `Addr`인 점프 대상. 둘 다 받는 매개변수에 씀(`Jump.of()`). `Jump.from()`은 주소의 번호에서 만들고 0은 점프 없음 |
 
-- **피연산자 표**: `operand.kinds(op)`가 opcode마다 P1·P2·P3가 무엇인지(`int`, `reg`, `cursor`, `jump`, `addr`) 정합니다. 컴파일 시점에 opcode 속성(`OPFLG_JUMP`, `IN1`~`OUT3`)과 맞춰 봅니다. `addr`은 P2가 아닌 자리의 주소(`OP_Jump`의 P1·P3 등)로, 라벨을 넣으면 풀리지 않으므로 `Addr`만 받습니다. 어떤 쓰임에서만 레지스터인 피연산자(`OP_Clear`의 P3, `P2ISREG`의 P2)는 `int`입니다.
+- **피연산자 표**: `operand.kinds(op)`가 opcode마다 P1·P2·P3가 무엇인지(`int`, `reg`, `cursor`, `jump`, `addr`) 정합니다. 컴파일 시점에 opcode 속성(`OPFLG_JUMP`, `IN1`~`OUT3`)과 맞춰 봅니다. `addr`은 P2가 아닌 자리의 주소(`OP_Jump`의 P1·P3, `OP_InitCoroutine`의 P3, `OP_Return`의 P2 ...)로, 라벨을 넣으면 풀리지 않으므로 `Addr`만 받습니다. 어떤 쓰임에서만 레지스터인 피연산자(`OP_Clear`의 P3, `P2ISREG`의 P2, `OP_IsType`의 P3)는 `int`입니다.
 - **명령 내기**: `aux.emit(v, .Column, .{ cur, col, reg })`가 인자의 타입을 표와 대조합니다. 레지스터 자리에 커서를 넘기면 컴파일 오류입니다. 뒤의 피연산자는 생략하면 0이고, 리터럴 0은 어느 종류에나 "쓰지 않음"으로 받습니다.
   - P4가 있으면 `emit4`(P4 값), `emitInt`(정수), `emitStr`(복사한 문자열)입니다.
-  - 컴파일할 때 고르는 opcode(`OP_NotExists`냐 `OP_NotFound`냐)는 `emitAny(v, op, shape, .{...})`입니다. `shape`는 후보 opcode들이 함께 가지는 피연산자 종류이고, 실행 때 `kinds(op)`와 같은지 단언합니다.
-- **레지스터와 커서 할당**: `p.newReg()`, `p.newRegs(n)`(이어진 n개의 첫째), `p.newCursor()`, `p.newCursors(n)`(`Parse`의 메서드)이 `n_mem`·`n_tab`을 늘리고 타입 있는 값을 돌려줍니다. 잠깐 쓰는 레지스터는 예전처럼 `expr.getTempReg()`·`getTempRange()`입니다. `n_mem`을 저장했다 되돌리거나 다음 번호를 미리 보는 곳은 필드를 그대로 씁니다.
-- **이미 낸 명령 고치기**: `aux.getOp`, `changeP1`~`changeP3`, `changeOpcode`, `changeToNoop`, `jumpHereOrPopInst`, `landHere`는 `Addr`를 받고, `changeP4`·`changeP4Str`은 `?Addr`(null은 마지막 명령)를 받습니다. `aux.explain()`은 `OP_Explain`의 `Addr`를 돌려주고, `loadString`·`multiLoad`·`addFunctionCall`·`addInt64`·`addDouble`·`endCoroutine`·`typeofColumn`은 `Reg`를 받습니다.
-- **아직 `i32`인 곳**: DML(`insert`, `delete`, `update`, `upsert`, `fkey`, `trigger`)과 `build`, `select`, `window`의 함수, `Upsert`·`Returning`·`AutoincInfo`·`SelectDest`·`Subquery`·`CteUse`·`AggInfo`·`Window`의 필드, `Select`의 LIMIT·OFFSET 레지스터, 서브쿼리 서브루틴(`Expr.y.sub`), `Parse`의 레지스터·커서·주소 필드, `where`의 API(`whereBegin`, `continueLabel`, `okOnePass` ...)와 `WhereLevel`·`WhereInfo`·`InLoop`·`WhereRightJoin`의 필드는 타입이 있습니다. 없음은 `Reg.none`이나 `null`(`?Label`, `?Cursor`, `?Addr`)입니다.
+  - 컴파일할 때 고르는 opcode(`OP_NotExists`냐 `OP_NotFound`냐)는 `emitAny(v, op, shape, .{...})`와 `emitAny4`·`emitAnyInt`입니다. `shape`는 후보 opcode들이 함께 가지는 피연산자 종류이고, 실행 때 `kinds(op)`와 같은지 단언합니다. 후보마다 종류가 다르면 opcode로 `switch`해 따로 냅니다(`where_code.zig`의 `emitRangeStart()`).
+  - SQLite의 `sqlite3VdbeAddOpList()`로 짠 작은 고정 프로그램(`PRAGMA default_cache_size`·`auto_vacuum`·헤더 값·`integrity_check`의 끝, AUTOINCREMENT, `sqlite3_blob_open()`)도 `emit`과 라벨로 냅니다.
+- **타입 없는 층**: `aux.emitRaw(v, op, p1, p2, p3)`는 피연산자가 모두 `i32`이고 opcode를 실행 때 받습니다. 피연산자에 타입을 줄 수 없는 곳에만 씁니다. 지금은 두 곳입니다.
+  - `insert.zig`의 재검사: 이미 낸 충돌 검사 명령을 opcode와 상관없이 복사합니다(P4는 `changeP4`로).
+  - `where.zig`의 `whereEnd()`: 루프를 닫는 opcode(`OP_Next`, `OP_Prev`, `OP_VNext`, `OP_Return` ...)와 그 피연산자를 `codeOneLoopStart()`가 `WhereLevel`에 숫자로 남깁니다. `p1`은 opcode에 따라 커서이거나 레지스터입니다.
+  - 그 밑의 `addOp3`(C의 `sqlite3VdbeAddOp3()`)는 `aux.zig` 밖에 보이지 않습니다. 예전의 `addOp0`~`addOp4`, `addOp4Int`, `addOp4Str`, `addOpList`, `goto_`, `jumpHere`, `currentAddr`는 없습니다.
+- **레지스터와 커서 할당**: `p.newReg()`, `p.newRegs(n)`(이어진 n개의 첫째), `p.newCursor()`, `p.newCursors(n)`(`Parse`의 메서드)이 `n_mem`·`n_tab`을 늘리고 타입 있는 값을 돌려줍니다. 잠깐 쓰는 레지스터는 `expr.getTempReg()`·`getTempRange()`입니다. `n_mem`을 저장했다 되돌리거나 다음 번호를 미리 보는 곳은 필드를 그대로 씁니다. pragma는 C처럼 레지스터를 번호로 씁니다(`pragma.zig`의 `result_reg`, 무결성 검사의 `ck`).
+- **이미 낸 명령 고치기**: `aux.getOp`, `changeP1`~`changeP3`, `changeOpcode`, `changeToNoop`, `jumpHereOrPopInst`, `landHere`는 `Addr`를 받고, `changeP4`·`changeP4Str`은 `?Addr`(null은 마지막 명령)를 받습니다. `changeP1`~`changeP3`의 값은 opcode에 따라 뜻이 달라 `i32`입니다. `aux.explain()`은 `OP_Explain`의 `Addr`를 돌려주고, `loadString`·`multiLoad`·`addFunctionCall`·`addInt64`·`addDouble`·`endCoroutine`·`typeofColumn`은 `Reg`를 받습니다.
+- **함수와 구조체**: DML(`insert`, `delete`, `update`, `upsert`, `fkey`, `trigger`)과 `build`, `select`, `window`, `expr_code`의 함수, `Upsert`·`Returning`·`AutoincInfo`·`SelectDest`·`Subquery`·`CteUse`·`AggInfo`·`Window`의 필드, `Select`의 LIMIT·OFFSET 레지스터, 서브쿼리 서브루틴(`Expr.y.sub`), `Parse`의 레지스터·커서·주소 필드, `where`의 API(`whereBegin`, `continueLabel`, `okOnePass` ...)와 `WhereLevel`·`WhereInfo`·`InLoop`·`WhereRightJoin`의 필드는 타입이 있습니다. 없음은 `Reg.none`이나 `null`(`?Label`, `?Cursor`, `?Addr`)입니다.
   - `SelectDest.parm`(C의 `iSDParm`)은 목적지에 따라 커서이거나 레지스터라 태그 붙은 공용체(`.cursor`, `.reg`)입니다. C의 `iSDParm2`는 뜻에 따라 `reg_bloom`(`SRT.Set`의 Bloom 필터)과 `n_pk`(`SRT.Upfrom`의 기본 키 열 수)로 나눴습니다.
   - `whereBegin()`의 마지막 인자는 플래그에 따라 인덱스 커서(`WHERE_OR_SUBCLAUSE`, `WHERE_ONEPASS_DESIRED`)이거나 LIMIT 추정치(`WHERE_USE_LIMIT`)라 태그 붙은 공용체 `WhereAux`(`.none`, `.cursor`, `.limit`)입니다.
-  - `WhereLevel`의 `p1`은 루프를 닫는 opcode에 따라 커서(`OP_Next`, `OP_Prev`, `OP_VNext`)이거나 레지스터(`OP_Return`)라 `i32`입니다. 그 opcode는 `addOp3`로 냅니다. `i_idx_cur`는 C처럼 0이 "인덱스 커서 없음"이라(커서 0과 구별하지 않음) `Cursor`에 기본값 0을 두고 0과 비교합니다. `addr_brk`·`addr_halt`·`addr_nxt`·`addr_cont` 라벨은 읽히기 전에 `whereBegin()`과 `codeOneLoopStart()`가 늘 정합니다.
-  - 파스 트리의 필드(`Expr.i_table`, `SrcItem.i_cursor`)와 그와 짝인 `WhereTerm.left_cursor`·`WhereScan.ai_cur`·`WhereMaskSet`, `IndexedExpr`의 커서, 커서이기도 하고 음수의 레지스터이기도 한 `Parse.i_self_tab`, `OP_Explain`의 P2로 쓰는 `Parse.addr_explain`, 커서였다가 `codeDistinct()`가 돌려준 값(이전 행의 레지스터나 0)이 되는 `AggInfoFunc.i_distinct`는 아직 `i32`입니다. 그 경계에서 `.from()`과 `.int()`로 바꿉니다. `src/vdbe`의 `aux.zig`·`api.zig` 안의 호출, `pragma.zig`의 정적 opcode 목록(`addOpList`), 이미 낸 명령을 복사하거나 `WhereLevel`에 넣어 둔 opcode를 내는 몇 곳도 예전 `addOp*`입니다. `aux.scanStatus*`의 주소 인자도 `i32`입니다(`scanStatusRange`는 C처럼 범위 끝에 커서 번호를 받기도 함).
-- 새 코드는 `emit` 계열을 씁니다. 이 변경은 바이트코드를 바꾸지 않았습니다(`xqt planner`의 기록과 일치).
+  - `WhereLevel`의 `i_idx_cur`는 C처럼 0이 "인덱스 커서 없음"이라(커서 0과 구별하지 않음) `Cursor`에 기본값 0을 두고 0과 비교합니다. `addr_brk`·`addr_halt`·`addr_nxt`·`addr_cont` 라벨은 읽히기 전에 `whereBegin()`과 `codeOneLoopStart()`가 늘 정합니다.
+- **`i32`로 남은 것**: 다음은 한 타입으로 정할 수 없거나 코드 생성 밖에서도 쓰여 `i32`이고, 쓰는 자리에서 `.from()`과 `.int()`로 바꿉니다.
+  - 파스 트리의 필드: `Expr.i_table`(커서이고, `TK_REGISTER`·`TK_SELECT_COLUMN`이면 레지스터), `SrcItem.i_cursor`, 그와 짝인 `WhereTerm.left_cursor`·`WhereScan.ai_cur`·`WhereMaskSet`. 이름 풀기와 `where`의 분석(`expr.compare()`, `coveredByIndex()`, `findTerm()` ...)은 커서 번호를 비교만 하므로 `i32`를 받습니다. `ExprList` 항목의 `const_expr_reg`도 그렇습니다.
+  - 뜻이 둘인 필드: 커서이기도 하고 음수의 레지스터이기도 한 `Parse.i_self_tab`, 커서였다가 `codeDistinct()`가 돌려준 값(이전 행의 레지스터나 0)이 되는 `AggInfoFunc.i_distinct`, 위의 `WhereLevel.p1`, -1이 "없음"인 `IndexedExpr`의 `i_idx_cur`·`i_data_cur`.
+  - `OP_Explain`의 P1·P2로 쓰는 `Parse.addr_explain`과 `aux.explainParent()`, `aux.scanStatus*`의 주소 인자(`scanStatusRange`는 C처럼 범위 끝에 커서 번호를 받기도 함). `sqlite3_stmt_scanstatus()`의 기록에 숫자로 남습니다.
+  - 이미 낸 명령의 피연산자(`aux.getOp()`의 `p1`~`p3`)를 읽거나 바꾸는 곳, 주소를 비교하는 루프(`addr.int() < end.int()`), 텍스트에 넣는 레지스터 번호(nested parse의 `#%d`, 방언 제약 오류의 레지스터 목록), `Index.tnum`에 잠깐 넣어 두는 주소.
+- 새 코드는 `emit` 계열을 씁니다. 이 변경들은 바이트코드를 바꾸지 않았습니다(`xqt planner`의 기록과 일치).
 
 ## VFS
 

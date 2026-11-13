@@ -1115,13 +1115,13 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
         } else if (func.x_sfunc.? != &noopStepFunc) {
             const list = win.owner.?.x.list;
             if (win.expr_args) {
-                var i_op = aux.currentAddr(v);
+                var i_op = aux.here(v);
                 n_arg = @intCast(list.?.len());
                 reg_arg = expr_mod.getTempRange(p, n_arg);
                 _ = ec.codeExprList(p, list.?, reg_arg, .none, 0);
-                const i_end = aux.currentAddr(v);
-                while (i_op < i_end) : (i_op += 1) {
-                    const op = aux.getOp(v, .from(i_op));
+                const i_end = aux.here(v);
+                while (i_op.int() < i_end.int()) : (i_op = i_op.plus(1)) {
+                    const op = aux.getOp(v, i_op);
                     if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr.int()) op.p1 = csr.int();
                 }
             }
@@ -1907,7 +1907,7 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
             _ = aux.emit(v, .Integer, .{ 1, m_win.reg_start_rowid });
             _ = aux.emit(v, .Integer, .{ 0, m_win.reg_end_rowid });
         }
-        aux.changeP1(v, addr_integer, aux.currentAddr(v));
+        aux.changeP1(v, addr_integer, aux.here(v).int());
         _ = aux.emit(v, .Return, .{reg_flush_part});
     }
 }

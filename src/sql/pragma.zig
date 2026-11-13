@@ -447,7 +447,7 @@ fn pragmaFunclistLine(v: *Vdbe, f: *const int.FuncDef, is_builtin: bool, show_in
     if (f.x_sfunc == null) return;
     if (f.func_flags.INTERNAL and !show_intern_funcs) return;
     const typ: []const u8 = if (f.x_value != null) "w" else if (f.x_finalize != null) "a" else "s";
-    aux.multiLoad(v, .from(1), &.{
+    aux.multiLoad(v, result_reg, &.{
         .{ .s = f.name },
         .{ .i = @intFromBool(is_builtin) },
         .{ .s = typ },
@@ -579,17 +579,6 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // PRAGMA [schema.]default_cache_size[=N]: the cache size stored in
         // the database header. Setting it also sets cache_size.
         .default_cache_size => {
-            const get_cache_size = [_]aux.OpListItem{
-                .{ .opcode = OP.Transaction },
-                .{ .opcode = OP.ReadCookie, .p2 = 1, .p3 = @backingInt(btree.Meta.default_cache_size) },
-                .{ .opcode = OP.IfPos, .p1 = 1, .p2 = 8 },
-                .{ .opcode = OP.Integer, .p2 = 2 },
-                .{ .opcode = OP.Subtract, .p1 = 1, .p2 = 2, .p3 = 1 },
-                .{ .opcode = OP.IfPos, .p1 = 1, .p2 = 8 },
-                .{ .opcode = OP.Integer, .p2 = 1 },
-                .{ .opcode = OP.Noop },
-                .{ .opcode = OP.ResultRow, .p1 = 1, .p2 = 1 },
-            };
             aux.usesBtree(v, @intCast(i_db));
             if (right) |z| {
                 const size = absInt32(atoi(z));
@@ -598,11 +587,22 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 pdb.schema.cache_size = size;
                 pdb.bt.?.setCacheSize(size);
             } else {
+                // The absolute value of the stored size, or the default if
+                // it is 0.
                 p.n_mem += 2;
-                const ops = aux.addOpList(v, &get_cache_size) orelse return;
-                ops[0].p1 = @intCast(i_db);
-                ops[1].p1 = @intCast(i_db);
-                ops[6].p1 = int.DEFAULT_CACHE_SIZE;
+                const size = result_reg;
+                const zero = result_reg.at(1);
+                const done = aux.newLabel(p);
+                _ = aux.emit(v, .Transaction, .{i_db});
+                _ = aux.emit(v, .ReadCookie, .{ i_db, size, @backingInt(btree.Meta.default_cache_size) });
+                _ = aux.emit(v, .IfPos, .{ size, done });
+                _ = aux.emit(v, .Integer, .{ 0, zero });
+                _ = aux.emit(v, .Subtract, .{ size, zero, size });
+                _ = aux.emit(v, .IfPos, .{ size, done });
+                _ = aux.emit(v, .Integer, .{ int.DEFAULT_CACHE_SIZE, size });
+                _ = aux.emit(v, .Noop, .{});
+                aux.place(v, done);
+                _ = aux.emit(v, .ResultRow, .{ size, 1 });
             }
         },
 
@@ -736,20 +736,14 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 if (ok and (e_auto == 1 or e_auto == 2)) {
                     // Write meta[6] (incremental vacuum), but only if meta[3]
                     // says this really is an auto-vacuum database.
-                    const set_meta6 = [_]aux.OpListItem{
-                        .{ .opcode = OP.Transaction, .p2 = 1 },
-                        .{ .opcode = OP.ReadCookie, .p2 = 1, .p3 = @backingInt(btree.Meta.largest_root_page) },
-                        .{ .opcode = OP.If, .p1 = 1 },
-                        .{ .opcode = OP.Halt, .p1 = int.RC.OK, .p2 = @intCast(int.OE.Abort.int()) },
-                        .{ .opcode = OP.SetCookie, .p2 = @backingInt(btree.Meta.incr_vacuum) },
-                    };
-                    const i_addr = aux.currentAddr(v);
-                    const ops = aux.addOpList(v, &set_meta6) orelse return;
-                    ops[0].p1 = @intCast(i_db);
-                    ops[1].p1 = @intCast(i_db);
-                    ops[2].p2 = i_addr + 4;
-                    ops[4].p1 = @intCast(i_db);
-                    ops[4].p3 = e_auto - 1;
+                    const largest_root = result_reg;
+                    const auto_vacuum = aux.newLabel(p);
+                    _ = aux.emit(v, .Transaction, .{ i_db, 1 });
+                    _ = aux.emit(v, .ReadCookie, .{ i_db, largest_root, @backingInt(btree.Meta.largest_root_page) });
+                    _ = aux.emit(v, .If, .{ largest_root, auto_vacuum });
+                    _ = aux.emit(v, .Halt, .{ int.RC.OK, int.OE.Abort.int() });
+                    aux.place(v, auto_vacuum);
+                    _ = aux.emit(v, .SetCookie, .{ i_db, @backingInt(btree.Meta.incr_vacuum), e_auto - 1 });
                     aux.usesBtree(v, @intCast(i_db));
                 }
             } else {
@@ -962,7 +956,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     .{ .i = k },
                     .{ .i = is_hidden },
                 };
-                aux.multiLoad(v, .from(1), if (pn.i_arg != 0) &values else values[0..6], false);
+                aux.multiLoad(v, result_reg, if (pn.i_arg != 0) &values else values[0..6], false);
             }
         },
 
@@ -1000,7 +994,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                         "shadow"
                     else
                         "table";
-                    aux.multiLoad(v, .from(1), &.{
+                    aux.multiLoad(v, result_reg, &.{
                         .{ .s = db.dbs.items[ii].name },
                         .{ .s = build.preferredTableName(t.name) },
                         .{ .s = typ },
@@ -1036,13 +1030,13 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 build.codeVerifySchema(p, @intCast(i_idx_db));
                 for (0..mx) |i| {
                     const cnum = idx.ai_column[i];
-                    aux.multiLoad(v, .from(1), &.{
+                    aux.multiLoad(v, result_reg, &.{
                         .{ .i = @intCast(i) },
                         .{ .i = cnum },
                         .{ .s = if (cnum < 0) null else t.cols[@intCast(cnum)].name() },
                     }, true);
                     if (pn.i_arg != 0) {
-                        aux.multiLoad(v, .from(4), &.{
+                        aux.multiLoad(v, result_reg.at(3), &.{
                             .{ .i = if (i < idx.sort_order.len) idx.sort_order[i] else 0 },
                             .{ .s = if (i < idx.coll.len) idx.coll[i] else coll.str_binary },
                             .{ .i = @intFromBool(i < idx.n_key_col) },
@@ -1066,7 +1060,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 idx_opt = idx.next;
                 i += 1;
             }) {
-                aux.multiLoad(v, .from(1), &.{
+                aux.multiLoad(v, result_reg, &.{
                     .{ .i = i },
                     .{ .s = idx.name },
                     .{ .i = @intFromBool(idx.isUnique()) },
@@ -1081,7 +1075,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             p.n_mem = 3;
             for (db.dbs.items, 0..) |*d, i| {
                 const bt = d.bt orelse continue;
-                aux.multiLoad(v, .from(1), &.{
+                aux.multiLoad(v, result_reg, &.{
                     .{ .i = @intCast(i) },
                     .{ .s = d.name },
                     .{ .s = bt.pager.filename() },
@@ -1117,7 +1111,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             var names_it = names.iterator();
             var i: i32 = 0;
             while (names_it.next()) |name| : (i += 1) {
-                aux.multiLoad(v, .from(1), &.{ .{ .i = i }, .{ .s = name } }, false);
+                aux.multiLoad(v, result_reg, &.{ .{ .i = i }, .{ .s = name } }, false);
             }
         },
 
@@ -1140,12 +1134,12 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         .module_list => {
             p.n_mem = 1;
             var it = db.modules.valueIterator();
-            while (it.next()) |m| aux.multiLoad(v, .from(1), &.{.{ .s = m.*.name }}, false);
+            while (it.next()) |m| aux.multiLoad(v, result_reg, &.{.{ .s = m.*.name }}, false);
         },
 
         // PRAGMA pragma_list.
         .pragma_list => {
-            for (&pragma_names) |*n| aux.multiLoad(v, .from(1), &.{.{ .s = n.name }}, false);
+            for (&pragma_names) |*n| aux.multiLoad(v, result_reg, &.{.{ .s = n.name }}, false);
         },
 
         // PRAGMA foreign_key_list(T): a row per column of each foreign key
@@ -1161,7 +1155,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             build.codeVerifySchema(p, @intCast(i_tab_db));
             while (fk_opt) |fk| : (fk_opt = fk.next_from) {
                 for (fk.cols, 0..) |fc, j| {
-                    aux.multiLoad(v, .from(1), &.{
+                    aux.multiLoad(v, result_reg, &.{
                         .{ .i = i },
                         .{ .i = @intCast(j) },
                         .{ .s = fk.to },
@@ -1221,30 +1215,17 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             const cookie: i32 = @intCast(pn.i_arg);
             aux.usesBtree(v, @intCast(i_db));
             if (right != null and !pn.flags.ReadOnly) {
-                const set_cookie = [_]aux.OpListItem{
-                    .{ .opcode = OP.Transaction, .p2 = 1 },
-                    .{ .opcode = OP.SetCookie },
-                };
-                const ops = aux.addOpList(v, &set_cookie) orelse return;
-                ops[0].p1 = @intCast(i_db);
-                ops[1].p1 = @intCast(i_db);
-                ops[1].p2 = cookie;
-                ops[1].p3 = atoi(right.?);
-                ops[1].p5 = 1;
+                _ = aux.emit(v, .Transaction, .{ i_db, 1 });
+                const set = aux.emit(v, .SetCookie, .{ i_db, cookie, atoi(right.?) });
+                aux.changeP5(v, 1);
                 // No schema_version=N in defensive mode.
                 if (cookie == @backingInt(btree.Meta.schema_version) and db.flags.Defensive) {
-                    ops[1].opcode = OP.Noop;
+                    aux.changeOpcode(v, set, OP.Noop);
                 }
             } else {
-                const read_cookie = [_]aux.OpListItem{
-                    .{ .opcode = OP.Transaction },
-                    .{ .opcode = OP.ReadCookie, .p2 = 1 },
-                    .{ .opcode = OP.ResultRow, .p1 = 1, .p2 = 1 },
-                };
-                const ops = aux.addOpList(v, &read_cookie) orelse return;
-                ops[0].p1 = @intCast(i_db);
-                ops[1].p1 = @intCast(i_db);
-                ops[1].p3 = cookie;
+                _ = aux.emit(v, .Transaction, .{i_db});
+                _ = aux.emit(v, .ReadCookie, .{ i_db, result_reg, cookie });
+                _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
                 aux.reusable(v);
             }
         },
@@ -1602,22 +1583,17 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
     }
 
     // Report "ok" if there were no errors.
-    const end_code = [_]aux.OpListItem{
-        .{ .opcode = OP.AddImm, .p1 = 1 },
-        .{ .opcode = OP.IfNotZero, .p1 = 1, .p2 = 4 },
-        .{ .opcode = OP.String8, .p2 = 3 },
-        .{ .opcode = OP.ResultRow, .p1 = 3, .p2 = 1 },
-        .{ .opcode = OP.Halt },
-        .{ .opcode = OP.String8, .p2 = 3 },
-        .{ .opcode = OP.Goto, .p2 = 3 },
-    };
-    if (aux.addOpList(v, &end_code)) |ops| {
-        ops[0].p2 = 1 - mx_err;
-        ops[2].setP4(.{ .z = "ok" });
-        ops[5].setP4(.{ .z = util.errStr(int.RC.CORRUPT) });
-    }
+    const halt = aux.newLabel(p);
+    _ = aux.emit(v, .AddImm, .{ ck.errs_left, 1 - mx_err });
+    _ = aux.emit(v, .IfNotZero, .{ ck.errs_left, halt });
+    _ = aux.emit4(v, .String8, .{ 0, ck.msg }, .{ .z = "ok" });
+    const result_row = aux.emit(v, .ResultRow, .{ ck.msg, 1 });
+    aux.place(v, halt);
+    _ = aux.emit(v, .Halt, .{});
+    const corrupt = aux.emit4(v, .String8, .{ 0, ck.msg }, .{ .z = util.errStr(int.RC.CORRUPT) });
+    _ = aux.emit(v, .Goto, .{ 0, result_row });
     // A corrupt record seen by OP_Column jumps to the "corrupt" message.
-    aux.changeP3(v, .from(0), aux.currentAddr(v) - 2);
+    aux.changeP3(v, .from(0), corrupt.int());
 }
 
 /// The per-row checks of integrityCheck() for table `t`: index entries,

@@ -4,9 +4,11 @@
 //! `kinds()` says what each operand of each opcode is, and `aux.emit()`
 //! checks its arguments against it when the statement is compiled.
 //!
-//! The code generator was ported from C with `i32` for all of these. A
-//! file moves to these types on its own; `.int()` and `.from()` convert
-//! where it meets one that has not moved yet.
+//! `.from()` and `.int()` convert where the number is all there is: the
+//! cursor and register fields of the parse tree (Expr.i_table,
+//! SrcItem.i_cursor), the operands of an instruction already coded, an
+//! operand whose meaning depends on its opcode, a number written into
+//! text.
 
 const std = @import("std");
 const opcodes = @import("opcodes.zig");
@@ -86,8 +88,9 @@ pub const Addr = enum(i32) {
     }
 };
 
-/// Where a jump goes when the code that made the number has not moved to
-/// Label and Addr yet: either of them.
+/// Where a jump goes, for a parameter that takes a Label or an Addr
+/// (`Jump.of()`). `Jump.from()` takes the number of an address, 0 for no
+/// jump.
 pub const Jump = enum(i32) {
     _,
 
@@ -144,7 +147,10 @@ pub fn kinds(op: OP) [3]Kind {
         .InitCoroutine => .{ r, j, a },
         .IfPos, .IfNotZero, .DecrJumpZero => .{ r, j, i },
         .Jump => .{ a, j, a },
-        .Return, .EndCoroutine => .{ r, i, i },
+        // P2 of OP_Return, if any, is the start of the subroutine (for the
+        // indentation of EXPLAIN).
+        .Return => .{ r, a, i },
+        .EndCoroutine => .{ r, i, i },
         .HaltIfNull => .{ i, i, r },
         // P3 is the register of RAISE's message, if any.
         .Halt => .{ i, i, r },
@@ -199,7 +205,9 @@ pub fn kinds(op: OP) [3]Kind {
         // P2 is an address, never a label (the opcode is not OPFLG_JUMP).
         .SorterCompare => .{ c, a, r },
         .SorterData => .{ c, r, c },
-        .IdxDelete => .{ c, r, i },
+        // P3, if any, is the register of a record: an entry that is that
+        // record stays.
+        .IdxDelete => .{ c, r, r },
         .DeferredSeek => .{ c, i, c },
         .IdxRowid => .{ c, r, i },
 

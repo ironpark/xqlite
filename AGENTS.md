@@ -24,7 +24,7 @@
 - **스키마에 저장되는 엔진 함수의 의미는 바꾸지 않음**: CHECK, DEFAULT, 생성 열, 식 인덱스, 뷰가 부르는 `xq_*` 함수, collation, 정렬 키 인코딩이 여기에 해당합니다.
   - 식 인덱스와 STORED 생성 열은 결과를 디스크에 남깁니다. 의미가 바뀌면 xqlite끼리도, xqlite와 sqlite3 + 확장 사이에서도 인덱스가 깨집니다.
   - 동작을 바꿔야 하면 새 이름을 쓰고 확장의 ABI 버전을 올립니다([docs/extension.md](docs/extension.md)).
-- **코드 생성은 타입 있는 빌더로**: VDBE 명령은 `aux.emit()` 계열로 내고, 레지스터·커서·라벨·주소는 `Reg`·`Cursor`·`Label`·`Addr`로 둡니다([docs/architecture.md](docs/architecture.md#코드-생성과-vdbe-피연산자)). 새 코드에 `aux.addOp*`를 쓰지 않습니다.
+- **코드 생성은 타입 있는 빌더로**: VDBE 명령은 `aux.emit()` 계열로 내고, 레지스터·커서·라벨·주소는 `Reg`·`Cursor`·`Label`·`Addr`로 둡니다([docs/architecture.md](docs/architecture.md#코드-생성과-vdbe-피연산자)). 타입 없는 `aux.emitRaw()`는 피연산자에 타입을 줄 수 없는 곳(이미 낸 명령의 복사 등)에만 씁니다.
 - **방언은 빌드에서 뺄 수 있음**(`-Ddialects=`). 그래서 다음을 지킵니다.
   - 테스트는 쓰는 방언이 빌드되지 않았으면 건너뜁니다.
     - Zig 테스트: `try Dialect.requireBuilt(&.{ .postgres })`

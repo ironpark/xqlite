@@ -43,7 +43,7 @@ pub fn create(p: *Parse) error{OutOfMemory}!*Vdbe {
     v.parse = p;
     p.vdbe = v;
     std.debug.assert(p.labels.items.len == 0 and p.n_label == 0);
-    _ = addOp2(v, OP.Init, 0, 1);
+    _ = emit(v, .Init, .{ 0, Addr.from(1) });
     return v;
 }
 
@@ -149,7 +149,8 @@ pub fn emitAnyInt(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anyty
 
 /// The address of the next instruction (sqlite3VdbeCurrentAddr()).
 pub fn here(v: *Vdbe) operand.Addr {
-    return .from(currentAddr(v));
+    std.debug.assert(v.e_vdbe_state == .init);
+    return .from(v.nOp());
 }
 
 /// The jump at `addr` goes to the next instruction (sqlite3VdbeJumpHere()).
@@ -179,9 +180,19 @@ pub fn place(v: *Vdbe, label: operand.Label) void {
     p.labels.items[j] = v.nOp();
 }
 
+/// emit() with every operand a number and the opcode chosen at run time:
+/// for an instruction whose operands cannot be typed, because it is a copy
+/// of an instruction already coded or its operands were kept as numbers
+/// together with an opcode that gives them their meaning. Code that knows
+/// its opcode, or the shape of the opcodes it chooses from, uses emit() or
+/// emitAny().
+pub fn emitRaw(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32) Addr {
+    return .from(addOp3(v, op, p1, p2, p3));
+}
+
 /// Port of sqlite3VdbeAddOp3(): append an instruction; returns its
-/// address.
-pub fn addOp3(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32) i32 {
+/// address. The layer under emit(), emitAny() and emitRaw().
+fn addOp3(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32) i32 {
     std.debug.assert(v.e_vdbe_state == .init);
     const i = v.nOp();
     if (v.ops.items.len >= @as(usize, @intCast(v.db.limit(.vdbe_op)))) {
@@ -194,40 +205,6 @@ pub fn addOp3(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32) i32 {
     return i;
 }
 
-pub fn addOp0(v: *Vdbe, op: OP) i32 {
-    return addOp3(v, op, 0, 0, 0);
-}
-
-pub fn addOp1(v: *Vdbe, op: OP, p1: i32) i32 {
-    return addOp3(v, op, p1, 0, 0);
-}
-
-pub fn addOp2(v: *Vdbe, op: OP, p1: i32, p2: i32) i32 {
-    return addOp3(v, op, p1, p2, 0);
-}
-
-/// Port of sqlite3VdbeAddOp4Int(): P4 is a 32-bit integer.
-pub fn addOp4Int(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32, p4: i32) i32 {
-    const addr = addOp3(v, op, p1, p2, p3);
-    if (!v.db.malloc_failed) v.ops.items[@intCast(addr)].setP4(.{ .int32 = p4 });
-    return addr;
-}
-
-/// Port of sqlite3VdbeAddOp4() with a pointer operand.
-pub fn addOp4(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32, p4: P4) i32 {
-    const addr = addOp3(v, op, p1, p2, p3);
-    changeP4(v, .from(addr), p4);
-    return addr;
-}
-
-/// Port of sqlite3VdbeAddOp4() with a string operand (P4_DYNAMIC): the
-/// string is copied.
-pub fn addOp4Str(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32, z: ?[]const u8) i32 {
-    const addr = addOp3(v, op, p1, p2, p3);
-    changeP4Str(v, .from(addr), z);
-    return addr;
-}
-
 /// Port of sqlite3VdbeAddInt64(): OP_Int64 with the value in P1 and P3.
 pub fn addInt64(v: *Vdbe, dest: Reg, val: i64) Addr {
     const u: u64 = @bitCast(val);
@@ -238,11 +215,6 @@ pub fn addInt64(v: *Vdbe, dest: Reg, val: i64) Addr {
 pub fn addDouble(v: *Vdbe, dest: Reg, val: f64) Addr {
     const u: u64 = @bitCast(val);
     return emit(v, .Real, .{ @as(i32, @bitCast(@as(u32, @truncate(u)))), dest, @as(i32, @bitCast(@as(u32, @truncate(u >> 32)))) });
-}
-
-/// Port of sqlite3VdbeGoto().
-pub fn goto_(v: *Vdbe, dest: i32) i32 {
-    return addOp3(v, OP.Goto, 0, dest, 0);
 }
 
 /// Port of sqlite3VdbeLoadString().
@@ -287,7 +259,7 @@ pub fn addFunctionCall(p: *Parse, p1: i32, p2: Reg, p3: Reg, n_arg: i32, func: *
     // Do not compare `out` before that: in ReleaseFast it holds whatever
     // the allocation held, such as the `out` of a freed context whose
     // registers were at the same address (argv then stays unset).
-    ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .argv = argv, .i_op = currentAddr(v), .vdbe = null };
+    ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .argv = argv, .i_op = v.nOp(), .vdbe = null };
     const addr = emitAny4(v, if (e_call_ctx != 0) OP.PureFunc else OP.Function, .{ .int, .reg, .reg }, .{ p1, p2, p3 }, .{ .funcctx = ctx });
     changeP5(v, @intCast(e_call_ctx & NC_SelfRef));
     main_mod.mayAbort(p);
@@ -358,7 +330,7 @@ fn findScan(v: *Vdbe, addr_explain: Addr) ?*vi.ScanStatus {
 pub fn scanStatusRange(v: *Vdbe, addr_explain: Addr, start: i32, end_arg: i32) void {
     if (!isStmtScanStatus(v.db)) return;
     const scan = findScan(v, addr_explain) orelse return;
-    const end = if (end_arg < 0) currentAddr(v) - 1 else end_arg;
+    const end = if (end_arg < 0) v.nOp() - 1 else end_arg;
     var i: usize = 0;
     while (i < scan.addr_range.len) : (i += 2) {
         if (scan.addr_range[i] == 0) {
@@ -386,7 +358,7 @@ pub fn explainPop(p: *Parse) void {
 /// Port of sqlite3VdbeAddParseSchemaOp(): reread the schema entries
 /// matching `where` (all if null).
 pub fn addParseSchemaOp(v: *Vdbe, i_db: i32, where: ?[]const u8, p5: u16) void {
-    _ = addOp4Str(v, OP.ParseSchema, i_db, 0, 0, where);
+    _ = emitStr(v, .ParseSchema, .{i_db}, where);
     changeP5(v, p5);
     for (0..v.db.dbs.items.len) |j| usesBtree(v, @intCast(j));
     main_mod.mayAbort(v.parse.?);
@@ -402,7 +374,7 @@ pub fn endCoroutine(v: *Vdbe, reg_yield: Reg) void {
 
 /// Port of sqlite3VdbeRunOnlyOnce().
 pub fn runOnlyOnce(v: *Vdbe) void {
-    _ = addOp2(v, OP.Expire, 1, 1);
+    _ = emit(v, .Expire, .{ 1, 1 });
 }
 
 /// Port of sqlite3VdbeReusable(): undo `runOnlyOnce`.
@@ -451,31 +423,6 @@ fn resolveP2Values(v: *Vdbe, max_vtab_args: *i32) void {
     }
     p.labels.clearRetainingCapacity();
     p.n_label = 0;
-}
-
-/// Port of sqlite3VdbeCurrentAddr(): the address of the next instruction.
-pub fn currentAddr(v: *Vdbe) i32 {
-    std.debug.assert(v.e_vdbe_state == .init);
-    return v.nOp();
-}
-
-/// An entry of `addOpList` (VdbeOpList).
-pub const OpListItem = struct { opcode: OP, p1: i8 = 0, p2: i8 = 0, p3: i8 = 0 };
-
-/// Port of sqlite3VdbeAddOpList(): append instructions; nonzero jump
-/// targets are relative to the first. Returns the first, or null.
-pub fn addOpList(v: *Vdbe, items: []const OpListItem) ?[]Op {
-    std.debug.assert(v.e_vdbe_state == .init);
-    const first = v.ops.items.len;
-    for (items) |item| {
-        var p2: i32 = item.p2;
-        if (item.opcode.opflags() & opcodes.OPFLG.JUMP != 0 and item.p2 > 0) p2 += @intCast(first);
-        v.ops.append(v.alloc(), .{ .opcode = item.opcode, .p1 = item.p1, .p2 = p2, .p3 = item.p3 }) catch {
-            v.db.oomFault();
-            return null;
-        };
-    }
-    return v.ops.items[first..];
 }
 
 /// Port of sqlite3VdbeReprepareOnBind(): the plan depends on the value
@@ -546,13 +493,7 @@ pub fn typeofColumn(v: *Vdbe, dest: Reg) void {
     if (op.p3 == dest.int() and op.opcode == OP.Column) op.p5 |= OPFLAG_TYPEOFARG;
 }
 
-/// Port of sqlite3VdbeJumpHere(): make the jump at `addr` land on the
-/// next instruction.
-pub fn jumpHere(v: *Vdbe, addr: i32) void {
-    landHere(v, .from(addr));
-}
-
-/// Port of sqlite3VdbeJumpHereOrPopInst(): like `jumpHere`, but drop the
+/// Port of sqlite3VdbeJumpHereOrPopInst(): like `landHere`, but drop the
 /// jump if it was the last instruction.
 pub fn jumpHereOrPopInst(v: *Vdbe, addr: Addr) void {
     if (addr.int() == v.nOp() - 1) {

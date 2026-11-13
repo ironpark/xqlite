@@ -353,10 +353,10 @@ pub fn generateRowDelete(
                 ec.codeGetColumnOfTable(v, t, data_cur, @intCast(i_col), old.at(kk + 1));
             }
         }
-        const addr_start = aux.currentAddr(v);
+        const addr_start = aux.here(v);
         trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_BEFORE, t, old, onconf, gone);
         // BEFORE triggers may have moved the cursor or deleted the row.
-        if (addr_start < aux.currentAddr(v)) {
+        if (addr_start.int() < aux.here(v).int()) {
             _ = aux.emitAnyInt(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }, n_pk);
             idx_no_seek = null;
         }
@@ -403,8 +403,8 @@ pub fn generateRowIndexDelete(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: C
         if (cur == idx_no_seek) continue;
         var part_idx_label: ?Label = null;
         r1 = generateIndexKey(p, idx, data_cur, .none, true, &part_idx_label, prior, r1);
-        const p3: i32 = if (idx.has_expr and reg_idx != null) reg_idx.?[i].int() else 0;
-        _ = aux.emit4(v, .IdxDelete, .{ cur, r1, p3 }, .{ .index = idx });
+        const rec: Reg = if (idx.has_expr and reg_idx != null) reg_idx.?[i] else .none;
+        _ = aux.emit4(v, .IdxDelete, .{ cur, r1, rec }, .{ .index = idx });
         aux.changeP5(v, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
         resolvePartIdxLabel(p, part_idx_label);
         prior = idx;

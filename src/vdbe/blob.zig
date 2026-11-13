@@ -13,6 +13,7 @@
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
 const aux = @import("aux.zig");
+const operand = @import("operand.zig");
 const api = @import("api.zig");
 const mem = @import("mem.zig");
 const record = @import("xqlite_storage").record;
@@ -222,41 +223,30 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
     // handling of the VDBE. Finalizing it closes the cursor and ends the
     // transaction.
     const schema = tab.schema.?;
-    _ = aux.addOp4Int(v, OP.Transaction, i_db, @intFromBool(wr_flag), schema.schema_cookie, schema.i_generation);
+    const row_cur: operand.Cursor = .from(0);
+    // The rowid, set by seekToRow(), then the imaginary column below.
+    const reg: operand.Reg = .from(1);
+    _ = aux.emitInt(v, .Transaction, .{ i_db, wr_flag, schema.schema_cookie }, schema.i_generation);
     aux.changeP5(v, 1);
-    std.debug.assert(aux.currentAddr(v) == 2 or db.malloc_failed);
-    const ops = aux.addOpList(v, &.{
-        // 0: acquire a read or write lock (shared cache only).
-        .{ .opcode = OP.TableLock },
-        // 1: open a cursor.
-        .{ .opcode = OP.OpenRead },
-        // 2: seek to rowid r[1] (seekToRow() sets it).
-        .{ .opcode = OP.NotExists, .p2 = 5, .p3 = 1 },
-        // 3
-        .{ .opcode = OP.Column, .p3 = 1 },
-        // 4
-        .{ .opcode = OP.ResultRow, .p1 = 1 },
-        // 5
-        .{ .opcode = OP.Halt },
-    });
+    // Acquire a read or write lock (shared cache only). (C copies the name,
+    // P4_TRANSIENT; the statement only runs the lock while the schema
+    // stays.)
+    _ = aux.emit4(v, .TableLock, .{ i_db, tab.tnum, wr_flag }, .{ .z = tab.name });
+    // Open the cursor on the table's root, for writing if asked. The
+    // cursor thinks the table has one more column than it does: OP_Column
+    // on that imaginary column reads NULL, and fills the cursor's type and
+    // offset cache without any I/O.
+    const n_col: i32 = tab.nCol();
+    _ = aux.emitAnyInt(v, if (wr_flag) OP.OpenWrite else OP.OpenRead, .{ .cursor, .int, .int }, .{ row_cur, tab.tnum, i_db }, n_col + 1);
+    // Seek to the row.
+    const halt = aux.newLabel(&p);
+    _ = aux.emit(v, .NotExists, .{ row_cur, halt, reg });
+    _ = aux.emit(v, .Column, .{ row_cur, n_col, reg });
+    _ = aux.emit(v, .ResultRow, .{reg});
+    aux.place(v, halt);
+    _ = aux.emit(v, .Halt, .{});
     aux.usesBtree(v, @intCast(i_db));
     if (!db.malloc_failed) {
-        const o = ops.?;
-        // The table to lock. (C copies the name, P4_TRANSIENT; the
-        // statement only runs the lock while the schema stays.)
-        o[0].p1 = i_db;
-        o[0].p2 = @intCast(tab.tnum);
-        o[0].p3 = @intFromBool(wr_flag);
-        aux.changeP4(v, .from(2), .{ .z = tab.name });
-        // Open the cursor for writing if asked, on the table's root.
-        if (wr_flag) o[1].opcode = OP.OpenWrite;
-        o[1].p2 = @intCast(tab.tnum);
-        o[1].p3 = i_db;
-        // The cursor thinks the table has one more column than it does:
-        // OP_Column on that imaginary column reads NULL, and fills the
-        // cursor's type and offset cache without any I/O.
-        aux.changeP4(v, .from(2 + 1), .{ .int32 = @as(i32, tab.nCol()) + 1 });
-        ops.?[3].p2 = tab.nCol();
         p.n_var = 0;
         p.n_mem = 1;
         p.n_tab = 1;

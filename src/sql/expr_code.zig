@@ -564,7 +564,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
         _ = aux.emit(v, .NullRow, .{tab_cur});
         aux.landHere(v, once);
         // Subroutine return.
-        _ = aux.emit(v, .Return, .{ e.y.sub.reg_return, e.y.sub.addr.int(), 1 });
+        _ = aux.emit(v, .Return, .{ e.y.sub.reg_return, e.y.sub.addr, 1 });
         expr_mod.clearTempRegCache(p);
     }
 }
@@ -642,7 +642,7 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
     }
 
     // Subroutine return.
-    _ = aux.emit(v, .Return, .{ e.y.sub.reg_return, e.y.sub.addr.int(), 1 });
+    _ = aux.emit(v, .Return, .{ e.y.sub.reg_return, e.y.sub.addr, 1 });
     expr_mod.clearTempRegCache(p);
     return r_reg;
 }

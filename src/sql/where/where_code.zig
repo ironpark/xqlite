@@ -233,7 +233,7 @@ pub fn explainBloomFilter(p: *Parse, w: *WhereInfo, level: *WhereLevel) Oom!Addr
     defer out.deinit();
     explainBloomText(&out.writer, item, level.w_loop.?) catch return error.OutOfMemory;
     const msg = try out.toOwnedSliceSentinel(0);
-    const ret = aux.emit4(v, .Explain, .{ aux.currentAddr(v), p.addr_explain }, .{ .z = msg });
+    const ret = aux.emit4(v, .Explain, .{ aux.here(v).int(), p.addr_explain }, .{ .z = msg });
     aux.scanStatus(v, ret, 0, 0, 0, null);
     return ret;
 }
@@ -1111,6 +1111,16 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
     return level.not_ready;
 }
 
+/// The instruction that starts an index range scan: a seek, whose P3 is
+/// the register of the key, or OP_Rewind or OP_Last, which take no key
+/// but get the register in P3 all the same.
+fn emitRangeStart(v: *Vdbe, op: OP, cur: Cursor, dest: Label, key: Reg, n_key: i32) void {
+    switch (op) {
+        OP.Rewind, OP.Last => _ = aux.emitAnyInt(v, op, .{ .cursor, .jump, .int }, .{ cur, dest, key.int() }, n_key),
+        else => _ = aux.emitAnyInt(v, op, .{ .cursor, .jump, .reg }, .{ cur, dest, key }, n_key),
+    }
+}
+
 /// Case 4 of sqlite3WhereCodeOneLoopStart(): a search using an index,
 /// with zero or more ==/IN/IS terms on its left-most columns and maybe
 /// an inequality on the next one. Returns pIdx, or null if the loop uses
@@ -1262,14 +1272,11 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
             addr_seek_scan = scan;
             if (range_start != null or range_end != null) {
                 aux.changeP5(v, 1);
-                aux.changeP2(v, scan, aux.currentAddr(v) + 1);
+                aux.changeP2(v, scan, aux.here(v).plus(1).int());
                 addr_seek_scan = null;
             }
         }
-        // Not emitAny(): `op` is a seek, whose P3 is a register, or
-        // OP_Rewind or OP_Last, which get the register in P3 all the same
-        // and do not read it.
-        _ = aux.addOp4Int(v, op, idx_cur.int(), addr_nxt.int(), reg_base.int(), n_constraint);
+        emitRangeStart(v, op, idx_cur, addr_nxt, reg_base, n_constraint);
 
         std.debug.assert(b_seek_past_null == 0 or b_stop_at_null == 0);
         if (!reg_bignull.isNone()) {
@@ -1277,7 +1284,7 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
             std.debug.assert(b_stop_at_null == start_eq);
             _ = aux.emit(v, .Goto, .{ 0, aux.here(v).plus(2) });
             op = a_start_op[@intCast(@as(i32, @intFromBool(n_constraint > 1)) * 4 + 2 + b_rev_i)].?;
-            _ = aux.addOp4Int(v, op, idx_cur.int(), addr_nxt.int(), reg_base.int(), n_constraint - start_eq);
+            emitRangeStart(v, op, idx_cur, addr_nxt, reg_base, n_constraint - start_eq);
         }
     }
 
@@ -1569,7 +1576,7 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
     level.covering_idx = cov;
     if (cov != null) level.i_idx_cur = i_cov_cur;
     if (and_expr) |ae| ae.left = null;
-    aux.changeP1(v, ret_init, aux.currentAddr(v));
+    aux.changeP1(v, ret_init, aux.here(v).int());
     _ = aux.emit(v, .Goto, .{ 0, level.addr_brk });
     aux.place(v, loop_body);
 

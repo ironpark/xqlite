@@ -166,11 +166,11 @@ pub fn tableAffinity(p: *Parse, t: *Table, first: Reg) void {
 /// indexes) of database `i_db` for reading.
 fn readsTable(p: *Parse, i_db: usize, t: *Table) bool {
     const v = p.vdbe.?;
-    const end = aux.currentAddr(v);
+    const end = aux.here(v);
     const vt: ?*int.VTable = if (t.isVirtual()) vtab.getVTable(p.db, t) else null;
-    var i: i32 = 1;
-    while (i < end) : (i += 1) {
-        const op = aux.getOp(v, .from(i));
+    var i: Addr = .from(1);
+    while (i.int() < end.int()) : (i = i.plus(1)) {
+        const op = aux.getOp(v, i);
         if (op.opcode == OP.VOpen and op.p4.vtab == vt) return true;
         if (op.opcode == OP.OpenRead and op.p3 == @as(i32, @intCast(i_db))) {
             const tnum: int.Pgno = @intCast(op.p2);
@@ -283,35 +283,31 @@ pub fn autoincrementBegin(p: *Parse) void {
     const v = p.vdbe.?;
     var info = p.ainc;
     while (info) |a| : (info = a.next) {
-        const mem_id = a.reg_ctr.int();
-        openTable(p, .from(0), a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenRead);
-        _ = aux.loadString(v, a.reg_ctr.at(-1), a.tab.name);
-        const ops = aux.addOpList(v, &.{
-            .{ .opcode = OP.Null },
-            .{ .opcode = OP.Rewind, .p2 = 10 },
-            .{ .opcode = OP.Column },
-            .{ .opcode = OP.Ne, .p2 = 9 },
-            .{ .opcode = OP.Rowid },
-            .{ .opcode = OP.Column, .p2 = 1 },
-            .{ .opcode = OP.AddImm },
-            .{ .opcode = OP.Copy },
-            .{ .opcode = OP.Goto, .p2 = 11 },
-            .{ .opcode = OP.Next, .p2 = 2 },
-            .{ .opcode = OP.Integer },
-            .{ .opcode = OP.Close },
-        }) orelse break;
-        ops[0].p2 = mem_id;
-        ops[0].p3 = mem_id + 2;
-        ops[2].p3 = mem_id;
-        ops[3].p1 = mem_id - 1;
-        ops[3].p3 = mem_id;
-        ops[3].p5 = vi.SQLITE_JUMPIFNULL;
-        ops[4].p2 = mem_id + 1;
-        ops[5].p3 = mem_id;
-        ops[6].p1 = mem_id;
-        ops[7].p2 = mem_id + 2;
-        ops[7].p1 = mem_id;
-        ops[10].p2 = mem_id;
+        // The table name, the largest rowid, its rowid in sqlite_sequence
+        // and the original largest rowid are the registers around reg_ctr.
+        const ctr = a.reg_ctr;
+        const seq_cur: Cursor = .from(0);
+        openTable(p, seq_cur, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenRead);
+        _ = aux.loadString(v, ctr.at(-1), a.tab.name);
+        const not_found = aux.newLabel(p);
+        const next = aux.newLabel(p);
+        const done = aux.newLabel(p);
+        _ = aux.emit(v, .Null, .{ 0, ctr, ctr.at(2) });
+        _ = aux.emit(v, .Rewind, .{ seq_cur, not_found });
+        const loop = aux.emit(v, .Column, .{ seq_cur, 0, ctr });
+        _ = aux.emit(v, .Ne, .{ ctr.at(-1), next, ctr });
+        aux.changeP5(v, vi.SQLITE_JUMPIFNULL);
+        _ = aux.emit(v, .Rowid, .{ seq_cur, ctr.at(1) });
+        _ = aux.emit(v, .Column, .{ seq_cur, 1, ctr });
+        _ = aux.emit(v, .AddImm, .{ctr});
+        _ = aux.emit(v, .Copy, .{ ctr, ctr.at(2) });
+        _ = aux.emit(v, .Goto, .{ 0, done });
+        aux.place(v, next);
+        _ = aux.emit(v, .Next, .{ seq_cur, loop });
+        aux.place(v, not_found);
+        _ = aux.emit(v, .Integer, .{ 0, ctr });
+        aux.place(v, done);
+        _ = aux.emit(v, .Close, .{seq_cur});
         if (p.n_tab == 0) p.n_tab = 1;
     }
 }
@@ -329,24 +325,19 @@ pub fn autoincrementEnd(p: *Parse) void {
     const v = p.vdbe.?;
     var info = p.ainc;
     while (info) |a| : (info = a.next) {
-        const mem_id = a.reg_ctr.int();
+        const ctr = a.reg_ctr;
+        const seq_cur: Cursor = .from(0);
         const i_rec = expr_mod.getTempReg(p);
-        _ = aux.emit(v, .Le, .{ a.reg_ctr.at(2), aux.here(v).plus(7), a.reg_ctr });
-        openTable(p, .from(0), a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenWrite);
-        const ops = aux.addOpList(v, &.{
-            .{ .opcode = OP.NotNull, .p2 = 2 },
-            .{ .opcode = OP.NewRowid },
-            .{ .opcode = OP.MakeRecord, .p2 = 2 },
-            .{ .opcode = OP.Insert },
-            .{ .opcode = OP.Close },
-        }) orelse break;
-        ops[0].p1 = mem_id + 1;
-        ops[1].p2 = mem_id + 1;
-        ops[2].p1 = mem_id - 1;
-        ops[2].p3 = i_rec.int();
-        ops[3].p2 = i_rec.int();
-        ops[3].p3 = mem_id + 1;
-        ops[3].p5 = OPFLAG.APPEND;
+        _ = aux.emit(v, .Le, .{ ctr.at(2), aux.here(v).plus(7), ctr });
+        openTable(p, seq_cur, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenWrite);
+        const has_rowid = aux.newLabel(p);
+        _ = aux.emit(v, .NotNull, .{ ctr.at(1), has_rowid });
+        _ = aux.emit(v, .NewRowid, .{ seq_cur, ctr.at(1) });
+        aux.place(v, has_rowid);
+        _ = aux.emit(v, .MakeRecord, .{ ctr.at(-1), 2, i_rec });
+        _ = aux.emit(v, .Insert, .{ seq_cur, i_rec, ctr.at(1) });
+        aux.changeP5(v, OPFLAG.APPEND);
+        _ = aux.emit(v, .Close, .{seq_cur});
         expr_mod.releaseTempReg(p, i_rec);
     }
 }
@@ -1690,7 +1681,8 @@ fn generateConstraintChecksImpl(
                     // A copy of an instruction of any opcode: its operands
                     // are numbers here.
                     const p2 = if (x.opcode.opflags() & vi.opcodes.OPFLG.JUMP != 0) recheck_ok.int() else x.p2;
-                    _ = aux.addOp4(v, x.opcode, x.p1, p2, x.p3, x.getP4());
+                    const copy = aux.emitRaw(v, x.opcode, x.p1, p2, x.p3);
+                    aux.changeP4(v, copy, x.getP4());
                     aux.changeP5(v, x.p5);
                 }
             }

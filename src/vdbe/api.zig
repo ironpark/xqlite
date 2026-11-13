@@ -958,7 +958,9 @@ pub fn aggregateContext(ctx: *Context, n: usize) ?[]u8 {
 
 // ================================================================== tests
 
-const OP = vi.OP;
+/// A register and a cursor by number, for the hand-assembled programs.
+const reg = aux.operand.Reg.from;
+const cur = aux.operand.Cursor.from;
 
 /// A connection with no databases, for programs that use none.
 fn testDb(db: *Sqlite3) void {
@@ -973,20 +975,20 @@ test "api: run a hand-assembled program" {
     var p: int.Parse = .{ .db = &db, .arena = arena.allocator() };
     const v = try aux.create(&p);
     // r1 = 6; r2 = 7; r3 = r1 * r2; r4 = 'x' || 'y'; result r3, r4; loop 3x
-    _ = aux.addOp2(v, OP.Integer, 6, 1);
-    _ = aux.addOp2(v, OP.Integer, 7, 2);
-    _ = aux.addOp3(v, OP.Multiply, 1, 2, 3);
-    _ = aux.addOp4(v, OP.String8, 0, 5, 0, .{ .z = "x" });
-    _ = aux.addOp4(v, OP.String8, 0, 6, 0, .{ .z = "y" });
-    _ = aux.addOp3(v, OP.Concat, 6, 5, 4);
-    _ = aux.addOp2(v, OP.Integer, 3, 7);
-    const loop = aux.addOp2(v, OP.ResultRow, 3, 2);
-    _ = aux.addOp3(v, OP.DecrJumpZero, 7, 0, 0);
-    _ = aux.addOp2(v, OP.Goto, 0, loop);
-    aux.jumpHere(v, loop + 1);
-    _ = aux.addOp0(v, OP.Halt);
-    aux.jumpHere(v, 0);
-    _ = aux.addOp2(v, OP.Goto, 0, 1);
+    _ = aux.emit(v, .Integer, .{ 6, reg(1) });
+    _ = aux.emit(v, .Integer, .{ 7, reg(2) });
+    _ = aux.emit(v, .Multiply, .{ reg(1), reg(2), reg(3) });
+    _ = aux.emit4(v, .String8, .{ 0, reg(5) }, .{ .z = "x" });
+    _ = aux.emit4(v, .String8, .{ 0, reg(6) }, .{ .z = "y" });
+    _ = aux.emit(v, .Concat, .{ reg(6), reg(5), reg(4) });
+    _ = aux.emit(v, .Integer, .{ 3, reg(7) });
+    const loop = aux.emit(v, .ResultRow, .{ reg(3), 2 });
+    const done = aux.emit(v, .DecrJumpZero, .{reg(7)});
+    _ = aux.emit(v, .Goto, .{ 0, loop });
+    aux.landHere(v, done);
+    _ = aux.emit(v, .Halt, .{});
+    aux.landHere(v, .from(0));
+    _ = aux.emit(v, .Goto, .{ 0, aux.operand.Addr.from(1) });
     p.n_mem = 7;
     aux.setNumCols(v, 2);
     aux.makeReady(v, &p);
@@ -1026,36 +1028,36 @@ test "api: sorter and ephemeral table" {
 
     // Sort (k, v) records by k descending; ties keep insertion order, as
     // in SQLite.
-    _ = aux.addOp4(v, OP.SorterOpen, 0, 2, 0, .{ .keyinfo = ki });
+    _ = aux.emit4(v, .SorterOpen, .{ cur(0), 2 }, .{ .keyinfo = ki });
     const vals = [_][2]i32{ .{ 2, 10 }, .{ 5, 20 }, .{ 2, 30 }, .{ 9, 40 } };
     for (vals) |kv| {
-        _ = aux.addOp2(v, OP.Integer, kv[0], 1);
-        _ = aux.addOp2(v, OP.Integer, kv[1], 2);
-        _ = aux.addOp3(v, OP.MakeRecord, 1, 2, 3);
-        _ = aux.addOp2(v, OP.SorterInsert, 0, 3);
+        _ = aux.emit(v, .Integer, .{ kv[0], reg(1) });
+        _ = aux.emit(v, .Integer, .{ kv[1], reg(2) });
+        _ = aux.emit(v, .MakeRecord, .{ reg(1), 2, reg(3) });
+        _ = aux.emit(v, .SorterInsert, .{ cur(0), reg(3) });
     }
-    _ = aux.addOp3(v, OP.OpenPseudo, 1, 4, 2);
-    const sort = aux.addOp2(v, OP.SorterSort, 0, 0);
-    const body = aux.addOp3(v, OP.SorterData, 0, 4, 1);
-    _ = aux.addOp3(v, OP.Column, 1, 0, 5);
-    _ = aux.addOp3(v, OP.Column, 1, 1, 6);
-    _ = aux.addOp2(v, OP.ResultRow, 5, 2);
-    _ = aux.addOp2(v, OP.SorterNext, 0, body);
-    aux.jumpHere(v, sort);
+    _ = aux.emit(v, .OpenPseudo, .{ cur(1), reg(4), 2 });
+    const sort = aux.emit(v, .SorterSort, .{cur(0)});
+    const body = aux.emit(v, .SorterData, .{ cur(0), reg(4), cur(1) });
+    _ = aux.emit(v, .Column, .{ cur(1), 0, reg(5) });
+    _ = aux.emit(v, .Column, .{ cur(1), 1, reg(6) });
+    _ = aux.emit(v, .ResultRow, .{ reg(5), 2 });
+    _ = aux.emit(v, .SorterNext, .{ cur(0), body });
+    aux.landHere(v, sort);
     // An ephemeral table: insert rowids 1..3, then count them.
-    _ = aux.addOp2(v, OP.OpenEphemeral, 2, 1);
+    _ = aux.emit(v, .OpenEphemeral, .{ cur(2), 1 });
     for (0..3) |_| {
-        _ = aux.addOp2(v, OP.NewRowid, 2, 7);
-        _ = aux.addOp2(v, OP.Integer, 1, 8);
-        _ = aux.addOp3(v, OP.MakeRecord, 8, 1, 9);
-        _ = aux.addOp3(v, OP.Insert, 2, 9, 7);
+        _ = aux.emit(v, .NewRowid, .{ cur(2), reg(7) });
+        _ = aux.emit(v, .Integer, .{ 1, reg(8) });
+        _ = aux.emit(v, .MakeRecord, .{ reg(8), 1, reg(9) });
+        _ = aux.emit(v, .Insert, .{ cur(2), reg(9), reg(7) });
     }
-    _ = aux.addOp2(v, OP.Count, 2, 10);
-    _ = aux.addOp2(v, OP.Null, 0, 11);
-    _ = aux.addOp2(v, OP.ResultRow, 10, 2);
-    _ = aux.addOp0(v, OP.Halt);
-    aux.jumpHere(v, 0);
-    _ = aux.addOp2(v, OP.Goto, 0, 1);
+    _ = aux.emit(v, .Count, .{ cur(2), reg(10) });
+    _ = aux.emit(v, .Null, .{ 0, reg(11) });
+    _ = aux.emit(v, .ResultRow, .{ reg(10), 2 });
+    _ = aux.emit(v, .Halt, .{});
+    aux.landHere(v, .from(0));
+    _ = aux.emit(v, .Goto, .{ 0, aux.operand.Addr.from(1) });
     p.n_mem = 11;
     p.n_tab = 3;
     aux.setNumCols(v, 2);
@@ -1093,38 +1095,38 @@ test "api: sorter order and ties for each key type" {
 
         // for i in 1..500: insert (i*7919 % 97 [cast], i)
         const n = 500;
-        _ = aux.addOp4(v, OP.SorterOpen, 0, 2, 0, .{ .keyinfo = ki });
-        _ = aux.addOp2(v, OP.Integer, n, 1);
-        _ = aux.addOp2(v, OP.Integer, 7919, 5);
-        _ = aux.addOp2(v, OP.Integer, 97, 6);
-        const top = aux.addOp3(v, OP.Multiply, 5, 1, 2);
-        _ = aux.addOp3(v, OP.Remainder, 6, 2, 2);
+        _ = aux.emit4(v, .SorterOpen, .{ cur(0), 2 }, .{ .keyinfo = ki });
+        _ = aux.emit(v, .Integer, .{ n, reg(1) });
+        _ = aux.emit(v, .Integer, .{ 7919, reg(5) });
+        _ = aux.emit(v, .Integer, .{ 97, reg(6) });
+        const top = aux.emit(v, .Multiply, .{ reg(5), reg(1), reg(2) });
+        _ = aux.emit(v, .Remainder, .{ reg(6), reg(2), reg(2) });
         // The blob case mixes types: odd keys become text.
         if (aff == int.Aff.blob) {
-            _ = aux.addOp2(v, OP.Integer, 2, 7);
-            _ = aux.addOp3(v, OP.Remainder, 7, 2, 8);
-            const skip = aux.addOp1(v, OP.IfNot, 8);
-            _ = aux.addOp2(v, OP.Cast, 2, int.Aff.text);
-            aux.jumpHere(v, skip);
+            _ = aux.emit(v, .Integer, .{ 2, reg(7) });
+            _ = aux.emit(v, .Remainder, .{ reg(7), reg(2), reg(8) });
+            const skip = aux.emit(v, .IfNot, .{reg(8)});
+            _ = aux.emit(v, .Cast, .{ reg(2), int.Aff.text });
+            aux.landHere(v, skip);
         } else {
-            _ = aux.addOp2(v, OP.Cast, 2, aff);
+            _ = aux.emit(v, .Cast, .{ reg(2), aff });
         }
-        _ = aux.addOp2(v, OP.SCopy, 1, 3);
-        _ = aux.addOp3(v, OP.MakeRecord, 2, 2, 4);
-        _ = aux.addOp2(v, OP.SorterInsert, 0, 4);
-        _ = aux.addOp3(v, OP.AddImm, 1, -1, 0);
-        _ = aux.addOp2(v, OP.If, 1, top);
-        _ = aux.addOp3(v, OP.OpenPseudo, 1, 9, 2);
-        const sort = aux.addOp2(v, OP.SorterSort, 0, 0);
-        const body = aux.addOp3(v, OP.SorterData, 0, 9, 1);
-        _ = aux.addOp3(v, OP.Column, 1, 0, 10);
-        _ = aux.addOp3(v, OP.Column, 1, 1, 11);
-        _ = aux.addOp2(v, OP.ResultRow, 10, 2);
-        _ = aux.addOp2(v, OP.SorterNext, 0, body);
-        aux.jumpHere(v, sort);
-        _ = aux.addOp0(v, OP.Halt);
-        aux.jumpHere(v, 0);
-        _ = aux.addOp2(v, OP.Goto, 0, 1);
+        _ = aux.emit(v, .SCopy, .{ reg(1), reg(3) });
+        _ = aux.emit(v, .MakeRecord, .{ reg(2), 2, reg(4) });
+        _ = aux.emit(v, .SorterInsert, .{ cur(0), reg(4) });
+        _ = aux.emit(v, .AddImm, .{ reg(1), -1 });
+        _ = aux.emit(v, .If, .{ reg(1), top });
+        _ = aux.emit(v, .OpenPseudo, .{ cur(1), reg(9), 2 });
+        const sort = aux.emit(v, .SorterSort, .{cur(0)});
+        const body = aux.emit(v, .SorterData, .{ cur(0), reg(9), cur(1) });
+        _ = aux.emit(v, .Column, .{ cur(1), 0, reg(10) });
+        _ = aux.emit(v, .Column, .{ cur(1), 1, reg(11) });
+        _ = aux.emit(v, .ResultRow, .{ reg(10), 2 });
+        _ = aux.emit(v, .SorterNext, .{ cur(0), body });
+        aux.landHere(v, sort);
+        _ = aux.emit(v, .Halt, .{});
+        aux.landHere(v, .from(0));
+        _ = aux.emit(v, .Goto, .{ 0, aux.operand.Addr.from(1) });
         p.n_mem = 11;
         p.n_tab = 2;
         aux.setNumCols(v, 2);
@@ -1162,17 +1164,17 @@ test "api: an OpenDup cursor outlives the original" {
     defer arena.deinit();
     var p: int.Parse = .{ .db = &db, .arena = arena.allocator() };
     const v = try aux.create(&p);
-    _ = aux.addOp2(v, OP.OpenEphemeral, 0, 1);
-    _ = aux.addOp2(v, OP.Integer, 5, 1);
-    _ = aux.addOp3(v, OP.MakeRecord, 1, 1, 2);
-    _ = aux.addOp3(v, OP.Insert, 0, 2, 1);
-    _ = aux.addOp2(v, OP.OpenDup, 1, 0);
-    _ = aux.addOp1(v, OP.Close, 0);
-    _ = aux.addOp2(v, OP.Count, 1, 3);
-    _ = aux.addOp2(v, OP.ResultRow, 3, 1);
-    _ = aux.addOp0(v, OP.Halt);
-    aux.jumpHere(v, 0);
-    _ = aux.addOp2(v, OP.Goto, 0, 1);
+    _ = aux.emit(v, .OpenEphemeral, .{ cur(0), 1 });
+    _ = aux.emit(v, .Integer, .{ 5, reg(1) });
+    _ = aux.emit(v, .MakeRecord, .{ reg(1), 1, reg(2) });
+    _ = aux.emit(v, .Insert, .{ cur(0), reg(2), reg(1) });
+    _ = aux.emit(v, .OpenDup, .{ cur(1), cur(0) });
+    _ = aux.emit(v, .Close, .{cur(0)});
+    _ = aux.emit(v, .Count, .{ cur(1), reg(3) });
+    _ = aux.emit(v, .ResultRow, .{ reg(3), 1 });
+    _ = aux.emit(v, .Halt, .{});
+    aux.landHere(v, .from(0));
+    _ = aux.emit(v, .Goto, .{ 0, aux.operand.Addr.from(1) });
     p.n_mem = 3;
     p.n_tab = 2;
     aux.setNumCols(v, 1);

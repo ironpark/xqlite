@@ -573,7 +573,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
     const op: OP = if (sort.sort_flags & SORTFLAG_UseSorter != 0) OP.SorterInsert else OP.IdxInsert;
     _ = aux.emitAnyInt(v, op, .{ .cursor, .reg, .reg }, .{ sort.cursor, record, base.at(n_ob_sat) }, n_base - n_ob_sat);
     if (skip) |a| {
-        aux.changeP2(v, a, if (sort.label_ob_lopt) |l| l.int() else aux.currentAddr(v));
+        aux.changeP2(v, a, if (sort.label_ob_lopt) |l| l.int() else aux.here(v).int());
     }
     sort.addr_push_end = aux.here(v).plus(-1);
 }
@@ -978,7 +978,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     } else {
         _ = aux.emit(v, .Next, .{ tab, addr });
     }
-    aux.scanStatusRange(v, addr_explain, aux.currentAddr(v) - 1, -1);
+    aux.scanStatusRange(v, addr_explain, aux.here(v).int() - 1, -1);
     if (!sort.reg_return.isNone()) _ = aux.emit(v, .Return, .{sort.reg_return});
     aux.place(v, done);
 }
@@ -3979,8 +3979,8 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             select(p, sub, &d) catch {};
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             if (once) |a| aux.landHere(v, a);
-            // P2, a number to OP_Return, is where the subroutine starts.
-            _ = aux.emit(v, .Return, .{ reg_return, top_addr.plus(1).int() });
+            // P2 of OP_Return is where the subroutine starts.
+            _ = aux.emit(v, .Return, .{ reg_return, top_addr.plus(1) });
             aux.scanStatusRange(v, addr_explain, addr_explain.int(), -1);
             aux.landHere(v, top_addr);
             expr_mod.clearTempRegCache(p);
@@ -4219,17 +4219,17 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 }
                 agg.direct_mode = false;
                 const reg_record: Reg = expr_mod.getTempReg(p);
-                aux.scanStatusCounters(v, addr_exp, 0, aux.currentAddr(v));
+                aux.scanStatusCounters(v, addr_exp, 0, aux.here(v).int());
                 _ = aux.emit(v, .MakeRecord, .{ reg_base, n_col, reg_record });
                 _ = aux.emit(v, .SorterInsert, .{ sorting_idx, reg_record });
-                aux.scanStatusRange(v, addr_exp, aux.currentAddr(v) - 2, -1);
+                aux.scanStatusRange(v, addr_exp, aux.here(v).int() - 2, -1);
                 expr_mod.releaseTempReg(p, reg_record);
                 expr_mod.releaseTempRange(p, reg_base, n_col);
                 where_mod.whereEnd(w);
                 sort_ptab = p.newCursor();
                 agg.sorting_idx_ptab = sort_ptab;
                 sort_out = expr_mod.getTempReg(p);
-                aux.scanStatusCounters(v, addr_exp, aux.currentAddr(v), 0);
+                aux.scanStatusCounters(v, addr_exp, aux.here(v).int(), 0);
                 _ = aux.emit(v, .OpenPseudo, .{ sort_ptab, sort_out, n_col });
                 _ = aux.emit(v, .SorterSort, .{ sorting_idx, addr_end });
                 agg.use_sorting_idx = true;

@@ -159,11 +159,11 @@ pub fn isSorted(w: *WhereInfo) bool {
 /// and OP_Rowid becomes OP_Sequence on `i_autoidx_cur` (P1 0 without one).
 fn translateColumnToCopy(p: *Parse, i_start: Addr, i_tab_cur: Cursor, i_register: Reg, i_autoidx_cur: ?Cursor) void {
     const v = p.vdbe.?;
-    const i_end = aux.currentAddr(v);
+    const i_end = aux.here(v);
     if (p.db.malloc_failed) return;
-    var addr = i_start.int();
-    while (addr < i_end) : (addr += 1) {
-        const op = aux.getOp(v, .from(addr));
+    var addr = i_start;
+    while (addr.int() < i_end.int()) : (addr = addr.plus(1)) {
+        const op = aux.getOp(v, addr);
         if (op.p1 != i_tab_cur.int()) continue;
         if (op.opcode == OP.Column) {
             op.opcode = OP.Copy;
@@ -185,9 +185,9 @@ fn translateColumnToCopy(p: *Parse, i_start: Addr, i_tab_cur: Cursor, i_register
 fn translateColumnRange(p: *Parse, i_start: Addr, i_end: Addr, i_tab_cur: Cursor, i_register: Reg) void {
     const v = p.vdbe.?;
     if (p.db.malloc_failed) return;
-    var addr = i_start.int();
-    while (addr < i_end.int()) : (addr += 1) {
-        const op = aux.getOp(v, .from(addr));
+    var addr = i_start;
+    while (addr.int() < i_end.int()) : (addr = addr.plus(1)) {
+        const op = aux.getOp(v, addr);
         if (op.p1 != i_tab_cur.int() or op.opcode != OP.Column) continue;
         op.opcode = OP.Copy;
         op.p1 = i_register.at(op.p2).int();
@@ -379,7 +379,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         std.debug.assert(we.loopBloomable(loop));
         _ = aux.emitInt(v, .FilterAdd, .{ level.reg_filter, 0, reg_base }, loop.btree.n_eq);
     }
-    aux.scanStatusCounters(v, addr_exp, addr_exp.int(), aux.currentAddr(v));
+    aux.scanStatusCounters(v, addr_exp, addr_exp.int(), aux.here(v).int());
     _ = aux.emit(v, .IdxInsert, .{ idx_cur, reg_record });
     aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
     if (skip_row) |l| aux.place(v, l);
@@ -1827,7 +1827,7 @@ pub fn whereEnd(w: *WhereInfo) void {
     const v = p.vdbe.?;
     const tab_list = w.tab_list;
     const db = p.db;
-    const i_end = aux.currentAddr(v);
+    const i_end = aux.here(v);
     var n_rj: u8 = 0;
     var addr_seek: ?Addr = null;
 
@@ -1843,7 +1843,7 @@ pub fn whereEnd(w: *WhereInfo) void {
             aux.place(v, level.addr_cont);
             level.addr_cont = aux.newLabel(p);
             rj.end_subrtn = aux.here(v);
-            _ = aux.emit(v, .Return, .{ rj.reg_return, rj.addr_subrtn.int(), 1 });
+            _ = aux.emit(v, .Return, .{ rj.reg_return, rj.addr_subrtn, 1 });
             n_rj += 1;
         }
         const loop = level.w_loop.?;
@@ -1861,9 +1861,7 @@ pub fn whereEnd(w: *WhereInfo) void {
                 const idx_cur = level.i_idx_cur;
                 var addr_if_null: ?Addr = null;
                 if (!level.i_left_join.isNone()) {
-                    // Not emit(): as in C, P2 is r1 until the jump lands
-                    // below.
-                    addr_if_null = .from(aux.addOp2(v, OP.IfNullRow, idx_cur.int(), r1.int()));
+                    addr_if_null = aux.emit(v, .IfNullRow, .{idx_cur});
                 }
                 var j: i32 = 0;
                 while (j < n) : (j += 1) {
@@ -1887,7 +1885,7 @@ pub fn whereEnd(w: *WhereInfo) void {
             // Not emitAny(): the opcode that ends the loop (OP_Next,
             // OP_Prev, OP_VNext, OP_Goto, OP_Return) and its operands are
             // what codeOneLoopStart() left in the level.
-            _ = aux.addOp3(v, level.op, level.p1, level.p2.int(), level.p3);
+            _ = aux.emitRaw(v, level.op, level.p1, level.p2.int(), level.p3);
             aux.changeP5(v, level.p5);
             if (addr_seek) |a| {
                 aux.landHere(v, a);
@@ -2017,7 +2015,7 @@ pub fn whereEnd(w: *WhereInfo) void {
         }
         if (idx != null and !db.malloc_failed) {
             const ix = idx.?;
-            const last = if (w.e_one_pass == ONEPASS.OFF or !ix.table.hasRowid()) i_end else w.i_end_where.int();
+            const last = if (w.e_one_pass == ONEPASS.OFF or !ix.table.hasRowid()) i_end else w.i_end_where;
             if (ix.has_expr) {
                 var it = p.idx_epr;
                 while (it) |ie| : (it = ie.next) {
@@ -2028,10 +2026,10 @@ pub fn whereEnd(w: *WhereInfo) void {
                 }
             }
             // The op at addr_body never reads the table, hence the +1.
-            var k = level.addr_body.int() + 1;
-            std.debug.assert(k <= last);
+            var k = level.addr_body.plus(1);
+            std.debug.assert(k.int() <= last.int());
             while (true) {
-                const op = aux.getOp(v, .from(k));
+                const op = aux.getOp(v, k);
                 if (op.p1 != level.i_tab_cur.int()) {
                     // no-op
                 } else if (op.opcode == OP.Column) {
@@ -2068,8 +2066,8 @@ pub fn whereEnd(w: *WhereInfo) void {
                 } else if (op.opcode == OP.IfNullRow) {
                     op.p1 = level.i_idx_cur.int();
                 }
-                k += 1;
-                if (k >= last) break;
+                k = k.plus(1);
+                if (k.int() >= last.int()) break;
             }
         }
     }

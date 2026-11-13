@@ -662,13 +662,21 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, cur: 
     _ = aux.emit(v, .Integer, .{ n_constraint, reg_args.at(1) });
     // The instruction before OP_VFilter must be the OP_Integer of argc,
     // for resolveP2Values() (tag-20250207a).
-    // The string goes to the program: P4_DYNAMIC if the loop owns it.
-    const p4: vi.P4 = if (loop.vtab.idx_str) |z|
-        (if (loop.vtab.need_free) .{ .dynamic = z } else .{ .z = z })
-    else
-        .notused;
-    _ = aux.emit4(v, .VFilter, .{ cur, addr_not_found, reg_args }, p4);
-    loop.vtab.need_free = false;
+    // The program gets its own copy of the string. One the loop owns (from
+    // db.gpa) is freed now, and the loop keeps the copy, which lives as
+    // long as the program; out of memory, the loop keeps its string and
+    // frees it with the plan.
+    const addr_filter = aux.emit(v, .VFilter, .{ cur, addr_not_found, reg_args });
+    if (loop.vtab.idx_str) |z| if (!db.malloc_failed) {
+        if (v.alloc().dupeSentinel(u8, z, 0)) |copy| {
+            aux.changeP4(v, addr_filter, .{ .z = copy });
+            if (loop.vtab.need_free) {
+                db.gpa.free(z);
+                loop.vtab.idx_str = copy;
+                loop.vtab.need_free = false;
+            }
+        } else |_| db.oomFault();
+    };
     level.end = if (w.e_one_pass != .OFF) .none else .{ .step = .{ .op = OP.VNext, .cur = cur, .top = aux.here(v) } };
     std.debug.assert(!loop.ws_flags.MULTI_OR);
 

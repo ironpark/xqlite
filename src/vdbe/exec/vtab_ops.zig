@@ -21,7 +21,7 @@ const RC = int.RC;
 const OE = int.OE;
 
 pub fn opVBegin(e: *Exec, op: *Op) Error!Flow {
-    const vt: ?*int.VTable = if (op.p4type == .vtab) op.p4.vtab else null;
+    const vt: ?*int.VTable = if (op.p4type == .vtab) op.p4As(.vtab) else null;
     const rc = vtab_mod.begin(e.db, vt);
     if (vt) |t| if (t.vtab) |p| vtab_mod.importErrmsg(e.v, p);
     try e.check(rc);
@@ -44,7 +44,7 @@ pub fn opVCreate(e: *Exec, op: *Op) Error!Flow {
 pub fn opVDestroy(e: *Exec, op: *Op) Error!Flow {
     const db = e.db;
     db.n_vdestroy += 1;
-    const rc = vtab_mod.callDestroy(db, @intCast(op.p1), std.mem.span(op.p4.z));
+    const rc = vtab_mod.callDestroy(db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
     db.n_vdestroy -= 1;
     try e.check(rc);
     return .next;
@@ -55,9 +55,9 @@ pub fn opVOpen(e: *Exec, op: *Op) Error!Flow {
     std.debug.assert(v.is_reader);
     if (v.csr[@intCast(op.p1)]) |cur| {
         // Already open.
-        if (cur.e_cur_type == .vtab and cur.uc.vtab.vtab == op.p4.vtab.vtab.?) return .next;
+        if (cur.e_cur_type == .vtab and cur.uc.vtab.vtab == op.p4As(.vtab).vtab.?) return .next;
     }
-    const vtab = op.p4.vtab.vtab orelse return error.Locked;
+    const vtab = op.p4As(.vtab).vtab orelse return error.Locked;
     const module = vtab.module;
     var vcur: ?*vtab_mod.VtabCursor = null;
     const rc = module.x_open.?(vtab, &vcur);
@@ -77,7 +77,7 @@ pub fn opVCheck(e: *Exec, op: *Op) Error!Flow {
     const db = e.db;
     const out = e.reg(op.p2);
     mem.setNull(out);
-    const t = op.p4.tableref;
+    const t = op.p4As(.tableref);
     std.debug.assert(t.isVirtual());
     const vt = t.u.vtab.p orelse return .next;
     const vtab = vt.vtab.?;
@@ -126,11 +126,8 @@ pub fn opVFilter(e: *Exec, op: *Op) Error!Flow {
     const i_query: i32 = @truncate(query.u.i);
     const args = v.ap_arg[0..n_arg];
     for (args, 0..) |*a, i| a.* = e.reg(op.p3 + 2 + @as(i32, @intCast(i)));
-    const idx_str: ?[:0]const u8 = switch (op.p4type) {
-        .z => std.mem.span(op.p4.z),
-        .dynamic => std.mem.span(op.p4.dynamic),
-        else => null,
-    };
+    // P4 is the idxStr xBestIndex chose, if any.
+    const idx_str: ?[:0]const u8 = if (op.p4type == .z) std.mem.span(op.p4As(.z)) else null;
     const rc = module.x_filter.?(vcur, i_query, idx_str, args);
     vtab_mod.importErrmsg(v, vtab);
     try e.check(rc);
@@ -188,7 +185,7 @@ pub fn opVRename(e: *Exec, op: *Op) Error!Flow {
     const db = e.db;
     const is_legacy = db.flags.LegacyAlter;
     db.flags.LegacyAlter = true;
-    const vtab = op.p4.vtab.vtab.?;
+    const vtab = op.p4As(.vtab).vtab.?;
     const name = e.reg(op.p1);
     std.debug.assert(name.flags.Str);
     try mem.changeEncoding(name, vi.ENC.UTF8);
@@ -210,7 +207,7 @@ pub fn opVUpdate(e: *Exec, op: *Op) Error!Flow {
         on_conflict == .Abort or on_conflict == .Ignore or on_conflict == .Replace);
     std.debug.assert(!v.read_only);
     if (db.malloc_failed) return error.OutOfMemory;
-    const vt = op.p4.vtab;
+    const vt = op.p4As(.vtab);
     const vtab = vt.vtab orelse return error.Locked;
     const module = vtab.module;
     const n_arg: usize = @intCast(op.p2);

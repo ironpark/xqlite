@@ -139,12 +139,14 @@ fn openConn(host: *c.sqlite3) error{ OutOfMemory, CantOpen }!*Conn {
     conn.db = h.?;
     conn.vdbe = .{ .db = conn.db, .arena = .init(conn.db.gpa) };
     _ = aux.emit(&conn.vdbe, .Function, .{});
+    // What notPureFunc() reads: the program running.
+    conn.vdbe.prog = conn.vdbe.ops.items;
     return conn;
 }
 
 /// The Context of a call of `b`'s function, on its connection's statement.
 fn context(b: *Bind, out: *Mem, acc: ?*Mem, args: []*Mem) Context {
-    return .{ .out = out, .func = b.entry.def, .mem = acc, .vdbe = &b.conn.vdbe, .i_op = 0, .argv = args, .argc = @intCast(args.len) };
+    return .{ .out = out, .func = b.entry.def, .mem = acc, .vdbe = &b.conn.vdbe, .i_op = 0, .argv = args };
 }
 
 /// After a call: what the statement of a call (OP_Function, the end of

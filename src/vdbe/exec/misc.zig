@@ -44,7 +44,7 @@ pub fn opRowSetRead(e: *Exec, op: *Op) Error!Flow {
 pub fn opRowSetTest(e: *Exec, op: *Op) Error!Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
-    const i_set = op.p4.int32;
+    const i_set = op.p4As(.int32);
     if (!in1.flags.Blob) try rowset.memSetRowSet(in1, e.db.gpa);
     const rs = rowset.fromMem(in1);
     if (i_set != 0) {
@@ -61,7 +61,7 @@ pub fn opRowSetTest(e: *Exec, op: *Op) Error!Flow {
 fn filterHash(regs: []Mem, op: *const Op) u64 {
     var h: u64 = 0;
     var i: usize = @intCast(op.p3);
-    const end = i + @as(usize, @intCast(op.p4.int32));
+    const end = i + @as(usize, @intCast(op.p4As(.int32)));
     while (i < end) : (i += 1) {
         const m = &regs[i];
         if (m.flags.intersects(.{ .Int = true, .IntReal = true })) {

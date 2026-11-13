@@ -244,7 +244,7 @@ fn callInput(ctx: *Context, a: Allocator, def: *const int.FuncDef, args: []const
     defer for (mems[0..args.len]) |*m| mem.release(m);
     var out: Mem = .{ .db = db };
     defer mem.release(&out);
-    var sub: Context = .{ .out = &out, .func = def, .argc = @intCast(args.len), .argv = ptrs[0..args.len] };
+    var sub: Context = .{ .out = &out, .func = def, .argv = ptrs[0..args.len] };
     def.x_sfunc.?(&sub, ptrs[0..args.len]);
     if (sub.is_error == 0) return null;
     if (sub.is_error == int.RC.NOMEM) return error.OutOfMemory;

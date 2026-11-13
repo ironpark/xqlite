@@ -51,6 +51,7 @@ pub fn allocateCursor(e: *Exec, i_cur: i32, n_field: i32, cur_type: vi.CurType) 
             .types = buf[0..n],
             .offsets = buf[n..],
         },
+        .cache = buf,
     };
     slot.* = &box.vc;
     return &box.vc;
@@ -104,11 +105,11 @@ pub fn opOpen(e: *Exec, op: *Op) Error!Flow {
     var n_field: i32 = 0;
     switch (op.p4type) {
         .keyinfo => {
-            const ki = op.p4.keyinfo;
+            const ki = op.p4As(.keyinfo);
             key_info = ki;
             n_field = ki.n_all_field;
         },
-        .int32 => n_field = op.p4.int32,
+        .int32 => n_field = op.p4As(.int32),
         else => {},
     }
     const c = try allocateCursor(e, op.p1, n_field, .btree);
@@ -196,7 +197,7 @@ fn openEphemeralTable(c: *VdbeCursor, bt: *btree.Btree, op: *Op) btree.Error!voi
     try bt.beginTrans(.write, 0);
     if (op.p4type == .keyinfo) {
         // A transient index gets its own b-tree; a table uses page 1.
-        c.key_info = op.p4.keyinfo;
+        c.key_info = op.p4As(.keyinfo);
         c.pgno_root = try bt.createTable(.blobkey);
         try openBtreeCursor(c, bt, c.pgno_root, true, c.key_info);
         c.is_table = false;
@@ -209,7 +210,7 @@ fn openEphemeralTable(c: *VdbeCursor, bt: *btree.Btree, op: *Op) btree.Error!voi
 
 pub fn opSorterOpen(e: *Exec, op: *Op) Error!Flow {
     const c = try allocateCursor(e, op.p1, op.p2, .sorter);
-    c.key_info = op.p4.keyinfo;
+    c.key_info = op.p4As(.keyinfo);
     try sorter.init(e.db, op.p3, c);
     return .next;
 }
@@ -290,7 +291,7 @@ pub fn opSeek(e: *Exec, op: *Op) Error!Flow {
             var r: vi.UnpackedRecord = .{
                 .key_info = c.key_info.?,
                 .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),
-                .n_field = @intCast(op.p4.int32),
+                .n_field = @intCast(op.p4As(.int32)),
                 .default_rc = if (oc == .SeekLE or oc == .SeekGT) -1 else 1,
             };
             const order = try serial.indexMoveto(cur, &r);
@@ -334,7 +335,7 @@ pub fn opSeekScan(e: *Exec, op: *Op) Error!Flow {
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
         .mem = e.regs.ptr + @as(usize, @intCast(next_op.p3)),
-        .n_field = @intCast(next_op.p4.int32),
+        .n_field = @intCast(next_op.p4As(.int32)),
         .default_rc = 0,
     };
     while (true) {
@@ -368,7 +369,7 @@ pub fn opSeekHit(e: *Exec, op: *Op) Flow {
 
 pub fn opIfNoHope(e: *Exec, op: *Op) Error!Flow {
     const c = e.csr(op.p1);
-    if (c.seek_hit >= op.p4.int32) return .next;
+    if (c.seek_hit >= op.p4As(.int32)) return .next;
     return opFound(e, op);
 }
 
@@ -377,7 +378,7 @@ pub fn opFound(e: *Exec, op: *Op) Error!Flow {
     const c = e.csr(op.p1);
     const cur = c.uc.cursor;
     const regs = e.regs.ptr + @as(usize, @intCast(op.p3));
-    const n_field: u16 = @intCast(op.p4.int32);
+    const n_field: u16 = @intCast(op.p4As(.int32));
     if (n_field > 0) {
         // The key is n_field unpacked registers.
         var r: vi.UnpackedRecord = .{ .key_info = c.key_info.?, .mem = regs, .n_field = n_field, .default_rc = 0 };
@@ -402,7 +403,7 @@ pub fn opFound(e: *Exec, op: *Op) Error!Flow {
             // A key with a NULL never conflicts.
             for (regs[0..n_field]) |m| if (m.flags.Null) return .jump_p2;
         }
-        if (op.opcode == OP.IfNoHope) c.seek_hit = @intCast(op.p4.int32);
+        if (op.opcode == OP.IfNoHope) c.seek_hit = @intCast(op.p4As(.int32));
     }
     return .next;
 }
@@ -538,7 +539,7 @@ pub fn opIfSizeBetween(e: *Exec, op: *Op) Error!Flow {
     if (has_rows) {
         sz = util.logEst(@intCast(cur.rowCountEst()));
     }
-    return if (sz >= op.p3 and sz <= op.p4.int32) .jump_p2 else .next;
+    return if (sz >= op.p3 and sz <= op.p4As(.int32)) .jump_p2 else .next;
 }
 
 /// OP_Sort and OP_SorterSort.
@@ -614,7 +615,7 @@ pub fn opIdxRowid(e: *Exec, op: *Op) Error!Flow {
             tab_cur.moveto_target = rowid;
             tab_cur.deferred_moveto = true;
             tab_cur.cache_status = vi.cache_stale;
-            tab_cur.alt_map = if (op.p4type == .intarray) op.p4.intarray else null;
+            tab_cur.alt_map = if (op.p4type == .intarray) op.p4IntArray() else null;
             tab_cur.alt_cursor = c;
         } else {
             e.out2Prerelease(op).u = .{ .i = rowid };
@@ -637,7 +638,7 @@ pub fn opIdxCompare(e: *Exec, op: *Op) Error!Flow {
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
         .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),
-        .n_field = @intCast(op.p4.int32),
+        .n_field = @intCast(op.p4As(.int32)),
         .default_rc = if (op.opcode == .IdxLE or op.opcode == .IdxGT) -1 else 0,
     };
     var res = try serial.idxKeyCompare(e.db, c, &r);
@@ -656,7 +657,7 @@ pub fn opIdxCompare(e: *Exec, op: *Op) Error!Flow {
 pub fn opIFindKey(e: *Exec, op: *Op) Flow {
     const c = e.csr(op.p1);
     std.debug.assert(c.e_cur_type == .btree and !c.is_table);
-    const idx = op.p4.index;
+    const idx = op.p4As(.index);
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
         .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),

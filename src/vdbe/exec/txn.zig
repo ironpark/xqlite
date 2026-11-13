@@ -85,7 +85,7 @@ pub fn opSavepoint(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     const db = e.db;
     const p1: aux.SAVEPOINT = @fromBackingInt(@intCast(op.p1));
-    const name: []const u8 = std.mem.span(op.p4.z);
+    const name: []const u8 = std.mem.span(op.p4As(.z));
     std.debug.assert(db.savepoint == null or !db.auto_commit);
     std.debug.assert(db.savepoint != null or !db.is_transaction_savepoint);
     if (p1 == .BEGIN) {
@@ -242,7 +242,7 @@ pub fn opTransaction(e: *Exec, op: *Op) Error!Flow {
         }
         i_meta = bt.getMeta(.schema_version);
     }
-    if (op.p5 != 0 and (@as(i32, @bitCast(i_meta)) != op.p3 or pdb.schema.i_generation != op.p4.int32)) {
+    if (op.p5 != 0 and (@as(i32, @bitCast(i_meta)) != op.p3 or pdb.schema.i_generation != op.p4As(.int32))) {
         aux.vdbeError(v, "database schema has changed", .{});
         if (pdb.schema.schema_cookie != @as(i32, @bitCast(i_meta))) {
             @import("../../sql/build.zig").resetOneSchema(db, @intCast(op.p1));
@@ -343,7 +343,7 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     // b-tree, which OP_Destroy refuses while another statement reads).
     const dialect = @import("../../dialect/dialect.zig");
     const meta = @import("../../catalog/meta.zig");
-    const sql = std.mem.span(op.p4.z);
+    const sql = std.mem.span(op.p4As(.z));
     meta.written(e.db);
     const saved_lang = dialect.swapLang(e.db, .sqlite);
     var state: ?int.ErrorState = null;
@@ -409,7 +409,7 @@ pub fn opParseSchema(e: *Exec, op: *Op) Error!Flow {
         v.expired = 0;
     } else {
         db.init.busy = true;
-        rc = prepare.parseSchemaWhere(db, i_db, std.mem.span(op.p4.z), &err_msg);
+        rc = prepare.parseSchemaWhere(db, i_db, std.mem.span(op.p4As(.z)), &err_msg);
         db.init.busy = false;
     }
     if (err_msg) |m| aux.setErrMsg(v, m);
@@ -430,24 +430,25 @@ pub fn opLoadAnalysis(e: *Exec, op: *Op) Error!Flow {
 }
 
 pub fn opDropTable(e: *Exec, op: *Op) Flow {
-    @import("../../sql/build.zig").unlinkAndDeleteTable(e.db, @intCast(op.p1), std.mem.span(op.p4.z));
+    @import("../../sql/build.zig").unlinkAndDeleteTable(e.db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
     return .next;
 }
 
 pub fn opDropIndex(e: *Exec, op: *Op) Flow {
-    @import("../../sql/build.zig").unlinkAndDeleteIndex(e.db, @intCast(op.p1), std.mem.span(op.p4.z));
+    @import("../../sql/build.zig").unlinkAndDeleteIndex(e.db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
     return .next;
 }
 
 pub fn opDropTrigger(e: *Exec, op: *Op) Flow {
-    @import("../../sql/trigger.zig").unlinkAndDeleteTrigger(e.db, @intCast(op.p1), std.mem.span(op.p4.z));
+    @import("../../sql/trigger.zig").unlinkAndDeleteTrigger(e.db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
     return .next;
 }
 
 pub fn opIntegrityCk(e: *Exec, op: *Op) Error!Flow {
     const db = e.db;
     const n_root: usize = @intCast(op.p2);
-    const roots = op.p4.intarray[1..][0..n_root];
+    const roots = op.p4IntArray();
+    std.debug.assert(roots.len == n_root);
     const n_err_reg = e.reg(op.p1);
     const in1 = e.reg(op.p1 + 1);
     const bt = db.dbs.items[op.p5].bt.?;
@@ -557,7 +558,7 @@ pub fn opTableLock(e: *Exec, op: *Op) Error!Flow {
     if (write or !e.db.flags.ReadUncommit) {
         const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
         bt.lockTable(@intCast(op.p2), write) catch |err| {
-            if (err == error.LockedSharedCache) aux.vdbeError(e.v, "database table is locked: {s}", .{std.mem.span(op.p4.z)});
+            if (err == error.LockedSharedCache) aux.vdbeError(e.v, "database table is locked: {s}", .{std.mem.span(op.p4As(.z))});
             return err;
         };
     }

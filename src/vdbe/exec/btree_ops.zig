@@ -110,7 +110,7 @@ pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
     try res;
     if (e.db.update_hook) |f| if (op.p4type == .table) {
         const op_code: i32 = if (op.p5 & vi.OPFLAG.ISUPDATE != 0) update_op else insert_op;
-        f(e.db.update_arg, op_code, e.db.dbs.items[@intCast(c.i_db)].name, op.p4.table.name, rowid);
+        f(e.db.update_arg, op_code, e.db.dbs.items[@intCast(c.i_db)].name, op.p4As(.table).name, rowid);
     };
     return .next;
 }
@@ -141,7 +141,7 @@ pub fn opDelete(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
     // The rowid, for the update hook (C's movetoTarget).
-    const hook_tab: ?*const int.Table = if (e.db.update_hook != null and op.p4type == .table) op.p4.table else null;
+    const hook_tab: ?*const int.Table = if (e.db.update_hook != null and op.p4type == .table) op.p4As(.table) else null;
     const rowid: i64 = if (hook_tab != null and c.is_table) c.uc.cursor.integerKey() else 0;
     const res = c.uc.cursor.delete(.{ .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0 });
     c.cache_status = vi.cache_stale;
@@ -184,11 +184,11 @@ pub fn opIdxInsert(e: *Exec, op: *Op) Error!Flow {
     var r: vi.UnpackedRecord = undefined;
     var kc: serial.IndexKeyCtx = undefined;
     var seek: ?btree.IndexKey = null;
-    if (op.p4type == .int32 and op.p4.int32 > 0) {
+    if (op.p4type == .int32 and op.p4As(.int32) > 0) {
         r = .{
             .key_info = c.key_info.?,
             .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),
-            .n_field = @intCast(op.p4.int32),
+            .n_field = @intCast(op.p4As(.int32)),
             .default_rc = 0,
         };
         kc = .{ .r = &r, .cmp = serial.findCompare(&r) };
@@ -218,7 +218,7 @@ pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
     // Not found: an entry whose expression fields differ (the EIIB bug,
     // a REAL that came out a few ULPs off) may still be the one
     // (sqlite3VdbeFindIndexKey()).
-    if (order != .eq and try serial.findIndexKey(cur, op.p4.index, &r, false) != 0) {
+    if (order != .eq and try serial.findIndexKey(cur, op.p4As(.index), &r, false) != 0) {
         if (!e.db.flags.WriteSchema or e.db.flags.Defensive) {
             // SQLITE_CORRUPT_INDEX_BKPT: logged, no message of its own.
             @import("../../sql/util.zig").reportError(RC.CORRUPT_INDEX, @src(), "index corruption");
@@ -253,7 +253,7 @@ pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
 
 pub fn opSorterCompare(e: *Exec, op: *Op) Error!Flow {
     const c = e.csr(op.p1);
-    const res = try sorter.compare(c, e.reg(op.p3), op.p4.int32);
+    const res = try sorter.compare(c, e.reg(op.p3), op.p4As(.int32));
     return if (res != 0) .jump_p2 else .next;
 }
 

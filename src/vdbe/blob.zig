@@ -46,6 +46,8 @@ pub const Incrblob = struct {
     /// The program holding the cursor open; null once the handle has been
     /// invalidated.
     stmt: ?*Vdbe = null,
+    /// The OP_NotExists of `stmt`, where a seek to another row starts.
+    seek_addr: operand.Addr = .from(0),
     db: *Sqlite3,
 };
 
@@ -61,9 +63,10 @@ fn seekToRow(p: *Incrblob, i_row: i64, err: *?[:0]u8) i32 {
     // A program that ran before is paused at OP_ResultRow: back up to the
     // OP_NotExists instead of starting over.
     var rc: i32 = undefined;
-    if (v.pc > 4) {
-        v.pc = 4;
-        std.debug.assert(v.ops.items[4].opcode == OP.NotExists);
+    const seek = p.seek_addr.int();
+    if (v.pc > seek) {
+        v.pc = seek;
+        std.debug.assert(v.ops.items[@intCast(seek)].opcode == OP.NotExists);
         rc = exec_mod.exec(v);
     } else {
         rc = api.step(v);
@@ -240,7 +243,7 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
     _ = aux.emitAnyInt(v, if (wr_flag) OP.OpenWrite else OP.OpenRead, .{ .cursor, .int, .int }, .{ row_cur, tab.tnum, i_db }, n_col + 1);
     // Seek to the row.
     const halt = aux.newLabel(&p);
-    _ = aux.emit(v, .NotExists, .{ row_cur, halt, reg });
+    blob.seek_addr = aux.emit(v, .NotExists, .{ row_cur, halt, reg });
     _ = aux.emit(v, .Column, .{ row_cur, n_col, reg });
     _ = aux.emit(v, .ResultRow, .{reg});
     aux.place(v, halt);

@@ -166,7 +166,7 @@ fn readsTable(p: *Parse, i_db: usize, t: *Table) bool {
     const v = p.vdbe.?;
     const vt: ?*int.VTable = if (t.isVirtual()) vtab.getVTable(p.db, t) else null;
     for (aux.opsBetween(v, .from(1), aux.here(v))) |*op| {
-        if (op.opcode == OP.VOpen and op.p4.vtab == vt) return true;
+        if (op.opcode == OP.VOpen and op.p4As(.vtab) == vt) return true;
         if (op.opcode == OP.OpenRead and op.p3 == @as(i32, @intCast(i_db))) {
             const tnum: int.Pgno = @intCast(op.p2);
             if (tnum == t.tnum) return true;
@@ -196,7 +196,7 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: Reg, t: *Table) void {
     if (t.tab_flags.HasStored) {
         const op = aux.getLastOp(v);
         if (op.opcode == OP.Affinity) {
-            const z: []u8 = @constCast(std.mem.span(op.p4.z));
+            const z: []u8 = @constCast(std.mem.span(op.p4As(.z)));
             var jj: usize = 0;
             for (t.cols) |c| {
                 if (jj >= z.len) break;

@@ -1355,7 +1355,7 @@ pub fn readLiteral(p: *int.Parse, def: *const int.FuncDef, lit: *const Expr) Oom
         else => return false,
     };
     var argv = [_]*vi.Mem{&arg};
-    var ctx: vi.Context = .{ .out = &out, .func = def, .argc = 1, .argv = &argv };
+    var ctx: vi.Context = .{ .out = &out, .func = def, .argv = &argv };
     f(&ctx, &argv);
     if (ctx.is_error == 0) return false;
     if (ctx.is_error == int.RC.NOMEM) return error.OutOfMemory;

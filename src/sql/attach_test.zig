@@ -174,7 +174,7 @@ test "attach: an OP_Function context whose out already names its register" {
     const op = for (s.ops.items) |*o| {
         if (o.opcode == .Function) break o;
     } else return error.TestUnexpectedResult;
-    const ctx = op.p4.funcctx;
+    const ctx = op.p4As(.funcctx);
     ctx.out = &s.mem[@intCast(op.p3)];
     // Register 1 holds the file name of ATTACH; DETACH leaves it NULL.
     ctx.argv[0] = &s.mem[@intCast(op.p2 - 2)];

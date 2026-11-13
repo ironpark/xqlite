@@ -133,9 +133,9 @@ fn ptrDiff(hi: [*]const u8, lo: [*]const u8) usize {
 /// precedes the call. Null (BINARY) when called outside a statement.
 fn getFuncCollSeq(ctx: *Context) ?*const int.CollSeq {
     const v = ctx.vdbe orelse return null;
-    const op = &v.ops.items[@intCast(ctx.i_op - 1)];
+    const op = &v.prog[@intCast(ctx.i_op - 1)];
     std.debug.assert(op.opcode == vi.OP.CollSeq);
-    return if (op.p4type == .collseq) op.p4.collseq else null;
+    return if (op.p4type == .collseq) op.p4As(.collseq) else null;
 }
 
 /// Port of sqlite3SkipAccumulatorLoad(): skip the accumulator load on this
@@ -2002,7 +2002,7 @@ fn callScalar(db: *Sqlite3, name: []const u8, args: []Mem, out: *Mem) !i32 {
     var ptrs: [8]*Mem = undefined;
     for (args, 0..) |*a, i| ptrs[i] = a;
     out.* = .{ .db = db };
-    var ctx: Context = .{ .out = out, .func = def, .argc = @intCast(args.len), .argv = ptrs[0..args.len] };
+    var ctx: Context = .{ .out = out, .func = def, .argv = ptrs[0..args.len] };
     def.x_sfunc.?(&ctx, ptrs[0..args.len]);
     return ctx.is_error;
 }
@@ -2081,7 +2081,7 @@ const Agg = struct {
         for (&args, 0..) |*m, i| ptrs[i] = m;
         var out: Mem = .{ .db = a.db };
         defer mem.release(&out);
-        var ctx: Context = .{ .out = &out, .func = a.def, .mem = &a.acc, .argc = @intCast(args.len), .argv = ptrs[0..args.len] };
+        var ctx: Context = .{ .out = &out, .func = a.def, .mem = &a.acc, .argv = ptrs[0..args.len] };
         if (inv) a.def.x_inverse.?(&ctx, ptrs[0..args.len]) else a.def.x_sfunc.?(&ctx, ptrs[0..args.len]);
         return if (ctx.is_error > 0) ctx.is_error else 0;
     }

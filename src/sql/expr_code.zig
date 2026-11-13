@@ -430,7 +430,7 @@ fn findCompatibleInRhsSubrtn(p: *Parse, e: *Expr, new_sig: ?*vi.SubrtnSig) bool 
     if (ops.len < 2) return false;
     for (ops[1 .. ops.len - 1]) |*op| {
         if (op.p4type != .subrtnsig) continue;
-        const sig = op.p4.subrtnsig;
+        const sig = op.p4As(.subrtnsig);
         if (!sig.complete) continue;
         if (sig_new.sel_id != sig.sel_id) continue;
         if (!std.mem.eql(u8, sig_new.aff orelse "", sig.aff orelse "")) continue;

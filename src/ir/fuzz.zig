@@ -392,8 +392,8 @@ const Db = struct {
         if (v.xq_exact_numeric) return true;
         for (v.ops.items) |*op| {
             const f = switch (op.p4type) {
-                .funcdef => op.p4.funcdef,
-                .funcctx => op.p4.funcctx.func,
+                .funcdef => op.p4As(.funcdef),
+                .funcctx => op.p4As(.funcctx).func,
                 else => continue,
             };
             if (f.func_flags.XQ_EXACT or typed_choices.has(f.name)) return true;

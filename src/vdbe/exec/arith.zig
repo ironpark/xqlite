@@ -366,7 +366,7 @@ pub fn opCompareJump(e: *Exec, op: *Op) Error!Flow {
                 flags3 = in3.flags.without(MEM.TypeMask).with(flags3.only(MEM.TypeMask));
             }
         }
-        const coll: ?*const int.CollSeq = if (op.p4type == .collseq) op.p4.collseq else null;
+        const coll: ?*const int.CollSeq = if (op.p4type == .collseq) op.p4As(.collseq) else null;
         res = serial.memCompare(in3, in1, coll);
     }
     const res2 = if (res < 0) cmp_lt[k] else if (res == 0) cmp_eq[k] else cmp_gt[k];
@@ -384,9 +384,9 @@ pub fn opElseEq(e: *Exec, op: *Op) Flow {
 
 pub fn opCompare(e: *Exec, op: *Op) Flow {
     // The OP_Permutation before, if P5 says so, orders the fields.
-    const permute: ?[*]u32 = if (op.p5 & vi.OPFLAG.PERMUTE != 0) e.ops[@intCast(e.pc - 1)].p4.intarray + 1 else null;
+    const permute: ?[]u32 = if (op.p5 & vi.OPFLAG.PERMUTE != 0) e.ops[@intCast(e.pc - 1)].p4IntArray() else null;
     const n: usize = @intCast(op.p3);
-    const ki = op.p4.keyinfo;
+    const ki = op.p4As(.keyinfo);
     for (0..n) |i| {
         const idx: i32 = @intCast(if (permute) |pa| pa[i] else i);
         const m1 = e.reg(op.p1 + idx);
@@ -442,7 +442,7 @@ pub fn opAndOr(e: *Exec, op: *Op) Flow {
 }
 
 pub fn opIsTrue(e: *Exec, op: *Op) Flow {
-    mem.setInt64(e.reg(op.p2), @intFromBool(mem.booleanValue(e.reg(op.p1), op.p3 != 0)) ^ op.p4.int32);
+    mem.setInt64(e.reg(op.p2), @intFromBool(mem.booleanValue(e.reg(op.p1), op.p3 != 0)) ^ op.p4As(.int32));
     return .next;
 }
 

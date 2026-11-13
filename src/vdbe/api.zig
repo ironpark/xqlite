@@ -840,7 +840,7 @@ pub fn stmtCurrentTime(ctx: *Context) i64 {
 /// generated column), where non-deterministic results are not allowed.
 pub fn notPureFunc(ctx: *Context) bool {
     const v = ctx.vdbe orelse return true;
-    const op = &v.ops.items[@intCast(ctx.i_op)];
+    const op = &v.prog[@intCast(ctx.i_op)];
     if (op.opcode == vi.OP.PureFunc) {
         // P5 holds the NC_SelfRef flags of the expression (resolveExprStep()).
         const nc = int.NC.fromInt(op.p5);
@@ -1207,7 +1207,7 @@ pub const SCANSTAT = struct {
 /// SQLITE_DBCONFIG_STMT_SCANSTATUS has no entries.
 pub fn scanStatus(v: *Vdbe, i_scan_arg: i32, op: i32, flags: i32, out: *anyopaque) i32 {
     if (op < SCANSTAT.NLOOP or op > SCANSTAT.NCYCLE) return 1;
-    const ops = if (v.frame) |f| vi.rootFrame(f).ops else v.ops.items;
+    const ops = v.ops.items;
     const stats = v.op_stats;
     const Out = struct {
         fn as(comptime T: type, p: *anyopaque) *T {
@@ -1256,7 +1256,7 @@ pub fn scanStatus(v: *Vdbe, i_scan_arg: i32, op: i32, flags: i32, out: *anyopaqu
             Out.as(f64, out).* = r * @as(f64, @floatFromInt(@import("../sql/util.zig").logEstToInt(x)));
         },
         SCANSTAT.NAME => Out.as(?[*:0]const u8, out).* = if (scan.name) |z| z.ptr else null,
-        SCANSTAT.EXPLAIN => Out.as(?[*:0]const u8, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p4.z else null,
+        SCANSTAT.EXPLAIN => Out.as(?[*:0]const u8, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p4As(.z) else null,
         SCANSTAT.SELECTID => Out.as(i32, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p1 else -1,
         SCANSTAT.PARENTID => Out.as(i32, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p2 else -1,
         SCANSTAT.NCYCLE => {

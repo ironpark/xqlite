@@ -20,7 +20,7 @@ const RC = int.RC;
 /// OP_Function and OP_PureFunc.
 pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
-    const ctx = op.p4.funcctx;
+    const ctx = op.p4As(.funcctx);
     const out = e.reg(op.p3);
     // The first run (ctx.vdbe still null; C starts with pOut == 0), or
     // the registers moved: point the arguments at them. ctx.out is
@@ -69,12 +69,11 @@ fn aggStepInit(e: *Exec, op: *Op) error{OutOfMemory}!void {
     out.* = .{ .db = e.db, .flags = .{ .Null = true } };
     ctx.* = .{
         .out = out,
-        .func = op.p4.funcdef,
+        .func = op.p4As(.funcdef),
         .mem = null,
         .vdbe = v,
         .i_op = @intCast(e.pc),
         .enc = e.encoding,
-        .argc = @intCast(n),
         .argv = argv,
     };
     op.setP4(.{ .funcctx = ctx });
@@ -86,7 +85,7 @@ fn aggStepInit(e: *Exec, op: *Op) error{OutOfMemory}!void {
 pub fn opAggStep(e: *Exec, op: *Op) Error!Flow {
     if (op.opcode != OP.AggStep1) try aggStepInit(e, op);
     const v = e.v;
-    const ctx = op.p4.funcctx;
+    const ctx = op.p4As(.funcctx);
     const m = e.reg(op.p3);
     if (ctx.mem != m) {
         ctx.mem = m;
@@ -124,10 +123,10 @@ pub fn opAggFinal(e: *Exec, op: *Op) Error!Flow {
     var m = e.reg(op.p1);
     var r: mem.AggResult = undefined;
     if (op.p3 != 0) {
-        r = mem.aggValue(m, e.reg(op.p3), op.p4.funcdef);
+        r = mem.aggValue(m, e.reg(op.p3), op.p4As(.funcdef));
         m = e.reg(op.p3);
     } else {
-        r = mem.finalize(m, op.p4.funcdef);
+        r = mem.finalize(m, op.p4As(.funcdef));
     }
     if (r.rc != 0) {
         aux.vdbeErrorFromMem(e.v, m);

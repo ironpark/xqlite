@@ -540,7 +540,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
         const addr_sort_index = sort.addr_sort_index.?;
         const op = aux.getOp(v, addr_sort_index);
         op.p2 = n_key + n_data;
-        const ki = op.p4.keyinfo;
+        const ki = op.p4As(.keyinfo);
         @memset(ki.sort_flags[0..ki.n_key_field], 0);
         aux.changeP4(v, null, .{ .keyinfo = ki });
         if (keyInfoFromExprList(p, sort.order_by.?, @intCast(n_ob_sat), ki.n_all_field - ki.n_key_field - 1)) |k| {

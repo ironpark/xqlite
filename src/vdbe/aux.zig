@@ -12,7 +12,6 @@ const mem = @import("mem.zig");
 const int = @import("../sql/sqlite_int.zig");
 const util = @import("../sql/util.zig");
 const main_mod = @import("../sql/main.zig");
-const btree = @import("xqlite_storage").btree;
 const opcodes = vi.opcodes;
 pub const operand = @import("operand.zig");
 
@@ -49,9 +48,14 @@ pub fn create(p: *Parse) error{OutOfMemory}!*Vdbe {
 }
 
 /// Port of sqlite3VdbeError(): set the error message of `v`, in the
-/// connection's memory (zErrMsg).
+/// connection's memory (zErrMsg). Out of memory, the message is cleared
+/// and the connection records the OOM, which makes the statement fail with
+/// NOMEM (as sqlite3VMPrintf() does).
 pub fn vdbeError(v: *Vdbe, comptime fmt: []const u8, args: anytype) void {
-    const msg = std.fmt.allocPrintSentinel(v.db.gpa, fmt, args, 0) catch null;
+    const msg = std.fmt.allocPrintSentinel(v.db.gpa, fmt, args, 0) catch blk: {
+        v.db.oomFault();
+        break :blk null;
+    };
     setErrMsg(v, msg);
 }
 
@@ -263,7 +267,7 @@ pub fn addFunctionCall(p: *Parse, p1: i32, p2: Reg, p3: Reg, n_arg: i32, func: *
     // Do not compare `out` before that: in ReleaseFast it holds whatever
     // the allocation held, such as the `out` of a freed context whose
     // registers were at the same address (argv then stays unset).
-    ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .argv = argv, .i_op = v.nOp(), .vdbe = null };
+    ctx.* = .{ .out = undefined, .func = func, .argv = argv, .i_op = v.nOp(), .vdbe = null };
     const addr = emitAny4(v, if (e_call_ctx != 0) OP.PureFunc else OP.Function, .{ .int, .reg, .reg }, .{ p1, p2, p3 }, .{ .funcctx = ctx });
     changeP5(v, @intCast(e_call_ctx & NC_SelfRef));
     main_mod.mayAbort(p);
@@ -576,11 +580,9 @@ pub fn deletePriorOpcode(v: *Vdbe, op: OP) bool {
 /// Port of sqlite3VdbeChangeP4() for pointer operands; `addr` null means
 /// the last instruction.
 pub fn changeP4(v: *Vdbe, addr_arg: ?Addr, p4: P4) void {
-    if (v.db.malloc_failed) {
-        // freeP4(), except that a VTable is not locked yet.
-        if (p4 == .dynamic) v.db.gpa.free(p4.dynamic);
-        return;
-    }
+    // C's freeP4() here has nothing to drop: the references (a VTable's
+    // lock, a table's count) are taken only on success.
+    if (v.db.malloc_failed) return;
     const addr = if (addr_arg) |a| a.int() else v.nOp() - 1;
     v.ops.items[@intCast(addr)].setP4(p4);
     acquireP4(p4);
@@ -608,13 +610,9 @@ pub fn setP4KeyInfo(p: *Parse, idx: *int.Index) void {
 /// none yet.
 pub fn appendP4(v: *Vdbe, p4: P4) void {
     if (v.db.malloc_failed) {
-        // freeP4(): of what releaseP4s() would drop, only P4_MEM and
-        // P4_DYNAMIC are owned here (the references are taken on success).
-        switch (p4) {
-            .mem => |m| mem.release(m),
-            .dynamic => |z| v.db.gpa.free(z),
-            else => {},
-        }
+        // freeP4(): of what releaseP4s() would drop, only P4_MEM is
+        // owned here (the references are taken on success).
+        if (p4 == .mem) mem.release(p4.mem);
         return;
     }
     const op = &v.ops.items[v.ops.items.len - 1];
@@ -633,17 +631,6 @@ fn acquireP4(p4: P4) void {
         .tableref => |t| t.n_tab_ref += 1,
         else => {},
     }
-}
-
-/// Port of sqlite3VdbeComment(): only kept with
-/// SQLITE_ENABLE_EXPLAIN_COMMENTS, which this port does not enable.
-pub fn comment(v: *Vdbe, comptime fmt: []const u8, args: anytype) void {
-    _ = .{ v, fmt, args };
-}
-
-/// Port of sqlite3VdbeNoopComment().
-pub fn noopComment(v: *Vdbe, comptime fmt: []const u8, args: anytype) void {
-    _ = .{ v, fmt, args };
 }
 
 /// Port of sqlite3VdbeGetOp().
@@ -722,7 +709,6 @@ pub fn displayP4(a: std.mem.Allocator, op: *const Op) error{OutOfMemory}![:0]u8 
         .subrtnsig => |s| w.print("subrtnsig:{d},{s}", .{ s.sel_id, s.aff orelse "" }),
         .vtab => |vt| w.print("vtab:{X}", .{if (vt.vtab) |p| @intFromPtr(p) else 0}),
         .z => |z| w.writeAll(z),
-        .dynamic => |z| w.writeAll(z),
         .notused => {},
     }) catch return error.OutOfMemory;
     return out.toOwnedSliceSentinel(0) catch error.OutOfMemory;
@@ -844,7 +830,7 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: NEXTOP, pc: *i32, addr: *usize, 
         // An OP_Program (the only opcode with a P4_SUBPROGRAM) adds its
         // program to the list, unless already there.
         if (sub) |s| if (a_op[i].p4type == .subprogram) {
-            const prog = a_op[i].p4.subprogram;
+            const prog = a_op[i].p4As(.subprogram);
             var j: usize = 0;
             while (j < n_sub) : (j += 1) {
                 if (subs.at(j) == prog) break;
@@ -968,6 +954,7 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     // Registers are numbered from 1; mem[0] is unused.
     n_mem += 1;
     resolveP2Values(v, &n_arg);
+    v.prog = v.ops.items;
     v.uses_stmt_journal = p.is_multi_write and p.may_abort;
     if (p.explain != 0) {
         if (n_mem < 10) n_mem = 10;
@@ -1047,7 +1034,7 @@ pub fn freeCursorNN(v: *Vdbe, cx: *VdbeCursor) void {
         else => {},
     }
     const box: *vi.CursorBox = @fieldParentPtr("vc", cx);
-    v.db.gpa.free(cx.types.ptr[0 .. cx.types.len + cx.offsets.len]);
+    v.db.gpa.free(box.cache);
     v.db.gpa.destroy(box);
 }
 
@@ -1066,7 +1053,7 @@ fn closeCursorsInFrame(v: *Vdbe) void {
 pub fn frameRestore(frame: *VdbeFrame) i32 {
     const v = frame.v;
     closeCursorsInFrame(v);
-    v.ops.items = frame.ops;
+    v.prog = frame.ops;
     v.mem = frame.mem;
     v.csr = frame.csr;
     v.db.last_rowid = frame.last_rowid;
@@ -1348,8 +1335,9 @@ pub const SAVEPOINT = enum(u8) {
     }
 };
 
-/// Port of sqlite3VdbeCloseStatement(). Statement transactions are not
-/// ported yet, so there is never one to close.
+/// Port of sqlite3VdbeCloseStatement(): release the statement transaction
+/// that OP_Transaction opened (i_statement), or roll it back for
+/// SAVEPOINT.ROLLBACK; nothing if the statement has none.
 pub fn closeStatement(v: *Vdbe, e_op: SAVEPOINT) i32 {
     if (v.db.n_statement != 0 and v.i_statement != 0) return closeStatementImpl(v, e_op);
     return RC.OK;
@@ -1660,14 +1648,12 @@ pub fn delete(v: *Vdbe) void {
     db.gpa.destroy(v);
 }
 
-/// The parts of freeP4() for P4_MEM, P4_VTAB, P4_TABLEREF and the
-/// db.gpa strings: release the values, unlock the virtual tables, drop
-/// the table references and free the strings of `ops`.
+/// The parts of freeP4() for P4_MEM, P4_VTAB and P4_TABLEREF: release
+/// the values, unlock the virtual tables and drop the table references
+/// of `ops`.
 fn releaseP4s(db: *Sqlite3, ops: []Op) void {
     for (ops) |*op| switch (op.getP4()) {
         .mem => |m| mem.release(m),
-        // db.gpa frees by the pointer alone, whatever the length.
-        .dynamic => |z| db.gpa.free(z),
         .vtab => |vt| @import("../sql/vtab.zig").unlock(vt),
         .tableref => |t| @import("../sql/build.zig").deleteTable(db, t),
         else => {},

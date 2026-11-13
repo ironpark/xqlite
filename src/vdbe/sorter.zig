@@ -152,8 +152,6 @@ const SortSubtask = struct {
     file: SorterFile = .{},
     /// Space for the output of IncrMergers.
     file2: SorterFile = .{},
-    /// Total bytes written.
-    n_spill: u64 = 0,
 };
 
 /// MergeEngine: merges the PMAs of `readers` with a tournament tree.
@@ -209,7 +207,6 @@ const PmaWriter = struct {
     /// Offset of the start of `buffer` in the file.
     write_off: i64 = 0,
     fd: ?vfs.File = null,
-    n_pma_spill: u64 = 0,
 };
 
 fn get(c: *VdbeCursor) *Sorter {
@@ -605,7 +602,6 @@ fn pmaWriteBlob(p: *PmaWriter, data: []const u8) void {
             p.fd.?.write(p.buffer[p.buf_start..p.buf_end], @intCast(p.write_off + @as(i64, @intCast(p.buf_start)))) catch |err| {
                 p.err = err;
             };
-            p.n_pma_spill += p.buf_end - p.buf_start;
             p.buf_start = 0;
             p.buf_end = 0;
             p.write_off += @intCast(p.buffer.len);
@@ -615,17 +611,14 @@ fn pmaWriteBlob(p: *PmaWriter, data: []const u8) void {
 }
 
 /// Port of vdbePmaWriterFinish(): flush the buffer and free it. Sets
-/// `eof` to the end of the data written and adds the bytes written to
-/// `n_spill`.
-fn pmaWriterFinish(gpa: Allocator, p: *PmaWriter, eof: *i64, n_spill: *u64) Error!void {
+/// `eof` to the end of the data written.
+fn pmaWriterFinish(gpa: Allocator, p: *PmaWriter, eof: *i64) Error!void {
     if (p.err == null and p.buffer.len > 0 and p.buf_end > p.buf_start) {
         p.fd.?.write(p.buffer[p.buf_start..p.buf_end], @intCast(p.write_off + @as(i64, @intCast(p.buf_start)))) catch |err| {
             p.err = err;
         };
-        p.n_pma_spill += p.buf_end - p.buf_start;
     }
     eof.* = p.write_off + @as(i64, @intCast(p.buf_end));
-    n_spill.* += p.n_pma_spill;
     gpa.free(p.buffer);
     const err = p.err;
     p.* = .{};
@@ -668,7 +661,7 @@ fn listToPMA(t: *SortSubtask) Error!void {
         pmaWriteBlob(&writer, rec);
     }
     listClear(s);
-    try pmaWriterFinish(s.gpa, &writer, &t.file.eof, &t.n_spill);
+    try pmaWriterFinish(s.gpa, &writer, &t.file.eof);
 }
 
 /// Port of vdbeSorterFlushPMA() with no worker threads.
@@ -776,7 +769,7 @@ fn incrPopulate(incr: *IncrMerger) Error!void {
             break;
         };
     }
-    const rc2 = pmaWriterFinish(gpa, &writer, &out.eof, &t.n_spill);
+    const rc2 = pmaWriterFinish(gpa, &writer, &out.eof);
     if (failed) |err| return err;
     return rc2;
 }
@@ -1016,7 +1009,6 @@ fn subtaskCleanup(t: *SortSubtask) void {
     t.file = .{};
     t.file2 = .{};
     t.n_pma = 0;
-    t.n_spill = 0;
     t.unpacked.err = null;
 }
 

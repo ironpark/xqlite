@@ -48,7 +48,7 @@ pub fn opIsType(e: *Exec, op: *Op) Flow {
                 type_mask = masks[st];
             }
         } else {
-            type_mask = @as(u16, 1) << @intCast(op.p4.int32 - 1);
+            type_mask = @as(u16, 1) << @intCast(op.p4As(.int32) - 1);
         }
     } else {
         type_mask = @as(u16, 1) << @intCast(mem.valueType(e.reg(op.p3)) - 1);
@@ -99,7 +99,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
                 const cur = c.uc.cursor;
                 if (c.deferred_moveto) {
                     if (c.alt_map) |map| {
-                        const i_map = map[1 + p2];
+                        const i_map = map[p2];
                         if (i_map > 0) {
                             c = c.alt_cursor.?;
                             p2 = i_map - 1;
@@ -204,7 +204,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
         // Fewer columns than p2: the default value or NULL.
         const dest = e.reg(op.p3);
         if (op.p4type == .mem) {
-            mem.shallowCopy(dest, op.p4.mem, .{ .Static = true });
+            mem.shallowCopy(dest, op.p4As(.mem), .{ .Static = true });
         } else {
             mem.setNull(dest);
         }
@@ -275,7 +275,7 @@ fn columnFromOverflow(e: *Exec, c: *VdbeCursor, t: u32, offset: u32, dest: *Mem)
 // ===================================================== affinity and types
 
 pub fn opTypeCheck(e: *Exec, op: *Op) Error!Flow {
-    const tab = op.p4.table;
+    const tab = op.p4As(.table);
     const cols = tab.cols;
     var in1: i32 = op.p1;
     var i: usize = undefined;
@@ -333,7 +333,7 @@ pub fn opTypeCheck(e: *Exec, op: *Op) Error!Flow {
 }
 
 pub fn opAffinity(e: *Exec, op: *Op) Error!Flow {
-    const aff = op.p4.z;
+    const aff = op.p4As(.z);
     var in1 = op.p1;
     var i: usize = 0;
     while (aff[i] != 0) : (i += 1) {
@@ -358,7 +358,7 @@ pub fn opMakeRecord(e: *Exec, op: *Op) Error!Flow {
     const recs = e.regs[data0..][0..n_field];
     const out = e.reg(op.p3);
     if (op.p4type == .z) {
-        const aff = op.p4.z;
+        const aff = op.p4As(.z);
         var i: usize = 0;
         while (aff[i] != 0) : (i += 1) {
             const a = aff[i];

@@ -88,9 +88,9 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
         var pcx = aux.frameRestore(frame);
         if (op.p2 == OE.Ignore.int()) {
             // RAISE(IGNORE): continue at P2 of the calling OP_Program.
-            pcx = v.ops.items[@intCast(pcx)].p2 - 1;
+            pcx = v.prog[@intCast(pcx)].p2 - 1;
         }
-        e.ops = v.ops.items;
+        e.ops = v.prog;
         e.regs = v.mem;
         e.pc = pcx;
         return .goto_pc;
@@ -107,7 +107,7 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
         } else if (op.p5 != 0) {
             const types = [_][]const u8{ "NOT NULL", "UNIQUE", "CHECK", "FOREIGN KEY" };
             if (op.p4type == .z) {
-                const name = std.mem.span(op.p4.z);
+                const name = std.mem.span(op.p4As(.z));
                 aux.vdbeError(v, "{s} constraint failed: {s}", .{ types[op.p5 - 1], name });
                 // P5_ConstraintCheck: a dialect's type check.
                 if (op.p5 == 3) if (dialect.checkState(name)) |st| {
@@ -117,7 +117,7 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
                 aux.vdbeError(v, "{s} constraint failed", .{types[op.p5 - 1]});
             }
         } else {
-            aux.vdbeError(v, "{s}", .{if (op.p4type == .z) std.mem.span(op.p4.z) else ""});
+            aux.vdbeError(v, "{s}", .{if (op.p4type == .z) std.mem.span(op.p4As(.z)) else ""});
         }
         e.logAbort(op.p1);
     }
@@ -136,7 +136,7 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
 fn dialectConstraintError(e: *Exec, op: *const Op) Error!void {
     @branchHint(.cold);
     const v = e.v;
-    const d = constraint.decode(std.mem.span(op.p4.z));
+    const d = constraint.decode(std.mem.span(op.p4As(.z)));
     const msg, const state = try constraint.render(e.db.gpa, v.xq_lang.dialect, d, e);
     defer e.db.gpa.free(msg);
     aux.vdbeErrorState(v, state, "{s}", .{msg});
@@ -178,7 +178,7 @@ pub fn opInit(e: *Exec, op: *Op) Flow {
 noinline fn traceStmt(e: *Exec, op: *Op) void {
     const db = e.db;
     const v = e.v;
-    const z: [*:0]const u8 = if (op.p4type == .z) op.p4.z else if (v.sql) |s| s.ptr else return;
+    const z: [*:0]const u8 = if (op.p4type == .z) op.p4As(.z) else if (v.sql) |s| s.ptr else return;
     if (db.m_trace & int.TRACE.LEGACY != 0) {
         db.trace_legacy.?(db.trace_arg, v, z);
     } else if (db.n_vdbe_exec > 1) {
@@ -218,7 +218,7 @@ fn allocFrame(e: *Exec, program: *vi.SubProgram) error{OutOfMemory}!*vi.VdbeFram
     frame.* = .{
         .v = v,
         .parent = null,
-        .ops = v.ops.items,
+        .ops = v.prog,
         .mem = v.mem,
         .csr = v.csr,
         .once = once,
@@ -237,7 +237,7 @@ fn allocFrame(e: *Exec, program: *vi.SubProgram) error{OutOfMemory}!*vi.VdbeFram
 pub fn opProgram(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     const db = e.db;
-    const program = op.p4.subprogram;
+    const program = op.p4As(.subprogram);
     const rt = e.reg(op.p3);
     if (op.p5 != 0) {
         // Recursive triggers are off: skip if already running.
@@ -273,7 +273,7 @@ pub fn opProgram(e: *Exec, op: *Op) Error!Flow {
     v.mem = frame.child_mem;
     v.csr = frame.child_csr;
     @memset(frame.once, 0);
-    v.ops.items = program.ops;
+    v.prog = program.ops;
     e.ops = program.ops;
     e.regs = v.mem;
     e.pc = -1;
@@ -311,10 +311,10 @@ pub fn opFkCounter(e: *Exec, op: *Op) Error!Flow {
 fn fkCounted(e: *Exec, op: *const Op, count: i64) error{OutOfMemory}!void {
     const v = e.v;
     if (op.p2 <= 0 or (count != 0 and v.xq_fk_error != null)) return;
-    const z = std.mem.span(op.p4.z);
+    const z = std.mem.span(op.p4As(.z));
     const d = constraint.decode(z);
     if (d.values.len == 0) {
-        v.xq_fk_error = op.p4.z;
+        v.xq_fk_error = op.p4As(.z);
         return;
     }
     const gpa = e.db.gpa;

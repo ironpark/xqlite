@@ -76,7 +76,7 @@ pub fn exec(v: *Vdbe) i32 {
     var e: Exec = .{
         .v = v,
         .db = v.db,
-        .ops = v.ops.items,
+        .ops = v.prog,
         .regs = v.mem,
         .pc = v.pc,
         .encoding = v.db.enc,
@@ -193,7 +193,7 @@ pub const Exec = struct {
             progress_limit = db.n_progress_ops - (prior % db.n_progress_ops);
             e.progress_limit = progress_limit;
         }
-        const main_ops = if (v.frame) |f| vi.rootFrame(f).ops.ptr else v.ops.items.ptr;
+        const main_ops = v.ops.items.ptr;
         while (true) {
             const op = &ops[pc];
             n_vm_step += 1;
@@ -484,7 +484,7 @@ pub const Exec = struct {
             // The name of the trigger, from the "-- NAME" of its OP_Init.
             const init = e.ops[0];
             prefix = if (init.p4type == .z)
-                std.fmt.bufPrint(&extra, "/* {s} */ ", .{std.mem.span(init.p4.z)[3..]}) catch extra[0..]
+                std.fmt.bufPrint(&extra, "/* {s} */ ", .{std.mem.span(init.p4As(.z))[3..]}) catch extra[0..]
             else
                 "/* unknown trigger */ ";
         }

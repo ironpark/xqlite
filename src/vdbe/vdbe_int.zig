@@ -251,23 +251,11 @@ pub const Op = struct {
         op.p4 = switch (p4) {
             .notused => .{ .p = null },
             .z => |z| .{ .z = z.ptr },
-            .dynamic => |z| .{ .dynamic = z.ptr },
-            .int32 => |i| .{ .int32 = i },
-            .collseq => |x| .{ .collseq = x },
-            .funcdef => |x| .{ .funcdef = x },
-            .keyinfo => |x| .{ .keyinfo = x },
-            .mem => |x| .{ .mem = x },
             .intarray => |a| blk: {
                 std.debug.assert(a.len > a[0]);
                 break :blk .{ .intarray = a.ptr };
             },
-            .funcctx => |x| .{ .funcctx = x },
-            .subprogram => |x| .{ .subprogram = x },
-            .table => |x| .{ .table = x },
-            .tableref => |x| .{ .tableref = x },
-            .index => |x| .{ .index = x },
-            .subrtnsig => |x| .{ .subrtnsig = x },
-            .vtab => |x| .{ .vtab = x },
+            inline else => |x, t| @unionInit(P4Union, @tagName(t), x),
         };
     }
 
@@ -277,21 +265,22 @@ pub const Op = struct {
         return switch (op.p4type) {
             .notused => .notused,
             .z => .{ .z = std.mem.span(op.p4.z) },
-            .dynamic => .{ .dynamic = std.mem.span(op.p4.dynamic) },
-            .int32 => .{ .int32 = op.p4.int32 },
-            .collseq => .{ .collseq = op.p4.collseq },
-            .funcdef => .{ .funcdef = op.p4.funcdef },
-            .keyinfo => .{ .keyinfo = op.p4.keyinfo },
-            .mem => .{ .mem = op.p4.mem },
             .intarray => .{ .intarray = op.p4.intarray[0 .. op.p4.intarray[0] + 1] },
-            .funcctx => .{ .funcctx = op.p4.funcctx },
-            .subprogram => .{ .subprogram = op.p4.subprogram },
-            .table => .{ .table = op.p4.table },
-            .tableref => .{ .tableref = op.p4.tableref },
-            .index => .{ .index = op.p4.index },
-            .subrtnsig => .{ .subrtnsig = op.p4.subrtnsig },
-            .vtab => .{ .vtab = op.p4.vtab },
+            inline else => |t| @unionInit(P4, @tagName(t), @field(op.p4, @tagName(t))),
         };
+    }
+
+    /// The fourth operand, which must be of type `t`.
+    pub inline fn p4As(op: *const Op, comptime t: P4Type) @FieldType(P4Union, @tagName(t)) {
+        std.debug.assert(op.p4type == t);
+        return @field(op.p4, @tagName(t));
+    }
+
+    /// The elements of a P4_INTARRAY fourth operand, without the count
+    /// that comes first.
+    pub inline fn p4IntArray(op: *const Op) []u32 {
+        const a = op.p4As(.intarray);
+        return a[1..][0..a[0]];
     }
 };
 
@@ -303,7 +292,6 @@ comptime {
 pub const P4Type = enum(u8) {
     notused,
     z,
-    dynamic,
     int32,
     collseq,
     funcdef,
@@ -320,16 +308,13 @@ pub const P4Type = enum(u8) {
 };
 
 /// The fourth operand as an instruction holds it (the p4 union of
-/// VdbeOp): one word, read as the field Op.p4type names. Memory behind
-/// the pointers belongs to the Vdbe (its arena), not the instruction,
-/// except for `dynamic`.
+/// VdbeOp): one word, read as the field Op.p4type names (Op.p4As()).
+/// Memory behind the pointers belongs to the Vdbe (its arena), not the
+/// instruction.
 pub const P4Union = extern union {
     p: ?*anyopaque,
     /// A NUL-terminated string (P4_STATIC, P4_DYNAMIC in the arena).
     z: [*:0]const u8,
-    /// A NUL-terminated string from db.gpa that the Vdbe frees: P4_DYNAMIC
-    /// memory handed over by a module (the idxStr of OP_VFilter).
-    dynamic: [*:0]u8,
     int32: i32,
     collseq: *const CollSeq,
     funcdef: *const FuncDef,
@@ -353,7 +338,6 @@ pub const P4Union = extern union {
 pub const P4 = union(P4Type) {
     notused,
     z: [:0]const u8,
-    dynamic: [:0]u8,
     int32: i32,
     collseq: *const CollSeq,
     funcdef: *const FuncDef,
@@ -437,9 +421,9 @@ pub const VdbeCursor = struct {
     btx: ?*btree.Btree = null,
     /// Opened with OPFLAG_SEEKEQ (BTREE_SEEK_EQ): only equality seeks.
     seek_eq: bool = false,
-    /// Table to index column mapping (aAltMap): a P4_INTARRAY, whose
-    /// first element is the count.
-    alt_map: ?[*]u32 = null,
+    /// Table to index column mapping (aAltMap): the elements of a
+    /// P4_INTARRAY.
+    alt_map: ?[]const u32 = null,
     seq_count: i64 = 0,
     /// Column cache valid while equal to Vdbe.cache_ctr.
     cache_status: u32 = cache_stale,
@@ -468,10 +452,12 @@ pub const VdbeCursor = struct {
 };
 
 /// The allocation of a cursor: the VdbeCursor and the b-tree cursor it may
-/// use. `vc.types` and `vc.offsets` share one allocation, types first.
+/// use.
 pub const CursorBox = struct {
     vc: VdbeCursor,
     bc: btree.Cursor = undefined,
+    /// The one allocation that `vc.types` and `vc.offsets` are slices of.
+    cache: []u32,
 };
 
 /// VdbeCursor.cache_status value that is never current (CACHE_STALE).
@@ -483,6 +469,7 @@ pub const cache_stale: u32 = 0;
 pub const VdbeFrame = struct {
     v: *Vdbe,
     parent: ?*VdbeFrame,
+    /// The caller's program, registers and cursors, restored on return.
     ops: []Op,
     mem: []Mem,
     csr: []?*VdbeCursor,
@@ -529,7 +516,6 @@ pub const Context = struct {
     err_state: ?int.ErrorState = null,
     enc: u8 = ENC.UTF8,
     skip_flag: bool = false,
-    argc: u16 = 0,
     argv: []*Mem,
 };
 
@@ -601,7 +587,13 @@ pub const Vdbe = struct {
     n_fk_constraint: i64 = 0,
     n_stmt_def_cons: i64 = 0,
     n_stmt_def_imm_cons: i64 = 0,
+    /// The main program: built while the statement is compiled, fixed
+    /// from makeReady() on.
     ops: std.ArrayList(Op) = .empty,
+    /// The instructions of the program running (aOp): those of `ops`, or
+    /// of the trigger program of the innermost frame while one runs.
+    /// Set by makeReady() and when a frame is entered or left.
+    prog: []Op = &.{},
     col_names: []Mem = &.{},
     /// The COLNAME_DATABASE, COLNAME_TABLE and COLNAME_COLUMN names
     /// (SQLITE_ENABLE_COLUMN_METADATA), laid out like col_names; empty

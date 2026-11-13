@@ -679,7 +679,7 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) Oom!?*Tr
         return prg;
     };
     defer aux.delete(v);
-    if (!trig.is_fk_action) aux.changeP4Str(v, -1, try std.fmt.allocPrint(sub.arena, "-- TRIGGER {s}", .{trig.name}));
+    if (!trig.is_fk_action) aux.changeP4Str(v, null, try std.fmt.allocPrint(sub.arena, "-- TRIGGER {s}", .{trig.name}));
 
     // A false (or NULL) WHEN clause jumps to the OP_Halt at the end.
     var end_trigger: ?Label = null;
@@ -728,8 +728,7 @@ pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: i32, orco
     // Unless recursive triggers are on, a running trigger does not fire
     // again (foreign key actions always may).
     const recursive = !trig.is_fk_action and !p.db.flags.RecTriggers;
-    p.n_mem += 1;
-    _ = aux.emit4(v, .Program, .{ Reg.from(reg), Jump.from(ignore_jump), Reg.from(p.n_mem) }, .{ .subprogram = prg.program });
+    _ = aux.emit4(v, .Program, .{ Reg.from(reg), Jump.from(ignore_jump), p.newReg() }, .{ .subprogram = prg.program });
     aux.changeP5(v, @intFromBool(recursive));
 }
 
@@ -904,8 +903,7 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_
         var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in }, .nc_flags = .{ .UBaseReg = true } };
         if (ret.n_ret_col == 0) {
             ret.n_ret_col = @intCast(new.len());
-            ret.i_ret_cur = p.n_tab;
-            p.n_tab += 1;
+            ret.i_ret_cur = p.newCursor().int();
         }
         p.e_trigger_op = trig.op;
         p.trigger_tab = t;
@@ -914,10 +912,9 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_
         p.xq_returning_op = 0;
         if (resolved and !db.malloc_failed) {
             const n_col: i32 = @intCast(new.len());
-            const reg: Reg = .from(p.n_mem + 1);
+            const reg = p.newRegs(n_col + 2);
             const ret_cur: Cursor = .from(ret.i_ret_cur);
             processReturningSubqueries(new, t);
-            p.n_mem += n_col + 2;
             ret.i_ret_reg = reg.int();
             for (new.slice(), 0..) |*item, i| {
                 const col = item.expr.?;

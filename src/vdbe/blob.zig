@@ -247,7 +247,7 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
         o[0].p1 = i_db;
         o[0].p2 = @intCast(tab.tnum);
         o[0].p3 = @intFromBool(wr_flag);
-        aux.changeP4(v, 2, .{ .z = tab.name });
+        aux.changeP4(v, .from(2), .{ .z = tab.name });
         // Open the cursor for writing if asked, on the table's root.
         if (wr_flag) o[1].opcode = OP.OpenWrite;
         o[1].p2 = @intCast(tab.tnum);
@@ -255,7 +255,7 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
         // The cursor thinks the table has one more column than it does:
         // OP_Column on that imaginary column reads NULL, and fills the
         // cursor's type and offset cache without any I/O.
-        aux.changeP4(v, 2 + 1, .{ .int32 = @as(i32, tab.nCol()) + 1 });
+        aux.changeP4(v, .from(2 + 1), .{ .int32 = @as(i32, tab.nCol()) + 1 });
         ops.?[3].p2 = tab.nCol();
         p.n_var = 0;
         p.n_mem = 1;

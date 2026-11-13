@@ -337,7 +337,7 @@ fn codeAttach(p: *Parse, typ: AuthCode, func: *const FuncDef, auth_arg: ?*Expr, 
     expr_code.exprCode(p, dbname, reg_args.at(1));
     expr_code.exprCode(p, key, reg_args.at(2));
     if (v) |vm| {
-        _ = aux.addFunctionCall(p, 0, reg_args.at(3 - func.n_arg).int(), reg_args.at(3).int(), func.n_arg, func, 0);
+        _ = aux.addFunctionCall(p, 0, reg_args.at(3 - func.n_arg), reg_args.at(3), func.n_arg, func, 0);
         // ATTACH expires only this statement, DETACH all of them.
         _ = aux.emit(vm, .Expire, .{typ == .attach});
     }

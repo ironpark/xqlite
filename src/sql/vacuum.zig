@@ -111,8 +111,7 @@ pub fn vacuum(p: *Parse, name: ?int.Token, into: ?*int.Expr) void {
         var into_reg: aux.operand.Reg = .none;
         if (into) |e| {
             if (resolve.resolveSelfReference(p, null, .{}, e, null)) |_| {
-                p.n_mem += 1;
-                into_reg = .from(p.n_mem);
+                into_reg = p.newReg();
                 expr_code.exprCode(p, e, into_reg);
             } else |_| {}
         }

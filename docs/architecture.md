@@ -521,6 +521,8 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 - **명령 내기**: `aux.emit(v, .Column, .{ cur, col, reg })`가 인자의 타입을 표와 대조합니다. 레지스터 자리에 커서를 넘기면 컴파일 오류입니다. 뒤의 피연산자는 생략하면 0이고, 리터럴 0은 어느 종류에나 "쓰지 않음"으로 받습니다.
   - P4가 있으면 `emit4`(P4 값), `emitInt`(정수), `emitStr`(복사한 문자열)입니다.
   - 컴파일할 때 고르는 opcode(`OP_NotExists`냐 `OP_NotFound`냐)는 `emitAny(v, op, shape, .{...})`입니다. `shape`는 후보 opcode들이 함께 가지는 피연산자 종류이고, 실행 때 `kinds(op)`와 같은지 단언합니다.
+- **레지스터와 커서 할당**: `p.newReg()`, `p.newRegs(n)`(이어진 n개의 첫째), `p.newCursor()`, `p.newCursors(n)`(`Parse`의 메서드)이 `n_mem`·`n_tab`을 늘리고 타입 있는 값을 돌려줍니다. 잠깐 쓰는 레지스터는 예전처럼 `expr.getTempReg()`·`getTempRange()`입니다. `n_mem`을 저장했다 되돌리거나 다음 번호를 미리 보는 곳은 필드를 그대로 씁니다.
+- **이미 낸 명령 고치기**: `aux.getOp`, `changeP1`~`changeP3`, `changeOpcode`, `changeToNoop`, `jumpHereOrPopInst`, `landHere`는 `Addr`를 받고, `changeP4`·`changeP4Str`은 `?Addr`(null은 마지막 명령)를 받습니다. `aux.explain()`은 `OP_Explain`의 `Addr`를 돌려주고, `loadString`·`multiLoad`·`addFunctionCall`·`addInt64`·`addDouble`·`endCoroutine`·`typeofColumn`은 `Reg`를 받습니다.
 - **아직 `i32`인 곳**: 공개 함수의 시그니처와 여러 파일이 함께 쓰는 구조체 필드(`Parse`, `WhereLevel`, `SelectDest`, `AggInfo` ...)는 아직 `i32`입니다. 그 경계에서 `.from()`과 `.int()`로 바꿉니다. `src/vdbe`의 `aux.zig`·`api.zig` 안의 호출, `pragma.zig`의 정적 opcode 목록(`addOpList`), 이미 낸 명령을 복사하거나 `WhereLevel`에 넣어 둔 opcode를 내는 몇 곳도 예전 `addOp*`입니다.
 - 새 코드는 `emit` 계열을 씁니다. 이 변경은 바이트코드를 바꾸지 않았습니다(`xqt planner`의 기록과 일치).
 

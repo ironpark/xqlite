@@ -295,7 +295,7 @@ fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, 
         _ = aux.emitStr(v, .FkCounter, .{ deferred, n_incr, 0 }, z);
         if (w) |wi| where_mod.whereEnd(wi);
     }
-    if (fk_if_zero) |addr| aux.jumpHereOrPopInst(v, addr.int());
+    if (fk_if_zero) |addr| aux.jumpHereOrPopInst(v, addr);
 }
 
 /// Port of sqlite3FkReferences(): the foreign keys that refer to `t`.
@@ -479,8 +479,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         item.s_tab = fk.from;
         item.name = fk.from.name;
         build.tableRef(p, fk.from);
-        item.i_cursor = p.n_tab;
-        p.n_tab += 1;
+        item.i_cursor = p.newCursor().int();
 
         if (reg_new != 0) try fkScanChildren(p, src, t, idx, fk, deferred, ai_col, reg_new, -1, a_change != null);
         if (reg_old != 0) {

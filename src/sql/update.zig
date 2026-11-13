@@ -139,15 +139,14 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     // Cursors for the table and all its indexes (used or not, the index
     // cursors follow the table's).
     const i_base_cur = p.n_tab;
-    var data_cur: Cursor = .from(p.n_tab);
-    p.n_tab += 1;
+    var data_cur: Cursor = p.newCursor();
     var i_idx_cur = data_cur.int() + 1;
     const pk: ?*Index = if (t.hasRowid()) null else build.primaryKeyIndex(t);
     var n_idx: usize = 0;
     var idx_opt = t.index;
     while (idx_opt) |ix| : (idx_opt = ix.next) {
-        if (pk == ix) data_cur = .from(p.n_tab);
-        p.n_tab += 1;
+        const cur = p.newCursor();
+        if (pk == ix) data_cur = cur;
         n_idx += 1;
     }
     if (upsert) |u| {
@@ -245,15 +244,11 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     }) {
         var reg: i32 = 0;
         if (chng_key or has_fk > 1 or ix == pk or indexWhereClauseMightChange(ix, ax_ref, chng_rowid)) {
-            p.n_mem += 1;
-            reg = p.n_mem;
-            p.n_mem += ix.n_column;
+            reg = p.newRegs(1 + ix.n_column).int();
         } else {
             for (0..ix.n_key_col) |i| {
                 if (indexColumnIsBeingUpdated(ix, i, ax_ref, chng_rowid)) {
-                    p.n_mem += 1;
-                    reg = p.n_mem;
-                    p.n_mem += ix.n_column;
+                    reg = p.newRegs(1 + ix.n_column).int();
                     if (on_error == OE.Default and ix.on_error == OE.Replace) b_replace = true;
                     break;
                 }
@@ -262,8 +257,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         if (reg == 0) to_open[n_all_idx + 1] = false;
         reg_idx[n_all_idx] = reg;
     }
-    p.n_mem += 1;
-    reg_idx[n_all_idx] = p.n_mem;
+    reg_idx[n_all_idx] = p.newReg().int();
     // REPLACE may delete through any index.
     if (b_replace) @memset(to_open[0 .. n_idx + 1], true);
 
@@ -279,19 +273,15 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     var reg_new: Reg = .none;
     if (!t.isVirtual()) {
         row_set = .from(reg_idx[n_all_idx]);
-        p.n_mem += 1;
-        old_rowid = .from(p.n_mem);
+        old_rowid = p.newReg();
         new_rowid = old_rowid;
         if (chng_pk or trig != null or has_fk != 0) {
-            reg_old = .from(p.n_mem + 1);
-            p.n_mem += @intCast(t.cols.len);
+            reg_old = p.newRegs(@intCast(t.cols.len));
         }
         if (chng_key or trig != null or has_fk != 0) {
-            p.n_mem += 1;
-            new_rowid = .from(p.n_mem);
+            new_rowid = p.newReg();
         }
-        reg_new = .from(p.n_mem + 1);
-        p.n_mem += @intCast(t.cols.len);
+        reg_new = p.newRegs(@intCast(t.cols.len));
     }
 
     // The checks of the view's triggers are made on behalf of the view.
@@ -317,8 +307,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     // The register that counts the rows updated, if they are counted.
     var row_count: Reg = .none;
     if (db.flags.CountRows and p.trigger_tab == null and p.nested == 0 and !p.returning and upsert == null) {
-        p.n_mem += 1;
-        row_count = .from(p.n_mem);
+        row_count = p.newReg();
         _ = aux.emit(v, .Integer, .{ 0, row_count });
     }
 
@@ -332,21 +321,17 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     var n_key: i32 = 0;
     if (n_change_from == 0 and t.hasRowid()) {
         _ = aux.emit(v, .Null, .{ 0, row_set, old_rowid });
-        eph_cur = .from(p.n_tab);
-        p.n_tab += 1;
+        eph_cur = p.newCursor();
         // P3 is the register OP_Insert takes its (empty) record from.
         addr_open = aux.emit(v, .OpenEphemeral, .{ eph_cur, 0, row_set });
     } else {
         n_pk = if (pk) |k| k.n_key_col else 0;
-        pk_reg = .from(p.n_mem + 1);
-        p.n_mem += n_pk;
+        pk_reg = p.newRegs(n_pk);
         p.n_mem += n_change_from;
-        p.n_mem += 1;
-        key = .from(p.n_mem);
+        key = p.newReg();
         if (upsert == null) {
             const n_eph_col = n_pk + n_change_from + (if (is_view) @as(i32, @intCast(t.cols.len)) else 0);
-            eph_cur = .from(p.n_tab);
-            p.n_tab += 1;
+            eph_cur = p.newCursor();
             if (pk != null) _ = aux.emit(v, .Null, .{ 0, pk_reg, pk_reg.at(n_pk - 1) });
             addr_open = aux.emit(v, .OpenEphemeral, .{ eph_cur, n_eph_col });
             if (pk) |k| {
@@ -403,11 +388,10 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // The rowid of the row: to the FIFO for two passes.
             _ = aux.emit(v, .Rowid, .{ data_cur, old_rowid });
             if (e_one_pass == ONEPASS.OFF) {
-                p.n_mem += 1;
-                reg_idx[n_all_idx] = p.n_mem;
+                reg_idx[n_all_idx] = p.newReg().int();
                 _ = aux.emit(v, .Insert, .{ eph_cur, row_set, old_rowid });
             } else if (addr_open) |a| {
-                _ = aux.changeToNoop(v, a.int());
+                _ = aux.changeToNoop(v, a);
             }
         } else {
             // The PRIMARY KEY of the row: a record in the ephemeral table
@@ -415,7 +399,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             const k = pk.?;
             for (0..k.n_key_col) |i| ec.codeGetColumnOfTable(v, t, data_cur, k.ai_column[i], pk_reg.at(i));
             if (e_one_pass != ONEPASS.OFF) {
-                if (addr_open) |a| _ = aux.changeToNoop(v, a.int());
+                if (addr_open) |a| _ = aux.changeToNoop(v, a);
                 n_key = n_pk;
                 key = pk_reg;
             } else {
@@ -441,7 +425,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             var not_used1: i32 = 0;
             var not_used2: i32 = 0;
             _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, i_base_cur, to_open, &not_used1, &not_used2);
-            if (addr_once) |a| aux.jumpHereOrPopInst(v, a.int());
+            if (addr_once) |a| aux.jumpHereOrPopInst(v, a);
         }
 
         // The top of the loop over the rows.
@@ -636,11 +620,9 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
 
     // The registers of the arguments of xUpdate, and the ephemeral table
     // of their records.
-    const ephem_tab: Cursor = .from(p.n_tab);
-    p.n_tab += 1;
+    const ephem_tab = p.newCursor();
     var addr = aux.emit(v, .OpenEphemeral, .{ ephem_tab, n_arg });
-    const reg_arg: Reg = .from(p.n_mem + 1);
-    p.n_mem += n_arg;
+    const reg_arg = p.newRegs(n_arg);
     var e_one_pass: ONEPASS = undefined;
     if (src.len() > 1) {
         var pk: ?*Index = null;
@@ -670,10 +652,8 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
         try updateFromSelect(p, ephem_tab, pk, list, src, where);
         e_one_pass = ONEPASS.OFF;
     } else {
-        p.n_mem += 1;
-        const reg_rec: Reg = .from(p.n_mem);
-        p.n_mem += 1;
-        const reg_rowid: Reg = .from(p.n_mem);
+        const reg_rec = p.newReg();
+        const reg_rowid = p.newReg();
 
         // Scan the virtual table.
         w = where_mod.whereBegin(p, src, where, null, null, null, .{ .ONEPASS_DESIRED = true }, 0) orelse return;
@@ -711,7 +691,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
         std.debug.assert(e_one_pass == ONEPASS.OFF or e_one_pass == ONEPASS.SINGLE);
         if (e_one_pass != ONEPASS.OFF) {
             // One pass: no ephemeral table.
-            _ = aux.changeToNoop(v, addr.int());
+            _ = aux.changeToNoop(v, addr);
             _ = aux.emit(v, .Close, .{csr});
         } else {
             // The record of the arguments goes to the ephemeral table.

@@ -478,8 +478,7 @@ fn innerLoopLoadRow(p: *Parse, s: *Select, info: *RowLoadInfo) void {
 fn makeSorterRecord(p: *Parse, sort: *SortCtx, s: *Select, base: Reg, n_base: i32) Reg {
     const n_ob_sat = sort.n_ob_sat;
     const v = p.vdbe.?;
-    p.n_mem += 1;
-    const out: Reg = .from(p.n_mem);
+    const out = p.newReg();
     if (sort.deferred_row_load) |d| innerLoopLoadRow(p, s, d);
     _ = aux.emit(v, .MakeRecord, .{ base.at(n_ob_sat), n_base - n_ob_sat, out });
     return out;
@@ -503,8 +502,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
     if (n_prefix_reg != 0) {
         base = data.at(-n_prefix_reg);
     } else {
-        base = .from(p.n_mem + 1);
-        p.n_mem += n_base;
+        base = p.newRegs(n_base);
     }
     // The LIMIT+OFFSET counter, if there is a LIMIT.
     const limit: Reg = .from(if (s.i_offset != 0) s.i_offset + 1 else s.i_limit);
@@ -515,8 +513,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
     if (n_prefix_reg == 0 and n_data > 0) ec.codeMove(p, data, base.at(n_expr + b_seq), n_data);
     if (n_ob_sat > 0) {
         record = makeSorterRecord(p, sort, s, base, n_base);
-        const prev_key: Reg = .from(p.n_mem + 1);
-        p.n_mem += sort.n_ob_sat;
+        const prev_key = p.newRegs(sort.n_ob_sat);
         const n_key = n_expr - sort.n_ob_sat + b_seq;
         const addr_first = if (b_seq != 0)
             aux.emit(v, .IfNot, .{base.at(n_expr)})
@@ -524,12 +521,12 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
             aux.emit(v, .SequenceTest, .{sort.cursor});
         _ = aux.emit(v, .Compare, .{ prev_key, base, sort.n_ob_sat });
         if (p.db.malloc_failed) return;
-        const addr_sort_index = sort.addr_sort_index.?.int();
+        const addr_sort_index = sort.addr_sort_index.?;
         const op = aux.getOp(v, addr_sort_index);
         op.p2 = n_key + n_data;
         const ki = op.p4.keyinfo;
         @memset(ki.sort_flags[0..ki.n_key_field], 0);
-        aux.changeP4(v, -1, .{ .keyinfo = ki });
+        aux.changeP4(v, null, .{ .keyinfo = ki });
         if (keyInfoFromExprList(p, sort.order_by.?, @intCast(n_ob_sat), ki.n_all_field - ki.n_key_field - 1)) |k| {
             aux.getOp(v, addr_sort_index).setP4(.{ .keyinfo = k });
         }
@@ -538,8 +535,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
         _ = aux.emit(v, .Jump, .{ addr_jmp.plus(1), 0, addr_jmp.plus(1) });
         const bk_out = aux.newLabel(p);
         sort.label_bk_out = bk_out;
-        p.n_mem += 1;
-        sort.reg_return = .from(p.n_mem);
+        sort.reg_return = p.newReg();
         _ = aux.emit(v, .Gosub, .{ sort.reg_return, bk_out });
         _ = aux.emit(v, .ResetSorter, .{sort.cursor});
         if (!limit.isNone()) _ = aux.emit(v, .IfNot, .{ limit, done });
@@ -561,7 +557,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
     const op: OP = if (sort.sort_flags & SORTFLAG_UseSorter != 0) OP.SorterInsert else OP.IdxInsert;
     _ = aux.emitAnyInt(v, op, .{ .cursor, .reg, .reg }, .{ sort.cursor, record, base.at(n_ob_sat) }, n_base - n_ob_sat);
     if (skip) |a| {
-        aux.changeP2(v, a.int(), if (sort.label_ob_lopt) |l| l.int() else aux.currentAddr(v));
+        aux.changeP2(v, a, if (sort.label_ob_lopt) |l| l.int() else aux.currentAddr(v));
     }
     sort.addr_push_end = aux.here(v).plus(-1);
 }
@@ -583,9 +579,8 @@ fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat:
     switch (e_tnct_type) {
         int.WHERE_DISTINCT.ORDERED => {
             // Compare with the previous row.
-            const prev: Reg = .from(p.n_mem + 1);
+            const prev = p.newRegs(n_result_col);
             ret = prev.int();
-            p.n_mem += n_result_col;
             // Past the comparisons: the row differs.
             const differs = aux.here(v).plus(n_result_col);
             for (e_list.slice(), 0..) |item, ii| {
@@ -596,7 +591,7 @@ fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat:
                 } else {
                     _ = aux.emit(v, .Eq, .{ elem.at(i), repeat, prev.at(i) });
                 }
-                if (coll) |c| aux.changeP4(v, -1, .{ .collseq = c });
+                if (coll) |c| aux.changeP4(v, null, .{ .collseq = c });
                 aux.changeP5(v, vi.SQLITE_NULLEQ);
             }
             _ = aux.emit(v, .Copy, .{ elem, prev, n_result_col - 1 });
@@ -622,11 +617,11 @@ fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat:
 fn fixDistinctOpenEph(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, i_val: i32, open_eph: Addr) void {
     if (p.n_err == 0 and (e_tnct_type == int.WHERE_DISTINCT.UNIQUE or e_tnct_type == int.WHERE_DISTINCT.ORDERED)) {
         const v = p.vdbe.?;
-        _ = aux.changeToNoop(v, open_eph.int());
-        if (aux.getOp(v, open_eph.plus(1).int()).opcode == OP.Explain) _ = aux.changeToNoop(v, open_eph.plus(1).int());
+        _ = aux.changeToNoop(v, open_eph);
+        if (aux.getOp(v, open_eph.plus(1)).opcode == OP.Explain) _ = aux.changeToNoop(v, open_eph.plus(1));
         if (e_tnct_type == int.WHERE_DISTINCT.ORDERED) {
             // OP_Null with MEM_Cleared: the first comparison always fails.
-            const op = aux.getOp(v, open_eph.int());
+            const op = aux.getOp(v, open_eph);
             op.opcode = OP.Null;
             op.p1 = 1;
             op.p2 = i_val;
@@ -659,8 +654,7 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
             if (so.sort_flags & SORTFLAG_UseSorter == 0) n_prefix_reg += 1;
             p.n_mem += n_prefix_reg;
         }
-        dest.i_sdst = p.n_mem + 1;
-        p.n_mem += n_result_col;
+        dest.i_sdst = p.newRegs(n_result_col).int();
     } else if (dest.i_sdst + n_result_col > p.n_mem) {
         // Too many result columns for the destination; the error is
         // reported later.
@@ -857,14 +851,12 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     const out_ex = s.e_list.?.slice();
     const n_key: i32 = @as(i32, @intCast(order_by.len())) - sort.n_ob_sat;
 
-    var addr_explain: i32 = undefined;
-    if (sort.n_ob_sat == 0 or n_key == 1) {
-        addr_explain = aux.explain(p, false, "USE TEMP B-TREE FOR {s}ORDER BY", .{if (sort.n_ob_sat != 0) "LAST TERM OF " else ""});
-    } else {
-        addr_explain = aux.explain(p, false, "USE TEMP B-TREE FOR LAST {d} TERMS OF ORDER BY", .{n_key});
-    }
+    const addr_explain = if (sort.n_ob_sat == 0 or n_key == 1)
+        aux.explain(p, false, "USE TEMP B-TREE FOR {s}ORDER BY", .{if (sort.n_ob_sat != 0) "LAST TERM OF " else ""})
+    else
+        aux.explain(p, false, "USE TEMP B-TREE FOR LAST {d} TERMS OF ORDER BY", .{n_key});
     aux.scanStatusRange(v, addr_explain, sort.addr_push.int(), sort.addr_push_end.int());
-    aux.scanStatusCounters(v, addr_explain, addr_explain, sort.addr_push.int());
+    aux.scanStatusCounters(v, addr_explain, addr_explain.int(), sort.addr_push.int());
     if (sort.label_bk_out) |bk_out| {
         _ = aux.emit(v, .Gosub, .{ sort.reg_return, bk_out });
         _ = aux.emit(v, .Goto, .{ 0, done });
@@ -892,10 +884,8 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     var addr: Addr = undefined;
     var b_seq: i32 = undefined;
     if (sort.sort_flags & SORTFLAG_UseSorter != 0) {
-        p.n_mem += 1;
-        const sort_out: Reg = .from(p.n_mem);
-        sort_tab = .from(p.n_tab);
-        p.n_tab += 1;
+        const sort_out = p.newReg();
+        sort_tab = p.newCursor();
         if (sort.label_bk_out != null) once = aux.emit(v, .Once, .{});
         _ = aux.emit(v, .OpenPseudo, .{ sort_tab, sort_out, n_key + 1 + n_column });
         if (once) |a| aux.landHere(v, a);
@@ -925,7 +915,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         }
         _ = aux.emit(v, .Column, .{ sort_tab, i_read, row.at(i) });
     }
-    aux.scanStatusRange(v, addr_explain, addr_explain, -1);
+    aux.scanStatusRange(v, addr_explain, addr_explain.int(), -1);
     switch (e_dest) {
         SRT.Table, SRT.EphemTab => {
             const out: Cursor = .from(i_parm);
@@ -1290,8 +1280,7 @@ fn computeLimitRegisters(p: *Parse, s: *Select, break_to: Label) void {
     if (s.i_limit != 0) return;
     const limit = s.limit orelse return;
     std.debug.assert(limit.op == TK.LIMIT);
-    p.n_mem += 1;
-    const limit_reg: Reg = .from(p.n_mem);
+    const limit_reg = p.newReg();
     s.i_limit = limit_reg.int();
     const v = build.getVdbe(p).?;
     if (expr_mod.isInteger(limit.left, p, false)) |n| {
@@ -1310,10 +1299,8 @@ fn computeLimitRegisters(p: *Parse, s: *Select, break_to: Label) void {
     }
     if (limit.right) |off| {
         // The OFFSET counter, and LIMIT+OFFSET in the register after it.
-        p.n_mem += 1;
-        const offset_reg: Reg = .from(p.n_mem);
+        const offset_reg = p.newRegs(2);
         s.i_offset = offset_reg.int();
-        p.n_mem += 1;
         ec.exprCode(p, off, offset_reg);
         _ = aux.emit(v, .MustBeInt, .{offset_reg});
         @import("main.zig").mayAbort(p);
@@ -1401,20 +1388,17 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
 
     // Cursors for Queue and Distinct; Distinct must be Queue+1 for
     // SRT_DistFifo and SRT_DistQueue.
-    const queue: Cursor = .from(p.n_tab);
-    p.n_tab += 1;
+    const queue = p.newCursor();
     var e_dest: SRT = undefined;
     if (s.op == TK.UNION) {
         e_dest = if (order_by != null) SRT.DistQueue else SRT.DistFifo;
-        distinct = .from(p.n_tab);
-        p.n_tab += 1;
+        distinct = p.newCursor();
     } else {
         e_dest = if (order_by != null) SRT.Queue else SRT.Fifo;
     }
     var dest_queue = selectDestInit(e_dest, queue.int());
 
-    p.n_mem += 1;
-    const reg_current: Reg = .from(p.n_mem);
+    const reg_current = p.newReg();
     _ = aux.emit(v, .OpenPseudo, .{ current, reg_current, n_col });
     if (order_by) |ob| {
         const ki = multiSelectByMergeKeyInfo(p, s, 1);
@@ -1752,8 +1736,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     var key_dup: ?*KeyInfo = null;
     if (op != TK.ALL) {
         const n_expr = s.e_list.?.len();
-        reg_prev = .from(p.n_mem + 1);
-        p.n_mem += @as(i32, @intCast(n_expr)) + 1;
+        reg_prev = p.newRegs(@as(i32, @intCast(n_expr)) + 1);
         _ = aux.emit(v, .Integer, .{ 0, reg_prev });
         key_dup = keyInfoAlloc(p, n_expr, 1);
         if (key_dup) |k| {
@@ -1788,23 +1771,17 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     var reg_limit_a: Reg = .none;
     var reg_limit_b: Reg = .none;
     if (s.i_limit != 0 and (op == TK.ALL or unionWithLimitOne(db, s))) {
-        p.n_mem += 1;
-        reg_limit_a = .from(p.n_mem);
-        p.n_mem += 1;
-        reg_limit_b = .from(p.n_mem);
+        reg_limit_a = p.newReg();
+        reg_limit_b = p.newReg();
         _ = aux.emit(v, .Copy, .{ Reg.from(if (s.i_offset != 0) s.i_offset + 1 else s.i_limit), reg_limit_a });
         _ = aux.emit(v, .Copy, .{ reg_limit_a, reg_limit_b });
     }
     s.limit = null;
 
-    p.n_mem += 1;
-    const reg_addr_a: Reg = .from(p.n_mem);
-    p.n_mem += 1;
-    const reg_addr_b: Reg = .from(p.n_mem);
-    p.n_mem += 1;
-    const reg_out_a: Reg = .from(p.n_mem);
-    p.n_mem += 1;
-    const reg_out_b: Reg = .from(p.n_mem);
+    const reg_addr_a = p.newReg();
+    const reg_addr_b = p.newReg();
+    const reg_out_a = p.newReg();
+    const reg_out_b = p.newReg();
     var dest_a = selectDestInit(SRT.Coroutine, reg_addr_a.int());
     var dest_b = selectDestInit(SRT.Coroutine, reg_addr_b.int());
 
@@ -1816,7 +1793,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     prior.i_limit = reg_limit_a.int();
     _ = aux.explain(p, true, "LEFT", .{});
     select(p, prior, &dest_a) catch {};
-    aux.endCoroutine(v, reg_addr_a.int());
+    aux.endCoroutine(v, reg_addr_a);
     aux.landHere(v, addr1);
 
     // Co-routine B: the query on the right.
@@ -1830,7 +1807,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     select(p, s, &dest_b) catch {};
     s.i_limit = saved_limit;
     s.i_offset = saved_offset;
-    aux.endCoroutine(v, reg_addr_b.int());
+    aux.endCoroutine(v, reg_addr_b);
 
     // Output a row of A, or of B (the latter only for UNION [ALL]).
     const addr_out_a = generateOutputSubroutine(p, s, &dest_a, dest, reg_out_a, reg_prev, key_dup, label_end);
@@ -2046,8 +2023,7 @@ fn srclistRenumberCursors(p: *Parse, csr_map: []i32, src: *SrcList, i_except: i3
         std.debug.assert(item.i_cursor < csr_map[0]);
         const k: usize = @intCast(item.i_cursor + 1);
         if (!item.fg.is_recursive or csr_map[k] == 0) {
-            csr_map[k] = p.n_tab;
-            p.n_tab += 1;
+            csr_map[k] = p.newCursor().int();
         }
         item.i_cursor = csr_map[k];
         if (item.fg.is_subquery) {
@@ -2799,8 +2775,7 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
                 }
                 rec_term.sel_flags.Recursive = true;
                 if (i_rec_tab < 0) {
-                    i_rec_tab = p.n_tab;
-                    p.n_tab += 1;
+                    i_rec_tab = p.newCursor().int();
                 }
                 item.i_cursor = i_rec_tab;
             }
@@ -2913,8 +2888,7 @@ pub fn srcListAssignCursors(p: *Parse, list: ?*SrcList) void {
     const l = list orelse return;
     for (l.slice()) |*item| {
         if (item.i_cursor >= 0) continue;
-        item.i_cursor = p.n_tab;
-        p.n_tab += 1;
+        item.i_cursor = p.newCursor().int();
         if (item.fg.is_subquery) srcListAssignCursors(p, item.u4.subq.?.select.src);
     }
 }
@@ -3254,8 +3228,7 @@ fn aggregateConvertIndexedExprRefToColumn(agg: *AggInfo) void {
 /// Port of assignAggregateRegisters(): one register per AggInfo column
 /// and function.
 fn assignAggregateRegisters(p: *Parse, agg: *AggInfo) void {
-    agg.i_first_reg = p.n_mem + 1;
-    p.n_mem += @intCast(agg.cols.items.len + agg.funcs.items.len);
+    agg.i_first_reg = p.newRegs(@intCast(agg.cols.items.len + agg.funcs.items.len)).int();
 }
 
 /// Port of resetAccumulator(): code NULLs into the accumulators, and open
@@ -3358,8 +3331,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
                 // The "magnet" register: populate the accumulators on the
                 // first row even if the FILTER skips min() or max().
                 if (reg_hit.isNone()) {
-                    p.n_mem += 1;
-                    reg_hit = .from(p.n_mem);
+                    reg_hit = p.newReg();
                 }
                 _ = aux.emit(v, .Copy, .{ reg_acc, reg_hit });
             }
@@ -3422,8 +3394,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
                     c = expr_mod.collSeq(p, item.expr);
                 }
                 if (reg_hit.isNone() and agg.n_accumulator != 0) {
-                    p.n_mem += 1;
-                    reg_hit = .from(p.n_mem);
+                    reg_hit = p.newReg();
                 }
                 _ = aux.emit4(v, .CollSeq, .{reg_hit}, .{ .collseq = c orelse coll_mod.dfltColl(p.db) });
             }
@@ -3442,7 +3413,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
         if (p.n_err != 0) return;
     }
     agg.direct_mode = false;
-    if (addr_hit_test) |a| aux.jumpHereOrPopInst(v, a.int());
+    if (addr_hit_test) |a| aux.jumpHereOrPopInst(v, a);
 }
 
 /// Walker callback of havingToWhere(): descend through AND nodes; move any
@@ -3955,8 +3926,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
         if (fromClauseTermCanBeCoroutine(p, tab_list, i, s.sel_flags)) {
             // A co-routine returning one row per call.
             const addr_top = aux.here(v).plus(1);
-            p.n_mem += 1;
-            const reg_return: Reg = .from(p.n_mem);
+            const reg_return = p.newReg();
             subq.reg_return = reg_return.int();
             const addr_init = aux.emit(v, .InitCoroutine, .{ reg_return, 0, addr_top });
             subq.addr_fill_sub = addr_top.int();
@@ -3966,7 +3936,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             item.fg.via_coroutine = true;
             subq.reg_result = d.i_sdst;
-            aux.endCoroutine(v, subq.reg_return);
+            aux.endCoroutine(v, .from(subq.reg_return));
             subq.xq_end = aux.currentAddr(v);
             aux.landHere(v, addr_init);
             expr_mod.clearTempRegCache(p);
@@ -3985,8 +3955,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             sub.n_select_row = prior_subq.select.n_select_row;
         } else {
             // Materialize, in a subroutine that later uses can call.
-            p.n_mem += 1;
-            const reg_return: Reg = .from(p.n_mem);
+            const reg_return = p.newReg();
             subq.reg_return = reg_return.int();
             const top_addr = aux.emit(v, .Goto, .{});
             subq.addr_fill_sub = top_addr.plus(1).int();
@@ -4000,7 +3969,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             if (once) |a| aux.landHere(v, a);
             // P2, a number to OP_Return, is where the subroutine starts.
             _ = aux.emit(v, .Return, .{ reg_return, top_addr.plus(1).int() });
-            aux.scanStatusRange(v, addr_explain, addr_explain, -1);
+            aux.scanStatusRange(v, addr_explain, addr_explain.int(), -1);
             aux.landHere(v, top_addr);
             expr_mod.clearTempRegCache(p);
             if (item.fg.is_cte and !item.fg.is_correlated) {
@@ -4041,8 +4010,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
     // The sorter of the ORDER BY (made a no-op if rows come out sorted).
     if (sort.order_by) |ob| {
         const ki = keyInfoFromExprList(p, ob, 0, e_list.len());
-        sort.cursor = .from(p.n_tab);
-        p.n_tab += 1;
+        sort.cursor = p.newCursor();
         sort.addr_sort_index = aux.emit4(v, .OpenEphemeral, .{ sort.cursor, ob.len() + 1 + e_list.len() }, if (ki) |k| .{ .keyinfo = k } else .notused);
     }
 
@@ -4066,15 +4034,14 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
     if (!s.sel_flags.FixedLimit) s.n_select_row = 320;
     if (s.limit != null) computeLimitRegisters(p, s, end);
     if (s.i_limit == 0 and sort.addr_sort_index != null) {
-        aux.changeOpcode(v, sort.addr_sort_index.?.int(), OP.SorterOpen);
+        aux.changeOpcode(v, sort.addr_sort_index.?, OP.SorterOpen);
         sort.sort_flags |= SORTFLAG_UseSorter;
     }
 
     // The table of DISTINCT.
     if (s.sel_flags.Distinct) {
-        const tab: Cursor = .from(p.n_tab);
+        const tab = p.newCursor();
         distinct.tab_tnct = tab;
-        p.n_tab += 1;
         const ki = keyInfoFromExprList(p, s.e_list.?, 0, 0);
         distinct.addr_tnct = aux.emit4(v, .OpenEphemeral, .{tab}, if (ki) |k| .{ .keyinfo = k } else .notused);
         aux.changeP5(v, BTREE_UNORDERED);
@@ -4103,14 +4070,13 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             if (sort.n_ob_sat == ob.len()) sort.order_by = null;
         }
         // An unneeded sorter.
-        if (sort.addr_sort_index != null and sort.order_by == null) _ = aux.changeToNoop(v, sort.addr_sort_index.?.int());
+        if (sort.addr_sort_index != null and sort.order_by == null) _ = aux.changeToNoop(v, sort.addr_sort_index.?);
 
         if (win != null) {
             const addr_gosub = aux.newLabel(p);
             const cont = aux.newLabel(p);
             const brk = aux.newLabel(p);
-            p.n_mem += 1;
-            const reg_gosub: Reg = .from(p.n_mem);
+            const reg_gosub = p.newReg();
 
             window.windowCodeStep(p, s, w, reg_gosub.int(), addr_gosub.int());
 
@@ -4179,31 +4145,24 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             }
 
             // The sorter of the GROUP BY (made a no-op if not needed).
-            const sorting_idx: Cursor = .from(p.n_tab);
+            const sorting_idx = p.newCursor();
             agg.sorting_idx = sorting_idx.int();
-            p.n_tab += 1;
             const key_info = keyInfoFromExprList(p, gb, 0, agg.cols.items.len);
             const addr_sorting_idx = aux.emit4(v, .SorterOpen, .{ sorting_idx, agg.n_sorting_column }, if (key_info) |k| .{ .keyinfo = k } else .notused);
 
             // Flags: a row of the group was seen; the LIMIT was reached.
-            p.n_mem += 1;
-            const use_flag: Reg = .from(p.n_mem);
-            p.n_mem += 1;
-            const abort_flag: Reg = .from(p.n_mem);
+            const use_flag = p.newReg();
+            const abort_flag = p.newReg();
             // The subroutines outputting a group and resetting the
             // accumulators, with their return addresses.
-            p.n_mem += 1;
-            const reg_output_row: Reg = .from(p.n_mem);
+            const reg_output_row = p.newReg();
             const output_row = aux.newLabel(p);
-            p.n_mem += 1;
-            const reg_reset: Reg = .from(p.n_mem);
+            const reg_reset = p.newReg();
             const reset = aux.newLabel(p);
             // The GROUP BY terms of the previous row and of this one.
             const n_gb: i32 = @intCast(gb.len());
-            const a_mem: Reg = .from(p.n_mem + 1);
-            p.n_mem += n_gb;
-            const b_mem: Reg = .from(p.n_mem + 1);
-            p.n_mem += n_gb;
+            const a_mem = p.newRegs(n_gb);
+            const b_mem = p.newRegs(n_gb);
             _ = aux.emit(v, .Integer, .{ 0, abort_flag });
             _ = aux.emit(v, .Null, .{ 0, a_mem, a_mem.at(n_gb - 1) });
             ec.nullRegisterRange(p, a_mem, n_gb);
@@ -4256,9 +4215,8 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 expr_mod.releaseTempReg(p, reg_record);
                 expr_mod.releaseTempRange(p, reg_base, n_col);
                 where_mod.whereEnd(w);
-                sort_ptab = .from(p.n_tab);
+                sort_ptab = p.newCursor();
                 agg.sorting_idx_ptab = sort_ptab.int();
-                p.n_tab += 1;
                 sort_out = expr_mod.getTempReg(p);
                 aux.scanStatusCounters(v, addr_exp, aux.currentAddr(v), 0);
                 _ = aux.emit(v, .OpenPseudo, .{ sort_ptab, sort_out, n_col });
@@ -4275,7 +4233,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             // Rows already in ORDER BY order need no sorter.
             if (order_by_grp and !db.optDisabled(int.OPT.GroupByOrder) and (group_by_sort or where_mod.isSorted(w))) {
                 sort.order_by = null;
-                _ = aux.changeToNoop(v, sort.addr_sort_index.?.int());
+                _ = aux.changeToNoop(v, sort.addr_sort_index.?);
             }
 
             // The current GROUP BY terms go to b0, b1, ...; compare with the
@@ -4324,7 +4282,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 _ = aux.emit(v, .SorterNext, .{ sorting_idx, addr_top_of_loop });
             } else {
                 where_mod.whereEnd(w);
-                _ = aux.changeToNoop(v, addr_sorting_idx.int());
+                _ = aux.changeToNoop(v, addr_sorting_idx);
             }
 
             // Output the last group.
@@ -4361,8 +4319,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 // "SELECT count(*) FROM <tbl>": OP_Count on the table or
                 // its smallest index.
                 const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
-                const csr: Cursor = .from(p.n_tab);
-                p.n_tab += 1;
+                const csr = p.newCursor();
                 var key_info: ?*KeyInfo = null;
                 var best: ?*Index = null;
                 var i_root = t.tnum;
@@ -4384,7 +4341,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                     key_info = build.keyInfoOfIndex(p, b);
                 }
                 _ = aux.emitInt(v, .OpenRead, .{ csr, i_root, i_db }, 1);
-                if (key_info) |k| aux.changeP4(v, -1, .{ .keyinfo = k });
+                if (key_info) |k| aux.changeP4(v, null, .{ .keyinfo = k });
                 assignAggregateRegisters(p, agg);
                 _ = aux.emit(v, .Count, .{ csr, Reg.from(agg.funcReg(0)) });
                 _ = aux.emit(v, .Close, .{csr});
@@ -4402,8 +4359,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                         if (f.func.?.func_flags.NEEDCOLL) break true;
                     } else false;
                     if (!has_minmax) {
-                        p.n_mem += 1;
-                        reg_acc = .from(p.n_mem);
+                        reg_acc = p.newReg();
                         _ = aux.emit(v, .Integer, .{ 0, reg_acc });
                     }
                 } else if (agg.funcs.items.len == 1 and agg.funcs.items[0].i_distinct >= 0) {

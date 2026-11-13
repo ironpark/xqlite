@@ -113,7 +113,7 @@ fn codeCompare(p: *Parse, left: *Expr, right: *Expr, opcode: u8, in1: Reg, in2: 
         expr_mod.binaryCompareCollSeq(p, left, right);
     const p5 = expr_mod.binaryCompareP5(left, right, jump_if_null);
     const addr = aux.emitAny(vdbe(p), OP.fromTk(opcode), .{ .reg, .jump, .reg }, .{ in2, dest, in1 });
-    aux.changeP4(vdbe(p), addr.int(), if (p4) |c| .{ .collseq = c } else .notused);
+    aux.changeP4(vdbe(p), addr, if (p4) |c| .{ .collseq = c } else .notused);
     aux.changeP5(vdbe(p), p5);
 }
 
@@ -284,8 +284,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
     var e_type: ?IN_INDEX = null;
     const must_be_unique = in_flags & IN_INDEX_LOOP != 0;
     // The cursor of the b-tree; none if there is no b-tree (IN_INDEX.NOOP).
-    var tab_cur: ?Cursor = .from(p.n_tab);
-    p.n_tab += 1;
+    var tab_cur: ?Cursor = p.newCursor();
     const v = build.getVdbe(p).?;
 
     // NULLs are impossible if no result column can be NULL.
@@ -360,8 +359,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
                         aux.setP4KeyInfo(p, idx);
                         e_type = if (idx.sort_order[0] == int.SortOrder.desc) .INDEX_DESC else .INDEX_ASC;
                         if (rhs_has_null) |r| {
-                            p.n_mem += 1;
-                            r.* = p.n_mem;
+                            r.* = p.newReg().int();
                             if (n_expr == 1) setHasNullFlag(v, tab_cur.?, .from(r.*), idx.sort_order[0]);
                         }
                         aux.landHere(v, addr);
@@ -389,8 +387,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
         if (in_flags & IN_INDEX_LOOP != 0) {
             p.n_query_loop = 0;
         } else if (rhs_has_null) |r| {
-            p.n_mem += 1;
-            r_may_have_null = .from(p.n_mem);
+            r_may_have_null = p.newReg();
             r.* = r_may_have_null.int();
         }
         if (!bloom_ok and x.useXSelect() and x.x.select.?.sel_flags.ClonedRhsIn) bloom_ok = true;
@@ -473,15 +470,14 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
         }
         // Begin the subroutine.
         e.flags.Subrtn = true;
-        p.n_mem += 1;
-        e.y = .{ .sub = .{ .reg_return = p.n_mem, .addr = 0 } };
+        e.y = .{ .sub = .{ .reg_return = p.newReg().int(), .addr = 0 } };
         e.y.sub.addr = aux.emit(v, .BeginSubrtn, .{ 0, Reg.from(e.y.sub.reg_return) }).plus(1).int();
         if (sig) |s| {
             s.complete = false;
             s.i_addr = e.y.sub.addr;
             s.reg_return = e.y.sub.reg_return;
             s.i_table = tab_cur.int();
-            aux.changeP4(v, -1, .{ .subrtnsig = s });
+            aux.changeP4(v, null, .{ .subrtnsig = s });
         }
         addr_once = aux.emit(v, .Once, .{});
     }
@@ -513,11 +509,10 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
             // The OP_Blob that makes the Bloom filter, if there is one.
             var addr_bloom: ?Addr = null;
             if (addr_once != null and allow_bloom and !p.db.optDisabled(int.OPT.BloomFilter)) {
-                p.n_mem += 1;
-                const reg_bloom: Reg = .from(p.n_mem);
+                const reg_bloom = p.newReg();
                 addr_bloom = aux.emit(v, .Blob, .{ 10000, reg_bloom });
                 dest.i_sd_parm2 = reg_bloom.int();
-                aux.changeP4(v, addr.int(), .{ .keyinfo = key_info });
+                aux.changeP4(v, addr, .{ .keyinfo = key_info });
                 key_info_opt = null;
             }
             const copy = expr_mod.selectDup(p.arena, sel) catch {
@@ -527,8 +522,8 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
             const rc = select_mod.select(p, copy.?, &dest);
             if (addr_bloom) |bloom| {
                 // The Bloom filter's register goes in P3 of the OP_Once.
-                aux.getOp(v, addr_once.?.int()).p3 = dest.i_sd_parm2;
-                if (dest.i_sd_parm2 == 0) aux.getOp(v, bloom.int()).p1 = 10;
+                aux.getOp(v, addr_once.?).p3 = dest.i_sd_parm2;
+                if (dest.i_sd_parm2 == 0) aux.getOp(v, bloom).p1 = 10;
             }
             rc catch return;
         }
@@ -549,8 +544,8 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
             const e2 = item.expr.?;
             // A non-constant value must be recomputed each time.
             if (addr_once) |once| if (!expr_mod.isConstant(p, e2)) {
-                _ = aux.changeToNoop(v, once.plus(-1).int());
-                _ = aux.changeToNoop(v, once.int());
+                _ = aux.changeToNoop(v, once.plus(-1));
+                _ = aux.changeToNoop(v, once);
                 e.flags.Subrtn = false;
                 addr_once = null;
             };
@@ -562,7 +557,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
         releaseTempReg(p, r2);
     }
     if (sig) |s| s.complete = true;
-    if (key_info_opt) |k| aux.changeP4(v, addr.int(), .{ .keyinfo = k });
+    if (key_info_opt) |k| aux.changeP4(v, addr, .{ .keyinfo = k });
     if (addr_once) |once| {
         _ = aux.emit(v, .NullRow, .{tab_cur});
         aux.landHere(v, once);
@@ -589,27 +584,24 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
 
     // Begin the subroutine.
     e.flags.Subrtn = true;
-    p.n_mem += 1;
-    e.y = .{ .sub = .{ .reg_return = p.n_mem, .addr = 0 } };
+    e.y = .{ .sub = .{ .reg_return = p.newReg().int(), .addr = 0 } };
     e.y.sub.addr = aux.emit(v, .BeginSubrtn, .{ 0, Reg.from(e.y.sub.reg_return) }).plus(1).int();
 
     // An uncorrelated subquery runs once.
     const addr_once: ?Addr = if (!e.flags.VarSelect) aux.emit(v, .Once, .{}) else null;
     const addr_explain = aux.explain(p, true, "{s}SCALAR SUBQUERY {d}", .{ if (addr_once != null) "" else "CORRELATED ", sel.sel_id });
-    aux.scanStatusCounters(v, addr_explain, addr_explain, -1);
+    aux.scanStatusCounters(v, addr_explain, addr_explain.int(), -1);
 
     // The first row of a SELECT goes into registers; EXISTS leaves 0 or 1.
     // Either way the query gets LIMIT 1.
     const n_reg: i32 = if (e.op == TK.SELECT) @intCast(sel.e_list.?.len()) else 1;
-    var dest = select_mod.selectDestInit(undefined, p.n_mem + 1); // e_dest set below (0 in C)
-    p.n_mem += n_reg;
+    var dest = select_mod.selectDestInit(undefined, p.newRegs(n_reg).int()); // e_dest set below (0 in C)
     if (e.op == TK.SELECT) {
         dest.e_dest = SRT.Mem;
         if (sel.sel_flags.Distinct and sel.limit != null and sel.limit.?.right != null) {
             // With DISTINCT and OFFSET, results are copied over only
             // after the OFFSET.
-            dest.i_sdst = p.n_mem + 1;
-            p.n_mem += n_reg;
+            dest.i_sdst = p.newRegs(n_reg).int();
         } else {
             dest.i_sdst = dest.i_sd_parm;
         }
@@ -640,7 +632,7 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
     const r_reg: Reg = .from(dest.i_sd_parm);
     e.i_table = r_reg.int();
     if (addr_once) |once| aux.landHere(v, once);
-    aux.scanStatusRange(v, addr_explain, addr_explain, -1);
+    aux.scanStatusRange(v, addr_explain, addr_explain.int(), -1);
 
     if (dest.e_dest == SRT.Mem and canReturnSubtype(p, sel.e_list.?.at(0).expr)) {
         _ = aux.emit(v, .ClrSubtype, .{r_reg});
@@ -784,7 +776,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
         if (dest_if_false == dest_if_null) {
             // Steps 3 and 5 together.
             if (e.flags.Subrtn) {
-                const op = aux.getOp(v, e.y.sub.addr);
+                const op = aux.getOp(v, .from(e.y.sub.addr));
                 if (op.p3 > 0) {
                     _ = aux.emitInt(v, .Filter, .{ Reg.from(op.p3), dest_if_false, r_lhs }, @intCast(n_vector));
                 }
@@ -840,7 +832,7 @@ fn codeReal(v: *Vdbe, z: [:0]const u8, negate: bool, mem: Reg) void {
     var value: f64 = 0;
     _ = numeric.atoF(z.ptr, &value);
     if (negate) value = -value;
-    _ = aux.addDouble(v, mem.int(), value);
+    _ = aux.addDouble(v, mem, value);
 }
 
 /// Port of codeInteger(): load an integer literal; too large ones become
@@ -865,7 +857,7 @@ fn codeInteger(p: *Parse, e: *Expr, neg: bool, mem: Reg) void {
         }
     } else {
         if (neg) value = if (c == .min_magnitude) std.math.minInt(i64) else -value;
-        _ = aux.addInt64(v, mem.int(), value);
+        _ = aux.addInt64(v, mem, value);
     }
 }
 
@@ -962,8 +954,7 @@ fn exprCodeVector(p: *Parse, e: *Expr, freeable: *Reg) Reg {
     if (n_result == 1) return codeTemp(p, e, freeable);
     freeable.* = .none;
     if (e.op == TK.SELECT) return codeSubselect(p, e);
-    const result: Reg = .from(p.n_mem + 1);
-    p.n_mem += @intCast(n_result);
+    const result = p.newRegs(@intCast(n_result));
     for (e.x.list.?.slice(), 0..) |item, i| codeFactorable(p, item.expr, result.at(i));
     return result;
 }
@@ -1012,7 +1003,7 @@ fn codeInlineFunction(p: *Parse, farg: *ExprList, func_id: usize, target_arg: Re
         expr_mod.INLINEFUNC_affinity => {
             const names = [_][]const u8{ "blob", "text", "numeric", "integer", "real", "flexnum" };
             const aff = expr_mod.affinity(farg.at(0).expr.?);
-            _ = aux.loadString(v, target.int(), if (aff <= Aff.none) "none" else names[aff - Aff.blob]);
+            _ = aux.loadString(v, target, if (aff <= Aff.none) "none" else names[aff - Aff.blob]);
         },
         else => {
             // unlikely() and friends: the value of the first argument.
@@ -1149,7 +1140,7 @@ fn exprPartidxExprLookup(p: *Parse, e: *Expr, target: Reg) Reg {
         if (canReturnSubtype(p, ie.expr)) _ = aux.emit(v, .ClrSubtype, .{ret});
         if (addr) |a| {
             aux.landHere(v, a);
-            aux.changeP3(v, a.int(), ret.int());
+            aux.changeP3(v, a, ret.int());
         }
         return ret;
     }
@@ -1262,7 +1253,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                 return out;
             },
             TK.STRING => {
-                _ = aux.loadString(v, out.int(), e.token());
+                _ = aux.loadString(v, out, e.token());
                 return out;
             },
             TK.NULLS => {
@@ -1600,8 +1591,7 @@ fn codeFunction(p: *Parse, e: *Expr, out: Reg) Reg {
     var r1: Reg = .none;
     if (farg) |f| {
         if (const_mask != 0) {
-            r1 = .from(p.n_mem + 1);
-            p.n_mem += @intCast(n_farg);
+            r1 = p.newRegs(@intCast(n_farg));
         } else {
             r1 = getTempRange(p, @intCast(n_farg));
         }
@@ -1630,7 +1620,7 @@ fn codeFunction(p: *Parse, e: *Expr, out: Reg) Reg {
     if (def.func_flags.NEEDCOLL) {
         _ = aux.emit4(v, .CollSeq, .{}, .{ .collseq = coll orelse coll_mod.dfltColl(p.db) });
     }
-    _ = aux.addFunctionCall(p, @bitCast(const_mask), r1.int(), out.int(), @intCast(n_farg), def, e.op2);
+    _ = aux.addFunctionCall(p, @bitCast(const_mask), r1, out, @intCast(n_farg), def, e.op2);
     if (n_farg != 0 and const_mask == 0) releaseTempRange(p, r1, @intCast(n_farg));
     return out;
 }
@@ -1658,8 +1648,7 @@ pub fn codeRunJustOnce(p: *Parse, e_arg: ?*Expr, dest: ?Reg) Reg {
         p.ok_const_factor = false;
         if (!p.db.malloc_failed) {
             if (reg_dest == null) {
-                p.n_mem += 1;
-                reg_dest = .from(p.n_mem);
+                reg_dest = p.newReg();
             }
             exprCode(p, e, reg_dest.?);
         }
@@ -1673,8 +1662,7 @@ pub fn codeRunJustOnce(p: *Parse, e_arg: ?*Expr, dest: ?Reg) Reg {
         const item = list.last();
         item.fg.reusable = dest == null;
         if (reg_dest == null) {
-            p.n_mem += 1;
-            reg_dest = .from(p.n_mem);
+            reg_dest = p.newReg();
         }
         item.u = .{ .const_expr_reg = reg_dest.?.int() };
         p.const_expr = list;
@@ -1859,14 +1847,14 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) voi
                 }
                 codeCompare(p, e.left.?, e.right.?, op, r1, r2, to, jump_if_null, e.flags.Commuted);
                 if (addr_is_null) |a| {
-                    if (jump_if_null != 0) aux.changeP2(v, a.int(), to.int()) else aux.landHere(v, a);
+                    if (jump_if_null != 0) aux.changeP2(v, a, to.int()) else aux.landHere(v, a);
                 }
                 return;
             }
         },
         TK.ISNULL, TK.NOTNULL => {
             const r1: Reg = codeTemp(p, e.left, &reg_free1);
-            if (!reg_free1.isNone()) aux.typeofColumn(v, r1.int());
+            if (!reg_free1.isNone()) aux.typeofColumn(v, r1);
             _ = aux.emitAny(v, OP.fromTk(op), .{ .reg, .jump, .int }, .{ r1, to });
             return;
         },
@@ -1952,14 +1940,14 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) vo
                 }
                 codeCompare(p, e.left.?, e.right.?, op, r1, r2, to, jump_if_null, e.flags.Commuted);
                 if (addr_is_null) |a| {
-                    if (jump_if_null != 0) aux.changeP2(v, a.int(), to.int()) else aux.landHere(v, a);
+                    if (jump_if_null != 0) aux.changeP2(v, a, to.int()) else aux.landHere(v, a);
                 }
                 return;
             }
         },
         TK.ISNULL, TK.NOTNULL => {
             const r1: Reg = codeTemp(p, e.left, &reg_free1);
-            if (!reg_free1.isNone()) aux.typeofColumn(v, r1.int());
+            if (!reg_free1.isNone()) aux.typeofColumn(v, r1);
             _ = aux.emitAny(v, OP.fromTk(op), .{ .reg, .jump, .int }, .{ r1, to });
             return;
         },

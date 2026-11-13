@@ -150,9 +150,8 @@ fn endTransaction(p: *int.Parse, rollback: bool) void {
 fn autocommitRegister(p: *int.Parse) ?Reg {
     const defs = dialect.engineFunctionSearch("xq_ora_autocommit");
     if (defs.len == 0) return null;
-    p.n_mem += 1;
-    const r: Reg = .from(p.n_mem);
-    _ = aux.addFunctionCall(p, 0, 0, r.int(), 0, &defs[0], 0);
+    const r = p.newReg();
+    _ = aux.addFunctionCall(p, 0, .none, r, 0, &defs[0], 0);
     return r;
 }
 

@@ -1652,8 +1652,7 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
                     };
                     if (e.left != null and !item.func.?.func_flags.NEEDCOLL) {
                         // ORDER BY in an aggregate (ignored for min/max).
-                        item.i_ob_tab = p.n_tab;
-                        p.n_tab += 1;
+                        item.i_ob_tab = p.newCursor().int();
                         const ob = e.left.?.x.list.?;
                         if (ob.len() == 1 and n_arg == 1 and compare(null, ob.at(0).expr, e.x.list.?.at(0).expr, -1) == 0) {
                             item.b_ob_payload = false;
@@ -1666,8 +1665,7 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
                         item.i_ob_tab = -1;
                     }
                     if (e.flags.Distinct and !item.b_ob_unique) {
-                        item.i_distinct = p.n_tab;
-                        p.n_tab += 1;
+                        item.i_distinct = p.newCursor().int();
                     } else {
                         item.i_distinct = -1;
                     }
@@ -1750,10 +1748,7 @@ pub fn aggInfoPersistWalker(p: *Parse) Walker {
 /// Port of sqlite3GetTempReg(): a register for a value that is not
 /// needed for long.
 pub fn getTempReg(p: *Parse) Reg {
-    if (p.n_temp_reg == 0) {
-        p.n_mem += 1;
-        return .from(p.n_mem);
-    }
+    if (p.n_temp_reg == 0) return p.newReg();
     p.n_temp_reg -= 1;
     return .from(p.temp_regs[p.n_temp_reg]);
 }
@@ -1771,15 +1766,11 @@ pub fn releaseTempReg(p: *Parse, reg: Reg) void {
 /// row.
 pub fn getTempRange(p: *Parse, n_reg: i32) Reg {
     if (n_reg == 1) return getTempReg(p);
-    var i = p.i_range_reg;
-    if (n_reg <= p.n_range_reg) {
-        p.i_range_reg += n_reg;
-        p.n_range_reg -= n_reg;
-    } else {
-        i = p.n_mem + 1;
-        p.n_mem += n_reg;
-    }
-    return .from(i);
+    if (n_reg > p.n_range_reg) return p.newRegs(n_reg);
+    const first: Reg = .from(p.i_range_reg);
+    p.i_range_reg += n_reg;
+    p.n_range_reg -= n_reg;
+    return first;
 }
 
 /// Port of sqlite3ReleaseTempRange().
@@ -1799,8 +1790,8 @@ pub fn clearTempRegCache(p: *Parse) void {
 }
 
 /// Port of sqlite3TouchRegister().
-pub fn touchRegister(p: *Parse, reg: i32) void {
-    if (p.n_mem < reg) p.n_mem = reg;
+pub fn touchRegister(p: *Parse, reg: Reg) void {
+    if (p.n_mem < reg.int()) p.n_mem = reg.int();
 }
 
 /// Port of sqlite3SubselectError().

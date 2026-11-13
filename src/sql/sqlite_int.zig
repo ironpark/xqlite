@@ -13,6 +13,8 @@ const flags = @import("xqlite_base").flags;
 const thunk = @import("xqlite_base").thunk;
 
 pub const TK = @import("tk.zig").TK;
+const Reg = @import("../vdbe/operand.zig").Reg;
+const Cursor = @import("../vdbe/operand.zig").Cursor;
 pub const Allocator = std.mem.Allocator;
 pub const Pgno = u32;
 
@@ -2132,6 +2134,31 @@ pub const Parse = struct {
 
     pub fn inDeclareVtab(p: *const Parse) bool {
         return p.e_parse_mode == .declare_vtab;
+    }
+
+    /// A new register (++pParse->nMem).
+    pub fn newReg(p: *Parse) Reg {
+        p.n_mem += 1;
+        return .from(p.n_mem);
+    }
+
+    /// The first of `n` new registers in a row.
+    pub fn newRegs(p: *Parse, n: i32) Reg {
+        const first: Reg = .from(p.n_mem + 1);
+        p.n_mem += n;
+        return first;
+    }
+
+    /// A new cursor (pParse->nTab++).
+    pub fn newCursor(p: *Parse) Cursor {
+        return p.newCursors(1);
+    }
+
+    /// The first of `n` new cursors in a row.
+    pub fn newCursors(p: *Parse, n: i32) Cursor {
+        const first: Cursor = .from(p.n_tab);
+        p.n_tab += n;
+        return first;
     }
 };
 

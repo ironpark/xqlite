@@ -183,8 +183,7 @@ pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, i_cur: i32) Oo
         } else {
             const pk = build.primaryKeyIndex(t).?;
             const n_pk: i32 = pk.n_key_col;
-            const pk_reg: Reg = .from(p.n_mem + 1);
-            p.n_mem += n_pk;
+            const pk_reg = p.newRegs(n_pk);
             for (0..pk.n_key_col) |i| {
                 std.debug.assert(pk.ai_column[i] >= 0);
                 const k = build.tableColumnToIndex(ix, pk.ai_column[i]);

@@ -1087,8 +1087,7 @@ pub fn columnIndex(t: *const Table, name: []const u8) i32 {
 
 /// Port of sqlite3ForceNotReadOnly(): make sqlite3_stmt_readonly() false.
 fn forceNotReadOnly(p: *Parse) void {
-    p.n_mem += 1;
-    const reg: Reg = .from(p.n_mem);
+    const reg = p.newReg();
     const v = getVdbe(p) orelse return;
     _ = aux.emit(v, .JournalMode, .{ 0, reg, -1 });
     aux.usesBtree(v, 0);
@@ -1189,12 +1188,9 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         const null_row = [_]u8{ 6, 0, 0, 0, 0, 0 };
         beginWriteOperation(p, true, i_db);
         if (is_virtual) _ = aux.emit(v, .VBegin, .{});
-        p.n_mem += 1;
-        const reg1: Reg = .from(p.n_mem);
-        p.n_mem += 1;
-        const reg2: Reg = .from(p.n_mem);
-        p.n_mem += 1;
-        const reg3: Reg = .from(p.n_mem);
+        const reg1 = p.newReg();
+        const reg2 = p.newReg();
+        const reg3 = p.newReg();
         p.u1 = .{ .cr = .{ .reg_rowid = reg1.int(), .reg_root = reg2.int() } };
         _ = aux.emit(v, .ReadCookie, .{ i_db, reg3, @backingInt(btree.Meta.file_format) });
         aux.usesBtree(v, @intCast(i_db));
@@ -1690,7 +1686,7 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
         t.tab_flags.HasNotNull = true;
     }
 
-    if (p.u1.cr.addr_cr_tab != 0) aux.changeP3(v.?, p.u1.cr.addr_cr_tab, BTREE_BLOBKEY);
+    if (p.u1.cr.addr_cr_tab != 0) aux.changeP3(v.?, .from(p.u1.cr.addr_cr_tab), BTREE_BLOBKEY);
 
     var pk: *Index = undefined;
     if (t.i_pkey >= 0) {
@@ -1730,7 +1726,7 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
     // Skip creating the PRIMARY KEY b-tree and its sqlite_schema row.
     if (v != null and pk.tnum > 0) {
         std.debug.assert(!db.init.busy);
-        aux.changeOpcode(v.?, @intCast(pk.tnum), OP.Goto);
+        aux.changeOpcode(v.?, .from(@intCast(pk.tnum)), OP.Goto);
     }
     pk.tnum = t.tnum;
 
@@ -2002,14 +1998,10 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
         p.n_err += 1;
         return;
     }
-    const csr: Cursor = .from(p.n_tab);
-    p.n_tab += 1;
-    p.n_mem += 1;
-    const reg_yield: Reg = .from(p.n_mem);
-    p.n_mem += 1;
-    const reg_rec: Reg = .from(p.n_mem);
-    p.n_mem += 1;
-    const reg_rowid: Reg = .from(p.n_mem);
+    const csr = p.newCursor();
+    const reg_yield = p.newReg();
+    const reg_rec = p.newReg();
+    const reg_rowid = p.newReg();
     main_mod.mayAbort(p);
     _ = aux.emit(v, .OpenWrite, .{ csr, p.u1.cr.reg_root, i_db });
     aux.changeP5(v, vi.OPFLAG.P2ISREG);
@@ -2025,7 +2017,7 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     var dest = select_mod.selectDestInit(select_mod.SRT.Coroutine, reg_yield.int());
     select_mod.select(p, sel, &dest) catch {};
     if (p.n_err != 0) return;
-    aux.endCoroutine(v, reg_yield.int());
+    aux.endCoroutine(v, reg_yield);
     aux.landHere(v, addr_top.plus(-1));
     const addr_ins_loop = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
     _ = aux.emit(v, .MakeRecord, .{ Reg.from(dest.i_sdst), dest.n_sdst, reg_rec });
@@ -2475,8 +2467,7 @@ fn createIndexImpl(
         } else if (t.hasRowid() or tbl_name != null) {
             // Code the index's b-tree and sqlite_schema row, unless this
             // is the PRIMARY KEY of a WITHOUT ROWID table.
-            p.n_mem += 1;
-            const root_reg: Reg = .from(p.n_mem);
+            const root_reg = p.newReg();
             const v = getVdbe(p) orelse return;
             beginWriteOperation(p, true, i_db);
 
@@ -2678,9 +2669,8 @@ fn viewResetAll(db: *Sqlite3, idx: usize) void {
 fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     const db = p.db;
     const t = idx.table;
-    const tab_cur: Cursor = .from(p.n_tab);
-    const idx_cur: Cursor = .from(p.n_tab + 1);
-    p.n_tab += 2;
+    const tab_cur = p.newCursors(2);
+    const idx_cur = tab_cur.at(1);
     const i_db: i32 = @intCast(prepare.schemaToIndex(db, idx.schema));
     if (auth.check(p, auth.Code.REINDEX, idx.name, null, db.dbs.items[@intCast(i_db)].name) != auth.OK) return;
     // A write lock on the table.
@@ -2691,8 +2681,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     const key_p4: vi.P4 = if (key) |k| .{ .keyinfo = k } else .notused;
 
     // The index records of all rows go to the sorter.
-    const sorter: Cursor = .from(p.n_tab);
-    p.n_tab += 1;
+    const sorter = p.newCursor();
     _ = aux.emit4(v, .SorterOpen, .{ sorter, 0, idx.n_key_col }, key_p4);
     insert_mod.openTable(p, tab_cur.int(), @intCast(i_db), t, OP.OpenRead);
     var addr1 = aux.emit(v, .Rewind, .{tab_cur});

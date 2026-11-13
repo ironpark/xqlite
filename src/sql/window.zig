@@ -834,8 +834,7 @@ pub fn windowRewrite(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
 
     // The cursor of the ephemeral table buffering rows (and three more
     // opened on it). It is opened later, once its width is known.
-    m_win.i_eph_csr = p.n_tab;
-    p.n_tab += 4;
+    m_win.i_eph_csr = p.newCursors(4).int();
 
     selectWindowRewriteEList(p, m_win, src, s.e_list, tab, &sublist);
     selectWindowRewriteEList(p, m_win, src, s.order_by, tab, &sublist);
@@ -862,10 +861,8 @@ pub fn windowRewrite(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
         if (win.filter) |filter| {
             sublist = try expr_mod.listAppend(p, sublist, try expr_mod.exprDup(p.arena, filter));
         }
-        p.n_mem += 1;
-        win.reg_accum = p.n_mem;
-        p.n_mem += 1;
-        win.reg_result = p.n_mem;
+        win.reg_accum = p.newReg().int();
+        win.reg_result = p.newReg().int();
         _ = aux.emit(v, .Null, .{ 0, Reg.from(win.reg_accum) });
     }
 
@@ -926,23 +923,18 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
     // Registers for the PARTITION BY values, set to NULL.
     if (m_win.partition) |part| {
         const n_expr: i32 = @intCast(part.len());
-        const reg_part: Reg = .from(p.n_mem + 1);
+        const reg_part = p.newRegs(n_expr);
         m_win.reg_part = reg_part.int();
-        p.n_mem += n_expr;
         _ = aux.emit(v, .Null, .{ 0, reg_part, reg_part.at(n_expr - 1) });
     }
 
-    p.n_mem += 1;
-    m_win.reg_one = p.n_mem;
+    m_win.reg_one = p.newReg().int();
     _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_one) });
 
     if (m_win.e_exclude != 0) {
-        p.n_mem += 1;
-        m_win.reg_start_rowid = p.n_mem;
-        p.n_mem += 1;
-        m_win.reg_end_rowid = p.n_mem;
-        m_win.csr_app = p.n_tab;
-        p.n_tab += 1;
+        m_win.reg_start_rowid = p.newReg().int();
+        m_win.reg_end_rowid = p.newReg().int();
+        m_win.csr_app = p.newCursor().int();
         _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_start_rowid) });
         _ = aux.emit(v, .Integer, .{ 0, Reg.from(m_win.reg_end_rowid) });
         _ = aux.emit(v, .OpenDup, .{ Cursor.from(m_win.csr_app), eph });
@@ -958,10 +950,8 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
             // a counter that makes the keys unique, reg_app+2 the record.
             const list = win.owner.?.x.list.?;
             const key_info = select_mod.keyInfoFromExprList(p, list, 0, 0);
-            win.csr_app = p.n_tab;
-            p.n_tab += 1;
-            win.reg_app = p.n_mem + 1;
-            p.n_mem += 3;
+            win.csr_app = p.newCursor().int();
+            win.reg_app = p.newRegs(3).int();
             if (key_info) |ki| if (f.name[1] == 'i') {
                 std.debug.assert(ki.sort_flags[0] == 0);
                 ki.sort_flags[0] = int.KeyInfoOrder.desc;
@@ -971,14 +961,11 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
             _ = aux.emit(v, .Integer, .{ 0, Reg.from(win.reg_app).at(1) });
         } else if (isFunc(f, nth_value_name) or isFunc(f, first_value_name)) {
             // Two registers for the start and end of the current frame.
-            win.reg_app = p.n_mem + 1;
-            win.csr_app = p.n_tab;
-            p.n_tab += 1;
-            p.n_mem += 2;
+            win.reg_app = p.newRegs(2).int();
+            win.csr_app = p.newCursor().int();
             _ = aux.emit(v, .OpenDup, .{ Cursor.from(win.csr_app), eph });
         } else if (isFunc(f, lead_name) or isFunc(f, lag_name)) {
-            win.csr_app = p.n_tab;
-            p.n_tab += 1;
+            win.csr_app = p.newCursor().int();
             _ = aux.emit(v, .OpenDup, .{ Cursor.from(win.csr_app), eph });
         }
     }
@@ -1130,7 +1117,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
                 _ = ec.codeExprList(p, list.?, reg_arg, .none, 0);
                 const i_end = aux.currentAddr(v);
                 while (i_op < i_end) : (i_op += 1) {
-                    const op = aux.getOp(v, i_op);
+                    const op = aux.getOp(v, .from(i_op));
                     if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr) op.p1 = csr.int();
                 }
             }
@@ -1357,8 +1344,7 @@ fn windowInitAccum(p: *Parse, m_win: *Window) Reg {
             }
         }
     }
-    const reg_arg: Reg = .from(p.n_mem + 1);
-    p.n_mem += n_arg;
+    const reg_arg = p.newRegs(n_arg);
     return reg_arg;
 }
 
@@ -1411,8 +1397,7 @@ fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: Cursor, reg_val: Re
     const order_by = cx.m_win.order_by.?;
     const reg1: Reg = expr_mod.getTempReg(p);
     const reg2: Reg = expr_mod.getTempReg(p);
-    p.n_mem += 1;
-    const reg_string: Reg = .from(p.n_mem);
+    const reg_string = p.newReg();
     var arith: OP = OP.Add;
     const lbl_done = aux.newLabel(p);
     var op = op_arg;
@@ -1711,22 +1696,17 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
 
     // Registers for the row of the subquery, that row as a record, and its
     // rowid in the ephemeral table.
-    const reg_new: Reg = .from(p.n_mem + 1);
-    p.n_mem += n_input;
-    p.n_mem += 1;
-    const reg_record: Reg = .from(p.n_mem);
-    p.n_mem += 1;
-    cx.reg_rowid = .from(p.n_mem);
+    const reg_new = p.newRegs(n_input);
+    const reg_record = p.newReg();
+    cx.reg_rowid = p.newReg();
 
     // Registers for the values of "<expr> PRECEDING" and "<expr>
     // FOLLOWING".
     if (m_win.e_start == TK.PRECEDING or m_win.e_start == TK.FOLLOWING) {
-        p.n_mem += 1;
-        reg_start = .from(p.n_mem);
+        reg_start = p.newReg();
     }
     if (m_win.e_end == TK.PRECEDING or m_win.e_end == TK.FOLLOWING) {
-        p.n_mem += 1;
-        reg_end = .from(p.n_mem);
+        reg_end = p.newReg();
     }
 
     // Unless the frame is ROWS, registers for the peer values of the main
@@ -1735,14 +1715,10 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
         const n_peer: i32 = if (order_by) |l| @intCast(l.len()) else 0;
         reg_new_peer = reg_new.at(m_win.n_buffer_col);
         if (m_win.partition) |part| reg_new_peer = reg_new_peer.at(part.len());
-        reg_peer = .from(p.n_mem + 1);
-        p.n_mem += n_peer;
-        cx.start.reg = .from(p.n_mem + 1);
-        p.n_mem += n_peer;
-        cx.current.reg = .from(p.n_mem + 1);
-        p.n_mem += n_peer;
-        cx.end.reg = .from(p.n_mem + 1);
-        p.n_mem += n_peer;
+        reg_peer = p.newRegs(n_peer);
+        cx.start.reg = p.newRegs(n_peer);
+        cx.current.reg = p.newRegs(n_peer);
+        cx.end.reg = p.newRegs(n_peer);
     }
 
     // Read the row of the subquery and make it a record.
@@ -1760,8 +1736,7 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
         const reg_part: Reg = .from(m_win.reg_part);
         const key_info = select_mod.keyInfoFromExprList(p, part, 0, 0);
 
-        p.n_mem += 1;
-        reg_flush_part = .from(p.n_mem);
+        reg_flush_part = p.newReg();
         const addr = aux.emit(v, .Compare, .{ reg_new_part, reg_part, n_part });
         if (key_info) |ki| aux.appendP4(v, .{ .keyinfo = ki });
         // OP_Jump's P1 and P3 are addresses too (not labels).
@@ -1928,7 +1903,7 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
             _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_start_rowid) });
             _ = aux.emit(v, .Integer, .{ 0, Reg.from(m_win.reg_end_rowid) });
         }
-        aux.changeP1(v, addr_integer.int(), aux.currentAddr(v));
+        aux.changeP1(v, addr_integer, aux.currentAddr(v));
         _ = aux.emit(v, .Return, .{reg_flush_part});
     }
 }

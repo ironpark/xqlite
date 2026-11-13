@@ -388,14 +388,14 @@ const result_reg: Reg = .from(1);
 
 /// Port of returnSingleInt().
 fn returnSingleInt(v: *Vdbe, value: i64) void {
-    _ = aux.addInt64(v, result_reg.int(), value);
+    _ = aux.addInt64(v, result_reg, value);
     _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
 }
 
 /// Port of returnSingleText().
 fn returnSingleText(v: *Vdbe, value: ?[]const u8) void {
     if (value) |z| {
-        _ = aux.loadString(v, result_reg.int(), z);
+        _ = aux.loadString(v, result_reg, z);
         _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
     }
 }
@@ -447,7 +447,7 @@ fn pragmaFunclistLine(v: *Vdbe, f: *const int.FuncDef, is_builtin: bool, show_in
     if (f.x_sfunc == null) return;
     if (f.func_flags.INTERNAL and !show_intern_funcs) return;
     const typ: []const u8 = if (f.x_value != null) "w" else if (f.x_finalize != null) "a" else "s";
-    aux.multiLoad(v, 1, &.{
+    aux.multiLoad(v, .from(1), &.{
         .{ .s = f.name },
         .{ .i = @intFromBool(is_builtin) },
         .{ .s = typ },
@@ -639,8 +639,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // PRAGMA [schema.]max_page_count[=N] and PRAGMA [schema.]page_count.
         .page_count => {
             build.codeVerifySchema(p, i_db);
-            p.n_mem += 1;
-            const reg: Reg = .from(p.n_mem);
+            const reg = p.newReg();
             if (ctype.toLower(left[0]) == 'p') {
                 _ = aux.emit(v, .Pagecount, .{ i_db, reg });
             } else {
@@ -963,7 +962,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     .{ .i = k },
                     .{ .i = is_hidden },
                 };
-                aux.multiLoad(v, 1, if (pn.i_arg != 0) &values else values[0..6], false);
+                aux.multiLoad(v, .from(1), if (pn.i_arg != 0) &values else values[0..6], false);
             }
         },
 
@@ -1001,7 +1000,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                         "shadow"
                     else
                         "table";
-                    aux.multiLoad(v, 1, &.{
+                    aux.multiLoad(v, .from(1), &.{
                         .{ .s = db.dbs.items[ii].name },
                         .{ .s = build.preferredTableName(t.name) },
                         .{ .s = typ },
@@ -1037,13 +1036,13 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 build.codeVerifySchema(p, @intCast(i_idx_db));
                 for (0..mx) |i| {
                     const cnum = idx.ai_column[i];
-                    aux.multiLoad(v, 1, &.{
+                    aux.multiLoad(v, .from(1), &.{
                         .{ .i = @intCast(i) },
                         .{ .i = cnum },
                         .{ .s = if (cnum < 0) null else t.cols[@intCast(cnum)].name() },
                     }, true);
                     if (pn.i_arg != 0) {
-                        aux.multiLoad(v, 4, &.{
+                        aux.multiLoad(v, .from(4), &.{
                             .{ .i = if (i < idx.sort_order.len) idx.sort_order[i] else 0 },
                             .{ .s = if (i < idx.coll.len) idx.coll[i] else coll.str_binary },
                             .{ .i = @intFromBool(i < idx.n_key_col) },
@@ -1067,7 +1066,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 idx_opt = idx.next;
                 i += 1;
             }) {
-                aux.multiLoad(v, 1, &.{
+                aux.multiLoad(v, .from(1), &.{
                     .{ .i = i },
                     .{ .s = idx.name },
                     .{ .i = @intFromBool(idx.isUnique()) },
@@ -1082,7 +1081,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             p.n_mem = 3;
             for (db.dbs.items, 0..) |*d, i| {
                 const bt = d.bt orelse continue;
-                aux.multiLoad(v, 1, &.{
+                aux.multiLoad(v, .from(1), &.{
                     .{ .i = @intCast(i) },
                     .{ .s = d.name },
                     .{ .s = bt.pager.filename() },
@@ -1118,7 +1117,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             var names_it = names.iterator();
             var i: i32 = 0;
             while (names_it.next()) |name| : (i += 1) {
-                aux.multiLoad(v, 1, &.{ .{ .i = i }, .{ .s = name } }, false);
+                aux.multiLoad(v, .from(1), &.{ .{ .i = i }, .{ .s = name } }, false);
             }
         },
 
@@ -1141,12 +1140,12 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         .module_list => {
             p.n_mem = 1;
             var it = db.modules.valueIterator();
-            while (it.next()) |m| aux.multiLoad(v, 1, &.{.{ .s = m.*.name }}, false);
+            while (it.next()) |m| aux.multiLoad(v, .from(1), &.{.{ .s = m.*.name }}, false);
         },
 
         // PRAGMA pragma_list.
         .pragma_list => {
-            for (&pragma_names) |*n| aux.multiLoad(v, 1, &.{.{ .s = n.name }}, false);
+            for (&pragma_names) |*n| aux.multiLoad(v, .from(1), &.{.{ .s = n.name }}, false);
         },
 
         // PRAGMA foreign_key_list(T): a row per column of each foreign key
@@ -1162,7 +1161,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             build.codeVerifySchema(p, @intCast(i_tab_db));
             while (fk_opt) |fk| : (fk_opt = fk.next_from) {
                 for (fk.cols, 0..) |fc, j| {
-                    aux.multiLoad(v, 1, &.{
+                    aux.multiLoad(v, .from(1), &.{
                         .{ .i = i },
                         .{ .i = @intCast(j) },
                         .{ .s = fk.to },
@@ -1255,7 +1254,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             p.n_mem = 1;
             var i: i32 = 0;
             while (func.compileoptionGet(i)) |opt| : (i += 1) {
-                _ = aux.loadString(v, result_reg.int(), opt);
+                _ = aux.loadString(v, result_reg, opt);
                 _ = aux.emit(v, .ResultRow, .{ result_reg, 1 });
             }
             aux.reusable(v);
@@ -1360,10 +1359,8 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
     const db = p.db;
     var i_db = i_db_arg;
     var zdb = zdb_arg;
-    const reg_result: Reg = .from(p.n_mem + 1);
-    p.n_mem += 4;
-    p.n_mem += 1;
-    const reg_row: Reg = .from(p.n_mem);
+    const reg_result = p.newRegs(4);
+    const reg_row = p.newReg();
     // The table that is checked is open on cursor 0, the parents of its
     // foreign keys on the cursors from 1.
     const child_cur: Cursor = .from(0);
@@ -1385,9 +1382,9 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
         zdb = db.dbs.items[i_db].name;
         build.codeVerifySchema(p, i_db);
         build.tableLock(p, i_db, t.tnum, false, t.name);
-        expr.touchRegister(p, t.nCol() + reg_row.int());
+        expr.touchRegister(p, reg_row.at(t.nCol()));
         insert.openTable(p, child_cur.int(), i_db, t, OP.OpenRead);
-        _ = aux.loadString(v, reg_result.int(), t.name);
+        _ = aux.loadString(v, reg_result, t.name);
 
         // Open each parent table, or the index its key uses.
         var i: i32 = 1;
@@ -1431,7 +1428,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
             const n_col: i32 = @intCast(fk.cols.len);
 
             // A NULL in the child key cannot violate the constraint.
-            expr.touchRegister(p, reg_row.int() + n_col);
+            expr.touchRegister(p, reg_row.at(n_col));
             for (fk.cols, 0..) |fc, j| {
                 const i_col = if (ai_cols) |a| a[j] else fc.i_from;
                 const reg = reg_row.at(j);
@@ -1456,7 +1453,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
             } else {
                 _ = aux.emit(v, .Null, .{ 0, reg_result.at(1) });
             }
-            aux.multiLoad(v, reg_result.at(2).int(), &.{ .{ .s = fk.to }, .{ .i = i - 1 } }, true);
+            aux.multiLoad(v, reg_result.at(2), &.{ .{ .s = fk.to }, .{ .i = i - 1 } }, true);
             _ = aux.emit(v, .ResultRow, .{ reg_result, 4 });
             aux.place(v, ok);
         }
@@ -1528,7 +1525,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         roots[0] = @intCast(cnt);
         const n_root: i32 = @intCast(cnt);
 
-        expr.touchRegister(p, ck.counts.at(n_root).int());
+        expr.touchRegister(p, ck.counts.at(n_root));
         _ = aux.emit(v, .Null, .{ 0, ck.counts, ck.counts.at(n_root) });
         expr.clearTempRegCache(p);
 
@@ -1545,7 +1542,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
 
         // Every index must have as many entries as its table.
         var k: i32 = if (obj_tab != null) 1 else 0;
-        _ = aux.loadString(v, ck.text.int(), "wrong # of entries in index ");
+        _ = aux.loadString(v, ck.text, "wrong # of entries in index ");
         it = tbls.iterator();
         while (it.next()) |t| {
             if (tableSkipIntegrityCheck(t, obj_tab)) continue;
@@ -1566,7 +1563,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
             while (idx_opt) |idx| : (idx_opt = idx.next) {
                 if (idx.part_idx_where == null) {
                     addr = aux.emit(v, .Eq, .{ ck.counts.at(k), 0, ck.counts.at(i_tab) });
-                    _ = aux.loadString(v, ck.part.int(), idx.name);
+                    _ = aux.loadString(v, ck.part, idx.name);
                     _ = aux.emit(v, .Concat, .{ ck.part, ck.text, ck.msg });
                     _ = integrityCheckResultRow(v);
                     aux.landHere(v, addr);
@@ -1620,7 +1617,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         ops[5].setP4(.{ .z = util.errStr(int.RC.CORRUPT) });
     }
     // A corrupt record seen by OP_Column jumps to the "corrupt" message.
-    aux.changeP3(v, 0, aux.currentAddr(v) - 2);
+    aux.changeP3(v, .from(0), aux.currentAddr(v) - 2);
 }
 
 /// The per-row checks of integrityCheck() for table `t`: index entries,
@@ -1666,7 +1663,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     }
     if (mx_col >= 0) {
         _ = aux.emit(v, .Column, .{ data_cur, mx_col, ck.msg });
-        aux.typeofColumn(v, ck.msg.int());
+        aux.typeofColumn(v, ck.msg);
     }
 
     if (pk) |pki| {
@@ -1833,11 +1830,11 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             _ = aux.emit(v, .Goto, .{ 0, ck_uniq });
 
             aux.landHere(v, jmp2);
-            _ = aux.loadString(v, ck.msg.int(), "row ");
+            _ = aux.loadString(v, ck.msg, "row ");
             _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
-            _ = aux.loadString(v, ck.part.int(), " missing from index ");
+            _ = aux.loadString(v, ck.part, " missing from index ");
             _ = aux.emit(v, .Concat, .{ ck.part, ck.msg, ck.msg });
-            const jmp5: Addr = .from(aux.loadString(v, ck.part.int(), idx.name));
+            const jmp5: Addr = aux.loadString(v, ck.part, idx.name);
             _ = aux.emit(v, .Concat, .{ ck.part, ck.msg, ck.msg });
             const jmp4 = integrityCheckResultRow(v);
             aux.place(v, ck_uniq);
@@ -1847,9 +1844,9 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             if (t.hasRowid()) {
                 _ = aux.emit(v, .IdxRowid, .{ cur, ck.msg });
                 const jmp7 = aux.emit(v, .Eq, .{ ck.msg, 0, key.at(n_column - 1) });
-                _ = aux.loadString(v, ck.msg.int(), "rowid not at end-of-record for row ");
+                _ = aux.loadString(v, ck.msg, "rowid not at end-of-record for row ");
                 _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
-                _ = aux.loadString(v, ck.part.int(), " of index ");
+                _ = aux.loadString(v, ck.part, " of index ");
                 _ = aux.emit(v, .Goto, .{ 0, jmp5.plus(-1) });
                 aux.landHere(v, jmp7);
             }
@@ -1866,9 +1863,9 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             if (label6) |differ| {
                 const jmp6 = aux.emit(v, .Goto, .{});
                 aux.place(v, differ);
-                _ = aux.loadString(v, ck.msg.int(), "row ");
+                _ = aux.loadString(v, ck.msg, "row ");
                 _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
-                _ = aux.loadString(v, ck.part.int(), " values differ from index ");
+                _ = aux.loadString(v, ck.part, " values differ from index ");
                 _ = aux.emit(v, .Goto, .{ 0, jmp5.plus(-1) });
                 aux.landHere(v, jmp6);
             }
@@ -1886,7 +1883,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 _ = aux.emit(v, .Goto, .{ 0, uniq_ok });
                 aux.landHere(v, jmp6);
                 _ = aux.emitInt(v, .IdxGT, .{ cur, uniq_ok, key }, idx.n_key_col);
-                _ = aux.loadString(v, ck.msg.int(), "non-unique entry in index ");
+                _ = aux.loadString(v, ck.msg, "non-unique entry in index ");
                 _ = aux.emit(v, .Goto, .{ 0, jmp5 });
                 aux.place(v, uniq_ok);
             }

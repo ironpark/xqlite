@@ -34,8 +34,7 @@ pub fn codeEval(s: *Parser, exprs: []const *Expr) Error!void {
         const e = l.expr(x) catch |err| return parser.lowered(err);
         var nc: int.NameContext = .{ .parse = s.p };
         @import("../../sql/resolve.zig").resolveExprNames(&nc, e) catch return error.ParseFailed;
-        s.p.n_mem += 1;
-        @import("../../sql/expr_code.zig").exprCode(s.p, e, .from(s.p.n_mem));
+        @import("../../sql/expr_code.zig").exprCode(s.p, e, s.p.newReg());
     }
 }
 

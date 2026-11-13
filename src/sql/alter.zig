@@ -248,9 +248,8 @@ fn renameTableImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
     // xRename renames what the virtual table keeps under its name (its
     // shadow tables, say).
     if (vt) |pv| {
-        p.n_mem += 1;
-        const name_reg: Reg = .from(p.n_mem);
-        _ = aux.loadString(v, name_reg.int(), z_name);
+        const name_reg = p.newReg();
+        _ = aux.loadString(v, name_reg, z_name);
         _ = aux.emit4(v, .VRename, .{ name_reg, 0, 0 }, .{ .vtab = pv });
     }
 
@@ -1514,12 +1513,10 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         const v = build.getVdbe(p) orelse return;
         var pk: ?*Index = null;
         var n_field: i32 = 0;
-        const cur: Cursor = .from(p.n_tab);
-        p.n_tab += 1;
+        const cur = p.newCursor();
         insert_mod.openTable(p, cur.int(), i_db, t, OP.OpenWrite);
         const addr = aux.emit(v, .Rewind, .{cur});
-        p.n_mem += 1;
-        const reg: Reg = .from(p.n_mem);
+        const reg = p.newReg();
         if (t.hasRowid()) {
             _ = aux.emit(v, .Rowid, .{ cur, reg });
             p.n_mem += @intCast(t.cols.len);
@@ -1531,8 +1528,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
             }
             n_field = pk.?.n_key_col;
         }
-        p.n_mem += 1;
-        const rec: Reg = .from(p.n_mem);
+        const rec = p.newReg();
         for (t.cols, 0..) |*c, i| {
             if (i == i_col or c.col_flags.VIRTUAL) continue;
             var out: Reg = undefined;

@@ -160,7 +160,7 @@ pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
     if (!first.isNone()) {
         _ = aux.emitStr(v, .Affinity, .{ first, aff.len }, aff);
     } else {
-        aux.changeP4Str(v, -1, aff);
+        aux.changeP4Str(v, null, aff);
     }
 }
 
@@ -172,7 +172,7 @@ fn readsTable(p: *Parse, i_db: usize, t: *Table) bool {
     const vt: ?*int.VTable = if (t.isVirtual()) vtab.getVTable(p.db, t) else null;
     var i: i32 = 1;
     while (i < end) : (i += 1) {
-        const op = aux.getOp(v, i);
+        const op = aux.getOp(v, .from(i));
         if (op.opcode == OP.VOpen and op.p4.vtab == vt) return true;
         if (op.opcode == OP.OpenRead and op.p3 == @as(i32, @intCast(i_db))) {
             const tnum: int.Pgno = @intCast(op.p2);
@@ -273,9 +273,7 @@ fn autoIncBegin(p: *Parse, i_db: usize, t: *Table) Reg {
     };
     // Registers: the table name, the largest rowid, its rowid in
     // sqlite_sequence, and the original largest rowid.
-    top.n_mem += 1;
-    a.* = .{ .next = top.ainc, .tab = t, .i_db = i_db, .reg_ctr = top.n_mem + 1 };
-    top.n_mem += 3;
+    a.* = .{ .next = top.ainc, .tab = t, .i_db = i_db, .reg_ctr = top.newRegs(4).at(1).int() };
     top.ainc = a;
     top.uses_ainc = true;
     return .from(a.reg_ctr);
@@ -290,7 +288,7 @@ pub fn autoincrementBegin(p: *Parse) void {
     while (info) |a| : (info = a.next) {
         const mem_id = a.reg_ctr;
         openTable(p, 0, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenRead);
-        _ = aux.loadString(v, mem_id - 1, a.tab.name);
+        _ = aux.loadString(v, .from(mem_id - 1), a.tab.name);
         const ops = aux.addOpList(v, &.{
             .{ .opcode = OP.Null },
             .{ .opcode = OP.Rewind, .p2 = 10 },
@@ -386,14 +384,14 @@ pub fn codeStore(p: *Parse, st: typing.Conv, reg: i32) void {
     const val: Reg = .from(reg);
     const tmp: Reg = expr_mod.getTempReg(p);
     if (st.n_consts == 0) {
-        _ = aux.addFunctionCall(p, 0, reg, tmp.int(), 1, st.def, 0);
+        _ = aux.addFunctionCall(p, 0, val, tmp, 1, st.def, 0);
     } else {
         // The value and the constants after it.
         const n: i32 = 1 + @as(i32, st.n_consts);
         const base: Reg = expr_mod.getTempRange(p, n);
         _ = aux.emit(p.vdbe.?, .Copy, .{ val, base });
         for (st.consts[0..st.n_consts], 0..) |c, i| _ = aux.emit(p.vdbe.?, .Integer, .{ c, base.at(1 + i) });
-        _ = aux.addFunctionCall(p, 0, base.int(), tmp.int(), n, st.def, 0);
+        _ = aux.addFunctionCall(p, 0, base, tmp, n, st.def, 0);
         expr_mod.releaseTempRange(p, base, n);
     }
     _ = aux.emit(p.vdbe.?, .Move, .{ tmp, val, 1 });
@@ -408,8 +406,8 @@ pub fn multiValuesEnd(p: *Parse, val: ?*Select) void {
     const item = s.src.?.at(0);
     if (item.fg.is_subquery) {
         const subq = item.u4.subq.?;
-        aux.endCoroutine(p.vdbe.?, subq.reg_return);
-        aux.jumpHere(p.vdbe.?, subq.addr_fill_sub - 1);
+        aux.endCoroutine(p.vdbe.?, .from(subq.reg_return));
+        aux.landHere(p.vdbe.?, .from(subq.addr_fill_sub - 1));
     }
 }
 
@@ -471,15 +469,13 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Selec
         try build.srcItemAttachSubquery(p, item, left);
         const subq = item.u4.subq.?;
         subq.addr_fill_sub = aux.currentAddr(v) + 1;
-        p.n_mem += 1;
-        subq.reg_return = p.n_mem;
+        subq.reg_return = p.newReg().int();
         _ = aux.emit(v, .InitCoroutine, .{ Reg.from(subq.reg_return), 0, Addr.from(subq.addr_fill_sub) });
         var dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
         // Two unused registers before the output, so that insert() can
         // use them as they are (rowid and the row of a virtual table).
-        dest.i_sdst = p.n_mem + 3;
         dest.n_sdst = @intCast(left.e_list.?.len());
-        p.n_mem += 2 + dest.n_sdst;
+        dest.i_sdst = p.newRegs(2 + dest.n_sdst).at(2).int();
         left.sel_flags.MultiValue = true;
         p.xq_values_coroutine = true;
         select_mod.select(p, left, &dest) catch {};
@@ -546,9 +542,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     const autoinc = autoIncBegin(p, i_db, t);
 
     // The rowid and the columns of the new row.
-    var rowid: Reg = .from(p.n_mem + 1);
+    var rowid = p.newRegs(@as(i32, @intCast(t.cols.len)) + 1);
     var ins_reg = rowid;
-    p.n_mem += @as(i32, @intCast(t.cols.len)) + 1;
     if (t.isVirtual()) {
         // xUpdate takes the rowid to delete first.
         rowid = rowid.at(1);
@@ -611,8 +606,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 ins_reg = rowid.at(-@as(i32, @intFromBool(t.isVirtual())));
             }
         } else {
-            p.n_mem += 1;
-            const yield_reg: Reg = .from(p.n_mem);
+            const yield_reg = p.newReg();
             const addr_top = aux.here(v).plus(1);
             _ = aux.emit(v, .InitCoroutine, .{ yield_reg, 0, addr_top });
             dest = select_mod.selectDestInit(SRT.Coroutine, yield_reg.int());
@@ -629,7 +623,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 var it: ?*Select = s;
                 while (it) |term| : (it = term.prior) typeParams(p, t, column, term.e_list.?) catch return build.oomFault(p);
             }
-            aux.endCoroutine(v, yield_reg.int());
+            aux.endCoroutine(v, yield_reg);
             aux.landHere(v, addr_top.plus(-1));
             n_column = @intCast(s.e_list.?.len());
         }
@@ -638,8 +632,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         // table written (or triggers run).
         if (trig != null or readsTable(p, i_db, t)) use_temp_table = true;
         if (use_temp_table) {
-            src_tab = .from(p.n_tab);
-            p.n_tab += 1;
+            src_tab = p.newCursor();
             const rec: Reg = expr_mod.getTempReg(p);
             const temp_rowid: Reg = expr_mod.getTempReg(p);
             _ = aux.emit(v, .OpenEphemeral, .{ src_tab.?, n_column });
@@ -690,8 +683,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
 
     var row_count: Reg = .none;
     if (db.flags.CountRows and p.nested == 0 and p.trigger_tab == null and !p.returning) {
-        p.n_mem += 1;
-        row_count = .from(p.n_mem);
+        row_count = p.newReg();
         _ = aux.emit(v, .Integer, .{ 0, row_count });
     }
 
@@ -709,12 +701,9 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         for (reg_idx[0..n_idx]) |*r| {
             const ix = idx.?;
             idx = ix.next;
-            p.n_mem += 1;
-            r.* = p.n_mem;
-            p.n_mem += ix.n_column;
+            r.* = p.newRegs(1 + ix.n_column).int();
         }
-        p.n_mem += 1;
-        reg_idx[n_idx] = p.n_mem;
+        reg_idx[n_idx] = p.newReg().int();
     }
     const data_cur: Cursor = .from(i_data_cur);
     if (upsert) |up| {
@@ -1100,10 +1089,8 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
     const i_db_src: usize = @intCast(prepare.schemaToIndex(db, src.schema));
     const v = build.getVdbe(p).?;
     build.codeVerifySchema(p, i_db_src);
-    const src_cur: Cursor = .from(p.n_tab);
-    p.n_tab += 1;
-    const dest_cur: Cursor = .from(p.n_tab);
-    p.n_tab += 1;
+    const src_cur = p.newCursor();
+    const dest_cur = p.newCursor();
     const autoinc = autoIncBegin(p, i_db_dest, dest);
     const data: Reg = expr_mod.getTempReg(p);
     _ = aux.emit(v, .Null, .{ 0, data });
@@ -1471,8 +1458,7 @@ fn generateConstraintChecksImpl(
             }
         }
         if (may_fire) {
-            p.n_mem += 1;
-            trig_cnt = .from(p.n_mem);
+            trig_cnt = p.newReg();
             _ = aux.emit(v, .Integer, .{ 0, trig_cnt });
             lbl_recheck_ok = aux.newLabel(p);
             addr_recheck = lbl_recheck_ok;
@@ -1656,7 +1642,7 @@ fn generateConstraintChecksImpl(
                 if (is_update) {
                     // A conflict only if the PRIMARY KEY found differs from
                     // the old one.
-                    var addr_jump: Jump = .from(aux.currentAddr(v) + k.n_key_col);
+                    var addr_jump: Jump = .of(aux.here(v).plus(k.n_key_col));
                     var op: OP = OP.Ne;
                     const cmp_reg = if (idx.isPrimaryKey()) key_reg else other_key;
                     for (0..k.n_key_col) |ii| {
@@ -1668,7 +1654,7 @@ fn generateConstraintChecksImpl(
                         }
                         x = build.tableColumnToStorage(t, @intCast(x));
                         const cmp = aux.emitAny(v, op, .{ .reg, .jump, .reg }, .{ old_data.at(1 + x), addr_jump, cmp_reg.at(ii) });
-                        aux.changeP4(v, cmp.int(), if (coll) |cl| .{ .collseq = cl } else .notused);
+                        aux.changeP4(v, cmp, if (coll) |cl| .{ .collseq = cl } else .notused);
                         aux.changeP5(v, vi.SQLITE_NOTNULL);
                     }
                 }
@@ -1707,7 +1693,7 @@ fn generateConstraintChecksImpl(
             lbl_recheck_ok = recheck_ok;
             if (idx.part_idx_where != null) _ = aux.emit(v, .IsNull, .{ key_reg.at(-1), recheck_ok });
             while (addr_conflict_ck.int() < n_conflict_end.int()) : (addr_conflict_ck = addr_conflict_ck.plus(1)) {
-                const x = aux.getOp(v, addr_conflict_ck.int()).*;
+                const x = aux.getOp(v, addr_conflict_ck).*;
                 if (x.opcode != OP.IdxRowid or is_update) {
                     // A copy of an instruction of any opcode: its operands
                     // are numbers here.

@@ -602,9 +602,8 @@ pub fn finishParse(p: *Parse, end: ?Token) void {
         const where = build.mprintf(p, "name=%Q AND sql=%Q", &.{ .{ .str = t.name }, .{ .str = stmt } }) catch return build.oomFault(p);
         aux.addParseSchemaOp(v, @intCast(i_db), where, 0);
 
-        p.n_mem += 1;
-        const name_reg: aux.operand.Reg = .from(p.n_mem);
-        _ = aux.loadString(v, name_reg.int(), t.name);
+        const name_reg: aux.operand.Reg = p.newReg();
+        _ = aux.loadString(v, name_reg, t.name);
         _ = aux.emit(v, .VCreate, .{ i_db, name_reg });
     } else {
         // Rereading sqlite_schema: add the table to the schema.

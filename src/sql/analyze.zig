@@ -245,7 +245,7 @@ const stat_get_funcdef: int.FuncDef = .{
 /// Port of callStatGet().
 fn callStatGet(p: *Parse, reg_stat: Reg, reg_out: Reg) void {
     std.debug.assert(reg_out != reg_stat and reg_out != reg_stat.at(1));
-    _ = aux.addFunctionCall(p, 0, reg_stat.int(), reg_out.int(), 1, &stat_get_funcdef, 0);
+    _ = aux.addFunctionCall(p, 0, reg_stat, reg_out, 1, &stat_get_funcdef, 0);
 }
 
 /// Port of analyzeOneTable(): code the analysis of the indexes of `t`
@@ -266,7 +266,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
     const reg_stat1 = first_reg.at(8); // Value for the stat column of sqlite_stat1
     const reg_prev = first_reg.at(9); // MUST BE LAST (see below)
 
-    expr.touchRegister(p, reg_prev.int());
+    expr.touchRegister(p, reg_prev);
     const v = build.getVdbe(p) orelse return;
     // Do not gather statistics on views or virtual tables, nor on system
     // tables.
@@ -283,7 +283,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
     const idx_cur = first_cur.at(1);
     p.n_tab = @max(p.n_tab, first_cur.int() + 2);
     insert.openTable(p, tab_cur.int(), i_db, t, OP.OpenRead);
-    _ = aux.loadString(v, reg_tabname.int(), t.name);
+    _ = aux.loadString(v, reg_tabname, t.name);
 
     var idx_opt = t.index;
     while (idx_opt) |idx| : (idx_opt = idx.next) {
@@ -303,7 +303,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         }
 
         // Populate the register containing the index name.
-        _ = aux.loadString(v, reg_idxname.int(), idx_name);
+        _ = aux.loadString(v, reg_idxname, idx_name);
 
         // Pseudo-code for the loop that calls stat_push():
         //
@@ -340,7 +340,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         //  end_of_scan:
 
         // Make sure there are enough memory cells for the regPrev array.
-        expr.touchRegister(p, reg_prev.at(n_col_test).int());
+        expr.touchRegister(p, reg_prev.at(n_col_test));
 
         // Open a read-only cursor on the index being analyzed.
         _ = aux.emit(v, .OpenRead, .{ idx_cur, idx.tnum, i_db });
@@ -357,7 +357,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         std.debug.assert(reg_rowid == reg_stat.at(2));
         _ = aux.emit(v, .Integer, .{ idx.n_key_col, reg_rowid });
         _ = aux.emit(v, .Count, .{ idx_cur, reg_temp, db.optDisabled(opt_stat4) });
-        _ = aux.addFunctionCall(p, 0, reg_stat.at(1).int(), reg_stat.int(), 4, &stat_init_funcdef, 0);
+        _ = aux.addFunctionCall(p, 0, reg_stat.at(1), reg_stat, 4, &stat_init_funcdef, 0);
         // The jump past the scan of an empty index, until it has landed.
         var addr_goto_end: ?Addr = aux.emit(v, .Rewind, .{idx_cur});
 
@@ -413,7 +413,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         //   Next csr
         //   if !eof(csr) goto next_row;
         std.debug.assert(reg_chng == reg_stat.at(1));
-        _ = aux.addFunctionCall(p, 1, reg_stat.int(), reg_temp.int(), 2, &stat_push_funcdef, 0);
+        _ = aux.addFunctionCall(p, 1, reg_stat, reg_temp, 2, &stat_push_funcdef, 0);
         if (db.n_analysis_limit != 0) {
             const j1 = aux.emit(v, .IsNull, .{reg_temp});
             const j2 = aux.emit(v, .If, .{reg_temp});
@@ -468,8 +468,7 @@ fn loadAnalysis(p: *Parse, i_db: usize) void {
 fn analyzeDatabase(p: *Parse, i_db: usize) Oom!void {
     const db = p.db;
     build.beginWriteOperation(p, false, i_db);
-    const stat_cur: Cursor = .from(p.n_tab);
-    p.n_tab += 3;
+    const stat_cur = p.newCursors(3);
     openStatTable(p, i_db, stat_cur, null, "");
     const first_reg: Reg = .from(p.n_mem + 1);
     const first_cur: Cursor = .from(p.n_tab);
@@ -483,8 +482,7 @@ fn analyzeDatabase(p: *Parse, i_db: usize) Oom!void {
 fn analyzeTable(p: *Parse, t: *Table, only_idx: ?*Index) Oom!void {
     const i_db: usize = @intCast(prepare.schemaToIndex(p.db, t.schema));
     build.beginWriteOperation(p, false, i_db);
-    const stat_cur: Cursor = .from(p.n_tab);
-    p.n_tab += 3;
+    const stat_cur = p.newCursors(3);
     if (only_idx) |ix| {
         openStatTable(p, i_db, stat_cur, ix.name, "idx");
     } else {
@@ -522,8 +520,7 @@ fn analyzeTablesImpl(p: *Parse, tables: []const *Table) Oom!void {
                 build.nestedParse(p, "DELETE FROM %Q.%s WHERE tbl=%Q", &.{ .{ .str = pdb.name }, .{ .str = name }, .{ .str = t.name } });
             }
         }
-        const stat_cur: Cursor = .from(p.n_tab);
-        p.n_tab += 3;
+        const stat_cur = p.newCursors(3);
         openStatTable(p, i_db, stat_cur, first.name, "tbl");
         const first_reg: Reg = .from(p.n_mem + 1);
         const first_cur: Cursor = .from(p.n_tab);
@@ -626,8 +623,7 @@ pub fn optimize(p: *Parse, v: *Vdbe, i_db_arg: usize, all_dbs: bool, right: ?[]c
     } else {
         n_limit = default_optimize_limit;
     }
-    const tab_cur: Cursor = .from(p.n_tab); // Cursor for a table whose size needs checking
-    p.n_tab += 1;
+    const tab_cur = p.newCursor(); // Cursor for a table whose size needs checking
     var n_check: i32 = 0; // Number of tables to be optimized
     var n_btree: i32 = 0; // Number of btrees to scan
     var i_db = i_db_arg;

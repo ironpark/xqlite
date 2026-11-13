@@ -216,7 +216,7 @@ fn isLikeOrGlob(p: *Parse, e: *Expr, prefix: *?*Expr, is_complete: *bool, no_cas
                     // Keep an OP_Variable for sqlite3_bind_parameter_name().
                     const r1 = expr_mod.getTempReg(p);
                     _ = ec.codeTarget(p, right, r1);
-                    aux.changeP3(v, aux.currentAddr(v) - 1, 0);
+                    aux.changeP3(v, aux.here(v).plus(-1), 0);
                     expr_mod.releaseTempReg(p, r1);
                 }
             }

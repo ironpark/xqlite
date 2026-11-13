@@ -14,7 +14,7 @@ const cursor = @import("cursor.zig");
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const Op = vi.Op;
+const OpOf = vi.OpOf;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
@@ -35,7 +35,7 @@ pub const handlers = .{
     .{ .ops = .{.VUpdate}, .f = opVUpdate },
 };
 
-pub fn opVBegin(e: *Exec, op: *Op) Error!Flow {
+pub fn opVBegin(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     const vt: ?*int.VTable = if (op.p4type == .vtab) op.p4As(.vtab) else null;
     const rc = vtab_mod.begin(e.db, vt);
     if (vt) |t| if (t.vtab) |p| vtab_mod.importErrmsg(e.v, p);
@@ -43,7 +43,7 @@ pub fn opVBegin(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opVCreate(e: *Exec, op: *Op) Error!Flow {
+pub fn opVCreate(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     const db = e.db;
     // P2 is a static string, so the copy cannot fail.
     var s_mem: Mem = .{ .db = db, .flags = .{ .Null = true } };
@@ -56,7 +56,7 @@ pub fn opVCreate(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opVDestroy(e: *Exec, op: *Op) Error!Flow {
+pub fn opVDestroy(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     const db = e.db;
     db.n_vdestroy += 1;
     const rc = vtab_mod.callDestroy(db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
@@ -65,12 +65,15 @@ pub fn opVDestroy(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opVOpen(e: *Exec, op: *Op) Error!Flow {
+pub fn opVOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     const v = e.v;
     std.debug.assert(v.is_reader);
-    if (v.csr[@intCast(op.p1)]) |cur| {
+    if (e.csrIfOpen(op.p1)) |cur| {
         // Already open.
-        if (cur.e_cur_type == .vtab and cur.uc.vtab.vtab == op.p4As(.vtab).vtab.?) return .next;
+        switch (cur.kind) {
+            .vtab => |vc| if (vc.vtab == op.p4As(.vtab).vtab.?) return .next,
+            else => {},
+        }
     }
     const vtab = op.p4As(.vtab).vtab orelse return error.Locked;
     const module = vtab.module;
@@ -79,16 +82,15 @@ pub fn opVOpen(e: *Exec, op: *Op) Error!Flow {
     vtab_mod.importErrmsg(v, vtab);
     try e.check(rc);
     vcur.?.vtab = vtab;
-    const cur = cursor.allocateCursor(e, op.p1, 0, .vtab) catch |err| {
+    _ = cursor.allocateCursor(e, op.p1, 0, .{ .vtab = vcur.? }) catch |err| {
         _ = module.x_close.?(vcur.?);
         return err;
     };
-    cur.uc = .{ .vtab = vcur.? };
     vtab.n_ref += 1;
     return .next;
 }
 
-pub fn opVCheck(e: *Exec, op: *Op) Error!Flow {
+pub fn opVCheck(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     const db = e.db;
     const out = e.reg(op.p2);
     mem.setNull(out);
@@ -117,30 +119,29 @@ pub fn opVCheck(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opVInitIn(e: *Exec, op: *Op) Error!Flow {
+pub fn opVInitIn(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     const c = e.csr(op.p1);
     const rhs = try malloc.allocator.create(vtab_mod.ValueList);
-    rhs.* = .{ .csr = c.uc.cursor, .out = e.reg(op.p3) };
+    rhs.* = .{ .csr = c.kind.btree.cursor, .out = e.reg(op.p3) };
     const out = e.out2Prerelease(op);
     out.flags = .{ .Null = true };
     mem.setPointer(out, rhs, vtab_mod.value_list_type, int.destructor(vtab_mod.valueListFree));
     return .next;
 }
 
-pub fn opVFilter(e: *Exec, op: *Op) Error!Flow {
+pub fn opVFilter(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
     const v = e.v;
     const query = e.reg(op.p3);
-    const argc = e.reg(op.p3 + 1);
+    const argc = e.reg(op.p3.at(1));
     const cur = e.csr(op.p1);
-    std.debug.assert(cur.e_cur_type == .vtab);
-    const vcur = cur.uc.vtab;
+    const vcur = cur.kind.vtab;
     const vtab = vcur.vtab;
     const module = vtab.module;
     std.debug.assert(query.flags.Int and argc.flags == MEM{ .Int = true });
     const n_arg: usize = @intCast(argc.u.i);
     const i_query: i32 = @truncate(query.u.i);
     const args = v.ap_arg[0..n_arg];
-    for (args, 0..) |*a, i| a.* = e.reg(op.p3 + 2 + @as(i32, @intCast(i)));
+    for (args, e.regRange(op.p3.at(2), n_arg)) |*a, *m| a.* = m;
     // P4 is the idxStr xBestIndex chose, if any.
     const idx_str: ?[:0]const u8 = if (op.p4type == .z) std.mem.span(op.p4As(.z)) else null;
     const rc = module.x_filter.?(vcur, i_query, idx_str, args);
@@ -151,15 +152,15 @@ pub fn opVFilter(e: *Exec, op: *Op) Error!Flow {
     return if (res) .jump_p2 else .next;
 }
 
-pub fn opVColumn(e: *Exec, op: *Op) Error!Flow {
+pub fn opVColumn(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow {
     const cur = e.csr(op.p1);
     const dest = e.reg(op.p3);
     if (cur.null_row) {
         mem.setNull(dest);
         return .next;
     }
-    std.debug.assert(cur.e_cur_type == .vtab);
-    const vtab = cur.uc.vtab.vtab;
+    const vcur = cur.kind.vtab;
+    const vtab = vcur.vtab;
     const module = vtab.module;
     var null_func: int.FuncDef = .{ .n_arg = 0, .name = "", .func_flags = .{ .RESULT_SUBTYPE = true } };
     var ctx: vi.Context = .{ .out = dest, .func = &null_func, .enc = e.encoding, .argv = &.{} };
@@ -171,7 +172,7 @@ pub fn opVColumn(e: *Exec, op: *Op) Error!Flow {
     } else {
         dest.setTypeFlag(.{ .Null = true });
     }
-    var rc = module.x_column.?(cur.uc.vtab, &ctx, op.p2);
+    var rc = module.x_column.?(vcur, &ctx, op.p2);
     vtab_mod.importErrmsg(e.v, vtab);
     if (ctx.is_error > 0) {
         aux.vdbeErrorFromMem(e.v, dest);
@@ -182,21 +183,21 @@ pub fn opVColumn(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opVNext(e: *Exec, op: *Op) Error!Flow {
+pub fn opVNext(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
     const cur = e.csr(op.p1);
-    std.debug.assert(cur.e_cur_type == .vtab);
+    const vcur = cur.kind.vtab;
     if (cur.null_row) return .next;
-    const vtab = cur.uc.vtab.vtab;
+    const vtab = vcur.vtab;
     const module = vtab.module;
     // xNext reports errors on the next xColumn or other call.
-    const rc = module.x_next.?(cur.uc.vtab);
+    const rc = module.x_next.?(vcur);
     vtab_mod.importErrmsg(e.v, vtab);
     try e.check(rc);
-    const res = module.x_eof.?(cur.uc.vtab);
+    const res = module.x_eof.?(vcur);
     return if (!res) .jump_p2_check else .next_check;
 }
 
-pub fn opVRename(e: *Exec, op: *Op) Error!Flow {
+pub fn opVRename(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     const db = e.db;
     const is_legacy = db.flags.LegacyAlter;
     db.flags.LegacyAlter = true;
@@ -213,7 +214,7 @@ pub fn opVRename(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opVUpdate(e: *Exec, op: *Op) Error!Flow {
+pub fn opVUpdate(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
     const v = e.v;
     const db = e.db;
     // P5 is the OE_ code of the statement.
@@ -229,7 +230,7 @@ pub fn opVUpdate(e: *Exec, op: *Op) Error!Flow {
     if (module.x_update) |x_update| {
         const vtab_on_conflict = db.vtab_on_conflict;
         const args = v.ap_arg[0..n_arg];
-        for (args, 0..) |*a, i| a.* = e.reg(op.p3 + @as(i32, @intCast(i)));
+        for (args, e.regRange(op.p3, n_arg)) |*a, *m| a.* = m;
         db.vtab_on_conflict = on_conflict;
         var rowid: i64 = 0;
         var rc = x_update(vtab, args, &rowid);

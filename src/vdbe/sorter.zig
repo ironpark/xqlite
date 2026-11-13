@@ -210,7 +210,7 @@ const PmaWriter = struct {
 };
 
 fn get(c: *VdbeCursor) *Sorter {
-    return c.uc.sorter;
+    return c.kind.sorter;
 }
 
 /// Port of sqlite3TempInMemory() for SQLITE_TEMP_STORE=1: temporary
@@ -951,9 +951,8 @@ fn setupMerge(s: *Sorter) Error!void {
 
 /// Port of sqlite3VdbeSorterInit(). If `n_field` is not zero, a stable
 /// sort on that many leading fields is enough.
-pub fn init(db: *int.Sqlite3, n_field: i32, c: *VdbeCursor) Error!void {
+pub fn init(db: *int.Sqlite3, n_field: i32, ki: *const vi.KeyInfo) Error!*Sorter {
     const gpa = db.gpa;
-    const ki = c.key_info.?;
     const s = try gpa.create(Sorter);
     errdefer gpa.destroy(s);
     const n_cells = @as(usize, ki.n_all_field) + 1;
@@ -999,7 +998,7 @@ pub fn init(db: *int.Sqlite3, n_field: i32, c: *VdbeCursor) Error!void {
     {
         s.type_mask = type_integer | type_text | type_real;
     }
-    c.uc = .{ .sorter = s };
+    return s;
 }
 
 /// Port of vdbeSortSubtaskCleanup().
@@ -1015,7 +1014,10 @@ fn subtaskCleanup(t: *SortSubtask) void {
 /// Port of sqlite3VdbeSorterReset(): drop every record and PMA.
 pub fn reset(db: *int.Sqlite3, c: *VdbeCursor) void {
     _ = db;
-    const s = get(c);
+    resetSorter(get(c));
+}
+
+fn resetSorter(s: *Sorter) void {
     if (s.merger) |m| mergeEngineFree(s.gpa, m);
     s.merger = null;
     subtaskCleanup(&s.task);
@@ -1027,16 +1029,15 @@ pub fn reset(db: *int.Sqlite3, c: *VdbeCursor) void {
 }
 
 /// Port of sqlite3VdbeSorterClose().
-pub fn close(db: *int.Sqlite3, c: *VdbeCursor) void {
-    reset(db, c);
-    const s = get(c);
+pub fn close(db: *int.Sqlite3, s: *Sorter) void {
+    _ = db;
+    resetSorter(s);
     s.data.deinit(s.gpa);
     s.records.deinit(s.gpa);
     s.norms.deinit(s.gpa);
     s.links.deinit(s.gpa);
     s.gpa.free(s.cells);
     s.gpa.destroy(s);
-    c.uc = .none;
 }
 
 /// Bit position of the class of the first field in a normalized key,

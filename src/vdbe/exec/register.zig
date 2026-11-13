@@ -12,6 +12,7 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const Op = vi.Op;
+const OpOf = vi.OpOf;
 const MEM = vi.MEM;
 const OP = vi.OP;
 const ENC = vi.ENC;
@@ -44,17 +45,17 @@ fn int32To64(lo: i32, hi: i32) i64 {
     return @bitCast(@as(u64, @as(u32, @bitCast(hi))) << 32 | @as(u32, @bitCast(lo)));
 }
 
-pub fn opInteger(e: *Exec, op: *Op) Flow {
+pub fn opInteger(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
     e.out2Prerelease(op).u = .{ .i = op.p1 };
     return .next;
 }
 
-pub fn opInt64(e: *Exec, op: *Op) Flow {
+pub fn opInt64(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
     e.out2Prerelease(op).u = .{ .i = int32To64(op.p1, op.p3) };
     return .next;
 }
 
-pub fn opReal(e: *Exec, op: *Op) Flow {
+pub fn opReal(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
     const out = e.out2Prerelease(op);
     out.flags = .{ .Real = true };
     out.u = .{ .r = @bitCast(int32To64(op.p1, op.p3)) };
@@ -64,10 +65,10 @@ pub fn opReal(e: *Exec, op: *Op) Flow {
 /// OP_String8 becomes OP_String, with the length in P1, on its first run.
 /// In a UTF-16 database the string is first converted, once, into a
 /// buffer of the program that becomes P4.
-pub fn opString8(e: *Exec, op: *Op) Error!Flow {
+pub fn opString8(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Error!Flow {
     _ = e.out2Prerelease(op);
     op.p1 = @intCast(std.mem.len(op.p4As(.z)));
-    if (e.encoding != ENC.UTF8) try string8ToUtf16(e, op);
+    if (e.encoding != ENC.UTF8) try string8ToUtf16(e, op.raw());
     if (op.p1 > e.db.limit(.length)) return error.TooBig;
     op.opcode = OP.String;
     return opString(e, op);
@@ -86,13 +87,13 @@ fn string8ToUtf16(e: *Exec, op: *Op) Error!void {
     op.p1 = @intCast(n);
 }
 
-pub fn opString(e: *Exec, op: *Op) Flow {
+pub fn opString(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Flow {
     const out = e.out2Prerelease(op);
     out.flags = .{ .Str = true, .Static = true, .Term = true };
     out.z = @constCast(op.p4As(.z));
     out.n = op.p1;
     out.enc = e.encoding;
-    if (op.p3 > 0) {
+    if (op.p3 != .none) {
         const in3 = e.reg(op.p3);
         std.debug.assert(in3.flags.Int);
         if (in3.u.i == op.p5) out.flags = .{ .Blob = true, .Static = true, .Term = true };
@@ -101,30 +102,28 @@ pub fn opString(e: *Exec, op: *Op) Flow {
 }
 
 /// OP_Null and OP_BeginSubrtn.
-pub fn opNull(e: *Exec, op: *Op) Flow {
-    var out = e.out2Prerelease(op);
-    var cnt = op.p3 - op.p2;
+pub fn opNull(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Flow {
+    const out = e.out2Prerelease(op);
     const null_flag: MEM = if (op.p1 != 0) .{ .Null = true, .Cleared = true } else .{ .Null = true };
     out.flags = null_flag;
     out.n = 0;
-    var i = op.p2;
-    while (cnt > 0) : (cnt -= 1) {
-        i += 1;
-        out = e.reg(i);
-        mem.setNull(out);
-        out.flags = null_flag;
-        out.n = 0;
-    }
+    // The registers after P2 through P3 (none if P3 is not after P2).
+    const cnt = op.p3.int() - op.p2.int();
+    if (cnt > 0) for (e.regRange(op.p2.at(1), @intCast(cnt))) |*m| {
+        mem.setNull(m);
+        m.flags = null_flag;
+        m.n = 0;
+    };
     return .next;
 }
 
-pub fn opSoftNull(e: *Exec, op: *Op) Flow {
+pub fn opSoftNull(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
     const out = e.reg(op.p1);
     out.flags = out.flags.without(MEM.Undefined.with(MEM.AffMask)).with(.{ .Null = true });
     return .next;
 }
 
-pub fn opBlob(e: *Exec, op: *Op) Error!Flow {
+pub fn opBlob(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     const out = e.out2Prerelease(op);
     if (op.p4type != .z) {
         mem.setZeroBlob(out, op.p1);
@@ -136,7 +135,7 @@ pub fn opBlob(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opVariable(e: *Exec, op: *Op) Error!Flow {
+pub fn opVariable(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     const v = e.v;
     std.debug.assert(op.p1 > 0 and op.p1 <= v.n_var);
     const var_ = &v.vars[@intCast(op.p1 - 1)];
@@ -154,64 +153,55 @@ pub fn opVariable(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opMove(e: *Exec, op: *Op) Error!Flow {
-    var n = op.p3;
-    var p1 = op.p1;
-    var p2 = op.p2;
-    std.debug.assert(n > 0 and p1 > 0 and p2 > 0);
-    std.debug.assert(p1 + n <= p2 or p2 + n <= p1);
-    while (n > 0) : (n -= 1) {
-        const out = e.reg(p2);
-        mem.move(out, e.reg(p1));
+pub fn opMove(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
+    const n: usize = @intCast(op.p3);
+    std.debug.assert(n > 0 and op.p1 != .none and op.p2 != .none);
+    const from = e.regRange(op.p1, n);
+    const to = e.regRange(op.p2, n);
+    std.debug.assert(op.p1.at(n).int() <= op.p2.int() or op.p2.at(n).int() <= op.p1.int());
+    for (to, from) |*out, *in| {
+        mem.move(out, in);
         if (out.flags.Ephem) try mem.makeWriteable(out);
-        p1 += 1;
-        p2 += 1;
     }
     return .next;
 }
 
-pub fn opCopy(e: *Exec, op: *Op) Error!Flow {
-    var n = op.p3;
-    var in1 = op.p1;
-    var outr = op.p2;
-    std.debug.assert(in1 != outr);
-    while (true) {
-        const out = e.reg(outr);
-        mem.shallowCopy(out, e.reg(in1), .{ .Ephem = true });
+pub fn opCopy(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
+    // P3+1 registers (P3 is the number after the first).
+    const n: usize = @as(usize, @intCast(op.p3)) + 1;
+    std.debug.assert(op.p1 != op.p2);
+    for (e.regRange(op.p2, n), e.regRange(op.p1, n)) |*out, *in| {
+        mem.shallowCopy(out, in, .{ .Ephem = true });
         if (out.flags.Ephem) try mem.makeWriteable(out);
         if (out.flags.Subtype and op.p5 & 0x0002 != 0) out.flags.Subtype = false;
-        if (n == 0) break;
-        n -= 1;
-        outr += 1;
-        in1 += 1;
     }
     return .next;
 }
 
-pub fn opSCopy(e: *Exec, op: *Op) Flow {
+pub fn opSCopy(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     std.debug.assert(op.p1 != op.p2);
     mem.shallowCopy(e.reg(op.p2), e.reg(op.p1), .{ .Ephem = true });
     return .next;
 }
 
-pub fn opIntCopy(e: *Exec, op: *Op) Flow {
+pub fn opIntCopy(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(in1.flags.Int);
     mem.setInt64(e.reg(op.p2), in1.u.i);
     return .next;
 }
 
-pub fn opFkCheck(e: *Exec, op: *Op) Error!Flow {
+pub fn opFkCheck(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     _ = op;
     try aux.checkFkImmediate(e.v);
     return .next;
 }
 
-pub fn opResultRow(e: *Exec, op: *Op) Error!Flow {
+pub fn opResultRow(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     const v = e.v;
     std.debug.assert(v.n_res_column == op.p2);
     v.cache_ctr = (v.cache_ctr + 2) | 1;
-    v.result_row = e.regs.ptr + @as(usize, @intCast(op.p1));
+    v.result_row = e.regsFrom(op.p1);
     if (e.db.malloc_failed) return error.OutOfMemory;
     if (e.db.m_trace & int.TRACE.ROW != 0) _ = e.db.trace_v2.?(int.TRACE.ROW, e.db.trace_arg, v, null);
     v.pc = @intCast(e.pc + 1);
@@ -219,12 +209,12 @@ pub fn opResultRow(e: *Exec, op: *Op) Error!Flow {
     return .ret;
 }
 
-pub fn opClrSubtype(e: *Exec, op: *Op) Flow {
+pub fn opClrSubtype(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
     e.reg(op.p1).flags.Subtype = false;
     return .next;
 }
 
-pub fn opGetSubtype(e: *Exec, op: *Op) Flow {
+pub fn opGetSubtype(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     const in1 = e.reg(op.p1);
     const out = e.reg(op.p2);
     if (in1.flags.Subtype) {
@@ -235,7 +225,7 @@ pub fn opGetSubtype(e: *Exec, op: *Op) Flow {
     return .next;
 }
 
-pub fn opSetSubtype(e: *Exec, op: *Op) Flow {
+pub fn opSetSubtype(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     const in1 = e.reg(op.p1);
     const out = e.reg(op.p2);
     if (in1.flags.Null) {

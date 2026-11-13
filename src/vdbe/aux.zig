@@ -1021,9 +1021,9 @@ pub fn freeCursor(v: *Vdbe, cx: ?*VdbeCursor) void {
 /// Port of sqlite3VdbeFreeCursorNN(): close the cursor's b-tree cursor or
 /// sorter and free the cursor.
 pub fn freeCursorNN(v: *Vdbe, cx: *VdbeCursor) void {
-    switch (cx.uc) {
-        .sorter => @import("sorter.zig").close(v.db, cx),
-        .cursor => |c| c.close(),
+    switch (cx.kind) {
+        .btree => |b| b.cursor.close(),
+        .sorter => |s| @import("sorter.zig").close(v.db, s),
         .vtab => |vc| {
             const vtab = vc.vtab;
             const module = vtab.module;
@@ -1031,11 +1031,15 @@ pub fn freeCursorNN(v: *Vdbe, cx: *VdbeCursor) void {
             vtab.n_ref -= 1;
             _ = module.x_close.?(vc);
         },
-        else => {},
+        .pseudo => {},
     }
     const box: *vi.CursorBox = @fieldParentPtr("vc", cx);
     v.db.gpa.free(box.cache);
-    v.db.gpa.destroy(box);
+    if (cx.kind == .btree) {
+        v.db.gpa.destroy(@as(*vi.BtreeCursorBox, @fieldParentPtr("box", box)));
+    } else {
+        v.db.gpa.destroy(box);
+    }
 }
 
 /// Port of closeCursorsInFrame().

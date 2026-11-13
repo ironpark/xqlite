@@ -549,6 +549,10 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
   - `OP_Explain`의 P1·P2로 쓰는 `Parse.addr_explain`과 `aux.explainParent()`, `sqlite3_stmt_scanstatus()`의 기록(`vi.ScanStatus`).
   - 이미 낸 명령의 피연산자(`aux.getOp()`과 `opsBetween()`의 `p1`~`p3`)를 읽거나 바꾸는 곳, 텍스트에 넣는 레지스터 번호(nested parse의 `#%d`, 방언 제약 오류의 레지스터 목록), `Index.tnum`에 잠깐 넣어 두는 주소.
 - 새 코드는 `emit` 계열을 씁니다. 이 변경들은 바이트코드를 바꾸지 않았습니다(`xqt planner`의 기록과 일치).
+- **실행기**: 명령 처리기(`src/vdbe/exec/*.zig`)도 같은 표를 씁니다. 처리기는 명령을 `vi.OpOf(shape)`로 받고, 그 P1·P2·P3는 `shape`에 따라 `Reg`·`Cursor`·`Jump`·`Addr`·`i32`입니다(`opGosub(e, op: *OpOf(.{ .reg, .jump, .int }))`). `exec.zig`가 처리기마다 그것이 맡은 opcode들의 `kinds(op)`와 `shape`가 같은지 컴파일 시점에 맞춰 보므로, 레지스터 자리를 커서로 읽는 처리기도, 처리기가 읽는 것과 다른 표도 컴파일되지 않습니다.
+  - 레지스터와 커서는 `e.reg(op.p3)`, `e.regsFrom(op.p2)`, `e.regRange(op.p2, n)`, `e.csr(op.p1)`, `e.csrIfOpen(op.p1)`로 꺼냅니다. 앞뒤 명령의 피연산자는 `e.opAt(.SeekGE, e.pc + 1)`처럼 그 opcode의 타입으로 읽습니다.
+  - 피연산자 종류가 다른 opcode를 함께 맡는 처리기(`OP_Last`와 `OP_SeekEnd`, `OP_IdxRowid`와 `OP_DeferredSeek`)는 `op: anytype`과 opcode를 받아 opcode마다 그 종류로 받고, 피연산자를 읽지 않는 처리기(`OP_Noop` ...)는 `OpOf(null)`을 받습니다.
+  - 어떤 쓰임에서만 레지스터인 `int` 피연산자는 처리기가 그 쓰임을 가리는 자리(`P2ISREG`를 본 뒤)에서 `Reg.from()`으로 바꿉니다.
 
 ## VFS
 

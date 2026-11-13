@@ -15,7 +15,7 @@ const btree = @import("xqlite_storage").btree;
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const Op = vi.Op;
+const OpOf = vi.OpOf;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
@@ -40,24 +40,28 @@ pub const handlers = .{
 /// The largest rowid (MAX_ROWID).
 const max_rowid: i64 = std.math.maxInt(i64);
 
-/// The cursor's seek result for Cursor.insert, if OPFLAG_USESEEKRESULT
-/// says to use it (0 there means no seek was made).
-fn insertSeekResult(op: *const Op, c: *const vi.VdbeCursor) ?std.math.Order {
-    if (op.p5 & vi.OPFLAG.USESEEKRESULT == 0 or c.seek_result == 0) return null;
-    return std.math.order(c.seek_result, 0);
+/// The b-tree cursor's seek result for Cursor.insert, if
+/// OPFLAG_USESEEKRESULT says to use it. C passes seekResult, where 0 is
+/// both "no seek" and "on the entry": the b-tree then seeks itself, so
+/// .eq is passed as null.
+fn insertSeekResult(p5: u16, b: *const vi.OnBtree) ?std.math.Order {
+    if (p5 & vi.OPFLAG.USESEEKRESULT == 0) return null;
+    const order = b.seek_result orelse return null;
+    return if (order == .eq) null else order;
 }
 
-pub fn opCount(e: *Exec, op: *Op) Error!Flow {
-    const cur = e.csr(op.p1).uc.cursor;
+pub fn opCount(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
+    const cur = e.csr(op.p1).kind.btree.cursor;
     const n = try if (op.p3 != 0) cur.rowCountEst() else cur.count();
     e.out2Prerelease(op).u = .{ .i = n };
     return .next_check;
 }
 
-pub fn opNewRowid(e: *Exec, op: *Op) Error!Flow {
+pub fn opNewRowid(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     const out = e.out2Prerelease(op);
     const c = e.csr(op.p1);
-    const cur = c.uc.cursor;
+    const b = &c.kind.btree;
+    const cur = b.cursor;
     var rowid: i64 = 0;
     if (!c.use_random_rowid) {
         const has_last = try cur.last();
@@ -72,7 +76,7 @@ pub fn opNewRowid(e: *Exec, op: *Op) Error!Flow {
             }
         }
     }
-    if (op.p3 != 0) {
+    if (op.p3 != .none) {
         // AUTOINCREMENT: the largest rowid ever is in register P3 of
         // the root frame.
         const m = e.rootReg(op.p3);
@@ -95,16 +99,17 @@ pub fn opNewRowid(e: *Exec, op: *Op) Error!Flow {
         }
         if (found) return error.DiskFull;
     }
-    c.deferred_moveto = false;
+    b.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
     out.u = .{ .i = rowid };
     return .next;
 }
 
-pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
+pub fn opInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     const v = e.v;
     const data = e.reg(op.p2);
     const c = e.csr(op.p1);
+    const b = &c.kind.btree;
     const key = e.reg(op.p3);
     const rowid = key.u.i;
     if (op.p5 & vi.OPFLAG.NCHANGE != 0) {
@@ -116,11 +121,11 @@ pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
         .data = data.bytes(),
         .n_zero = if (data.flags.Zero) @intCast(data.u.n_zero) else 0,
     };
-    const seek_result = insertSeekResult(op, c);
+    const seek_result = insertSeekResult(op.p5, b);
     // Whether the insert fails or not (the b-tree does not read them).
-    c.deferred_moveto = false;
+    b.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
-    try c.uc.cursor.insert(x, .{
+    try b.cursor.insert(x, .{
         .append = op.p5 & vi.OPFLAG.APPEND != 0,
         .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
         .seek_result = seek_result,
@@ -142,29 +147,31 @@ const delete_op = 9;
 /// OP_RowCell: build the cell for the entry of cursor P2 in cursor P1,
 /// with the rowid in register P3 for tables, for the OP_Insert or
 /// OP_IdxInsert with OPFLAG_PREFORMAT that follows.
-pub fn opRowCell(e: *Exec, op: *Op) Error!Flow {
+pub fn opRowCell(e: *Exec, op: *OpOf(.{ .cursor, .cursor, .reg })) Error!Flow {
     if (std.debug.runtime_safety) {
         const next = e.ops[e.pc + 1];
         std.debug.assert(next.opcode == .Insert or next.opcode == .IdxInsert);
         std.debug.assert(next.p5 & vi.OPFLAG.PREFORMAT != 0);
     }
-    const dest = e.csr(op.p1).uc.cursor;
-    const src = e.csr(op.p2).uc.cursor;
-    const key: i64 = if (op.p3 != 0) e.reg(op.p3).u.i else 0;
+    const dest = e.csr(op.p1).kind.btree.cursor;
+    const src = e.csr(op.p2).kind.btree.cursor;
+    const key: i64 = if (op.p3 != .none) e.reg(op.p3).u.i else 0;
     try dest.transferRow(src, key);
     return .next;
 }
 
-pub fn opDelete(e: *Exec, op: *Op) Error!Flow {
+pub fn opDelete(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
+    const b = &c.kind.btree;
     // The rowid, for the update hook (C's movetoTarget).
     const hook_tab: ?*const int.Table = if (e.db.update_hook != null and op.p4type == .table) op.p4As(.table) else null;
-    const rowid: i64 = if (hook_tab != null and c.is_table) c.uc.cursor.integerKey() else 0;
+    const rowid: i64 = if (hook_tab != null and b.is_table) b.cursor.integerKey() else 0;
     // Whether the delete fails or not (the b-tree does not read them).
     c.cache_status = vi.cache_stale;
-    c.seek_result = 0;
-    try c.uc.cursor.delete(.{ .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0 });
+    // C: seekResult = 0.
+    b.seek_result = null;
+    try b.cursor.delete(.{ .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0 });
     if (op.p2 & vi.OPFLAG.NCHANGE != 0) {
         v.n_change += 1;
         if (hook_tab) |t| if (t.hasRowid()) {
@@ -174,17 +181,17 @@ pub fn opDelete(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opResetCount(e: *Exec, op: *Op) Flow {
+pub fn opResetCount(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
     _ = op;
     aux.setChanges(e.db, e.v.n_change);
     e.v.n_change = 0;
     return .next;
 }
 
-pub fn opRowData(e: *Exec, op: *Op) Error!Flow {
+pub fn opRowData(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
     const out = e.out2Prerelease(op);
     const c = e.csr(op.p1);
-    const cur = c.uc.cursor;
+    const cur = c.kind.btree.cursor;
     const n = cur.payloadSize();
     if (n > e.db.limit(.length)) return error.TooBig;
     try mem.fromBtreeZeroOffset(cur, n, out);
@@ -192,9 +199,10 @@ pub fn opRowData(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opIdxInsert(e: *Exec, op: *Op) Error!Flow {
+pub fn opIdxInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
+    const b = &c.kind.btree;
     const in2 = e.reg(op.p2);
     if (op.p5 & vi.OPFLAG.NCHANGE != 0) v.n_change += 1;
     if (in2.flags.Zero) try mem.expandBlob(in2);
@@ -205,7 +213,7 @@ pub fn opIdxInsert(e: *Exec, op: *Op) Error!Flow {
     if (op.p4type == .int32 and op.p4As(.int32) > 0) {
         r = .{
             .key_info = c.key_info.?,
-            .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),
+            .mem = e.regsFrom(op.p3),
             .n_field = @intCast(op.p4As(.int32)),
             .default_rc = 0,
         };
@@ -214,21 +222,22 @@ pub fn opIdxInsert(e: *Exec, op: *Op) Error!Flow {
     }
     // Whether the insert fails or not (the b-tree does not read it).
     c.cache_status = vi.cache_stale;
-    try c.uc.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
+    try b.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
         .append = op.p5 & vi.OPFLAG.APPEND != 0,
         .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
-        .seek_result = insertSeekResult(op, c),
+        .seek_result = insertSeekResult(op.p5, b),
         .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
     });
     return .next;
 }
 
-pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
+pub fn opIdxDelete(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     const c = e.csr(op.p1);
-    const cur = c.uc.cursor;
+    const b = &c.kind.btree;
+    const cur = b.cursor;
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
-        .mem = e.regs.ptr + @as(usize, @intCast(op.p2)),
+        .mem = e.regsFrom(op.p2),
         .n_field = op.p5,
         .default_rc = 0,
     };
@@ -243,10 +252,11 @@ pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
             return e.abort(RC.CORRUPT_INDEX);
         }
         c.cache_status = vi.cache_stale;
-        c.seek_result = 0;
+        // C: seekResult = 0.
+        b.seek_result = null;
         return .next;
     }
-    if (op.p3 != 0) {
+    if (op.p3 != .none) {
         // Skip the delete if the entry is the record in P3.
         const m = e.reg(op.p3);
         const n_key = cur.payloadSize();
@@ -263,26 +273,27 @@ pub fn opIdxDelete(e: *Exec, op: *Op) Error!Flow {
     }
     try cur.delete(.{});
     c.cache_status = vi.cache_stale;
-    c.seek_result = 0;
+    // C: seekResult = 0.
+    b.seek_result = null;
     return .next;
 }
 
 // ================================================================ sorters
 
-pub fn opSorterCompare(e: *Exec, op: *Op) Error!Flow {
+pub fn opSorterCompare(e: *Exec, op: *OpOf(.{ .cursor, .addr, .reg })) Error!Flow {
     const c = e.csr(op.p1);
     const res = try sorter.compare(c, e.reg(op.p3), op.p4As(.int32));
     return if (res != 0) .jump_p2 else .next;
 }
 
-pub fn opSorterData(e: *Exec, op: *Op) Error!Flow {
+pub fn opSorterData(e: *Exec, op: *OpOf(.{ .cursor, .reg, .cursor })) Error!Flow {
     const c = e.csr(op.p1);
     try sorter.rowkey(c, e.reg(op.p2));
     e.csr(op.p3).cache_status = vi.cache_stale;
     return .next;
 }
 
-pub fn opSorterInsert(e: *Exec, op: *Op) Error!Flow {
+pub fn opSorterInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     const c = e.csr(op.p1);
     const in2 = e.reg(op.p2);
     if (in2.flags.Zero) try mem.expandBlob(in2);
@@ -290,12 +301,14 @@ pub fn opSorterInsert(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
-pub fn opResetSorter(e: *Exec, op: *Op) Error!Flow {
+pub fn opResetSorter(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     const c = e.csr(op.p1);
-    if (c.e_cur_type == .sorter) {
-        sorter.reset(e.db, c);
-    } else {
-        _ = try c.uc.cursor.bt.clearTable(c.pgno_root);
+    switch (c.kind) {
+        .sorter => sorter.reset(e.db, c),
+        else => {
+            const b = &c.kind.btree;
+            _ = try b.cursor.bt.clearTable(b.pgno_root);
+        },
     }
     return .next;
 }

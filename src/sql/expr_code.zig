@@ -1507,8 +1507,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                     _ = aux.emit(v, .Halt, .{ RC.OK, OE.Ignore.int() });
                 } else {
                     r1 = codeTemp(p, e.left, &reg_free1);
-                    // P3 of OP_Halt is a number to operand.kinds(), and
-                    // here the register of the message.
+                    // P3 of OP_Halt: the register of the message.
                     _ = aux.emit(v, .Halt, .{ @as(i32, if (p.trigger_tab != null) RC.CONSTRAINT_TRIGGER else RC.ERROR), e.aff_expr, r1 });
                 }
                 return in_reg;

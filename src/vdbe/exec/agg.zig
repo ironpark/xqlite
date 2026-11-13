@@ -12,6 +12,7 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const Op = vi.Op;
+const OpOf = vi.OpOf;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const OP = vi.OP;
@@ -25,7 +26,7 @@ pub const handlers = .{
 };
 
 /// OP_Function and OP_PureFunc.
-pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
+pub fn opFunction(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Error!Flow {
     const v = e.v;
     const ctx = op.p4As(.funcctx);
     const out = e.reg(op.p3);
@@ -36,7 +37,7 @@ pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
         ctx.vdbe = v;
         ctx.out = out;
         ctx.enc = e.encoding;
-        for (ctx.argv, 0..) |*arg, i| arg.* = e.reg(op.p2 + @as(i32, @intCast(i)));
+        for (ctx.argv, e.regRange(op.p2, ctx.argv.len)) |*arg, *m| arg.* = m;
     }
     out.setTypeFlag(.{ .Null = true });
     ctx.func.x_sfunc.?(ctx, ctx.argv);
@@ -89,14 +90,14 @@ fn aggStepInit(e: *Exec, op: *Op) error{OutOfMemory}!void {
 
 /// OP_AggStep, OP_AggInverse and OP_AggStep1: as in C, where the first
 /// two fall through into the last once they have become it.
-pub fn opAggStep(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
-    if (opc != .AggStep1) try aggStepInit(e, op);
+pub fn opAggStep(e: *Exec, op: *OpOf(.{ .int, .reg, .reg }), comptime opc: OP) Error!Flow {
+    if (opc != .AggStep1) try aggStepInit(e, op.raw());
     const v = e.v;
     const ctx = op.p4As(.funcctx);
     const m = e.reg(op.p3);
     if (ctx.mem != m) {
         ctx.mem = m;
-        for (ctx.argv, 0..) |*arg, i| arg.* = e.reg(op.p2 + @as(i32, @intCast(i)));
+        for (ctx.argv, e.regRange(op.p2, ctx.argv.len)) |*arg, *m2| arg.* = m2;
     }
     m.n += 1;
     if (op.p1 != 0) {
@@ -113,8 +114,9 @@ pub fn opAggStep(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
         }
         ctx.err_state = null;
         if (ctx.skip_flag) {
-            const i = e.ops[e.pc - 1].p1;
-            if (i != 0) mem.setInt64(e.reg(i), 1);
+            // The register of the OP_CollSeq before.
+            const i = e.opAt(.CollSeq, e.pc - 1).p1;
+            if (i != .none) mem.setInt64(e.reg(i), 1);
             ctx.skip_flag = false;
         }
         mem.release(ctx.out);
@@ -126,10 +128,10 @@ pub fn opAggStep(e: *Exec, op: *Op, comptime opc: OP) Error!Flow {
 }
 
 /// OP_AggFinal and OP_AggValue.
-pub fn opAggFinal(e: *Exec, op: *Op) Error!Flow {
+pub fn opAggFinal(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Error!Flow {
     var m = e.reg(op.p1);
     var r: mem.AggResult = undefined;
-    if (op.p3 != 0) {
+    if (op.p3 != .none) {
         r = mem.aggValue(m, e.reg(op.p3), op.p4As(.funcdef));
         m = e.reg(op.p3);
     } else {

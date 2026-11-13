@@ -164,8 +164,14 @@ pub fn kinds(op: OP) [3]Kind {
         .Param => .{ i, r, i },
 
         // Constants and registers.
-        .Integer, .Int64, .Real, .String8, .String, .Blob, .Variable, .BeginSubrtn => .{ i, r, i },
-        .Null => .{ i, r, r },
+        .Integer, .Int64, .Real, .Blob, .Variable => .{ i, r, i },
+        // P3, if any, is the counter of a LIKE optimization's loop
+        // (whereLikeOptimizationStringFixup()): equal to P5, the string
+        // is a BLOB.
+        .String8, .String => .{ i, r, r },
+        // P3, if any, is the last register of a run set to NULL (OP_Null;
+        // OP_BeginSubrtn, which runs as it, sets one).
+        .Null, .BeginSubrtn => .{ i, r, r },
         .SoftNull, .RealAffinity, .ClrSubtype, .VRename, .CollSeq => .{ r, i, i },
         .Move, .Copy => .{ r, r, i },
         .SCopy, .IntCopy, .Not, .BitNot, .MemMax, .GetSubtype, .SetSubtype, .RowSetAdd => .{ r, r, i },
@@ -181,8 +187,9 @@ pub fn kinds(op: OP) [3]Kind {
 
         // Functions and aggregates.
         .PureFunc, .Function, .AggInverse, .AggStep, .AggStep1 => .{ i, r, r },
-        .AggValue => .{ r, i, r },
-        .AggFinal => .{ r, i, i },
+        // P3 of OP_AggValue is the register of the result; OP_AggFinal,
+        // which runs as it with P3 0, has none.
+        .AggValue, .AggFinal => .{ r, i, r },
 
         // Opening and closing cursors.
         .OpenRead, .OpenWrite, .ReopenIdx, .SorterOpen => .{ c, i, i },

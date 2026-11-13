@@ -233,8 +233,9 @@ pub const UnpackedRecord = struct {
 
 /// One instruction (VdbeOp). As in C built without
 /// SQLITE_ENABLE_EXPLAIN_COMMENTS, it is 24 bytes: the P4 type fits in
-/// the padding before p5, and P4 is a single word.
-pub const Op = struct {
+/// the padding before p5, and P4 is a single word. Extern, so that
+/// OpOf() can lay its fields out the same way.
+pub const Op = extern struct {
     opcode: OP,
     /// Which field of `p4` is valid (p4type).
     p4type: P4Type = .notused,
@@ -286,6 +287,73 @@ pub const Op = struct {
 
 comptime {
     if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Op) == 24);
+}
+
+/// An instruction as the handler of its opcode sees it (exec.zig): an Op
+/// whose P1, P2 and P3 have the types of `shape`, the operand.kinds() of
+/// the opcode (operand.Reg, operand.Cursor, operand.Jump, operand.Addr,
+/// or i32 for a number), so that reading an operand as something it is
+/// not does not compile. With a null shape the operands are `Unread`:
+/// for a handler that does not read them, whatever its opcodes are.
+pub fn OpOf(comptime shape: ?[3]operand.Kind) type {
+    return extern struct {
+        opcode: OP,
+        p4type: P4Type,
+        p5: u16,
+        p1: OperandOf(shape, 0),
+        p2: OperandOf(shape, 1),
+        p3: OperandOf(shape, 2),
+        p4: P4Union,
+
+        const Self = @This();
+
+        /// What P1, P2 and P3 are (null: not read).
+        pub const kinds = shape;
+
+        comptime {
+            std.debug.assert(@sizeOf(Self) == @sizeOf(Op));
+            for (@typeInfo(Op).@"struct".field_names) |name| {
+                std.debug.assert(@offsetOf(Self, name) == @offsetOf(Op, name));
+            }
+        }
+
+        /// The instruction with its operands as numbers.
+        pub inline fn raw(op: *Self) *Op {
+            return @ptrCast(op);
+        }
+
+        pub inline fn p4As(op: *const Self, comptime t: P4Type) @FieldType(P4Union, @tagName(t)) {
+            return @as(*const Op, @ptrCast(op)).p4As(t);
+        }
+
+        pub inline fn p4IntArray(op: *const Self) []u32 {
+            return @as(*const Op, @ptrCast(op)).p4IntArray();
+        }
+
+        pub inline fn setP4(op: *Self, p4: P4) void {
+            op.raw().setP4(p4);
+        }
+    };
+}
+
+/// Instruction `o`, which is an `opc`, with the operands of that opcode.
+pub inline fn opAs(o: *Op, comptime opc: OP) *OpOf(operand.kinds(opc)) {
+    std.debug.assert(o.opcode == opc);
+    return @ptrCast(o);
+}
+
+/// An operand of OpOf(null), which its handler does not read.
+pub const Unread = enum(i32) { _ };
+
+fn OperandOf(comptime shape: ?[3]operand.Kind, comptime n: usize) type {
+    const s = shape orelse return Unread;
+    return switch (s[n]) {
+        .int => i32,
+        .reg => operand.Reg,
+        .cursor => operand.Cursor,
+        .jump => operand.Jump,
+        .addr => operand.Addr,
+    };
 }
 
 /// The type of the fourth operand (P4_*).
@@ -399,47 +467,31 @@ pub const COLNAME_N = 2;
 
 // =============================================================== cursors
 
+/// What a cursor reads (CURTYPE_*): the tag of VdbeCursor.kind.
 pub const CurType = enum(u8) { btree = 0, sorter = 1, vtab = 2, pseudo = 3 };
 
-/// A cursor of the VM (VdbeCursor).
+/// A cursor of the VM (VdbeCursor). What only one kind of cursor has is
+/// in `kind`; the rest, OP_Column's cache of the record above all, is
+/// that of any cursor that reads records.
 pub const VdbeCursor = struct {
-    e_cur_type: CurType,
+    kind: Kind,
     i_db: i8,
     /// On a row with no data (e.g. the NULL row of a LEFT JOIN).
     null_row: bool = false,
-    /// A seek to `moveto_target` is pending.
-    deferred_moveto: bool = false,
-    /// A rowid table rather than an index.
-    is_table: bool = false,
     is_ephemeral: bool = false,
     use_random_rowid: bool = false,
     is_ordered: bool = false,
     no_reuse: bool = false,
     seek_hit: u16 = 0,
-    /// The separate b-tree of an ephemeral table, shared with OP_OpenDup
-    /// cursors. It closes itself with its last cursor (BTREE_SINGLE).
-    btx: ?*btree.Btree = null,
-    /// Opened with OPFLAG_SEEKEQ (BTREE_SEEK_EQ): only equality seeks.
-    seek_eq: bool = false,
-    /// Table to index column mapping (aAltMap): the elements of a
-    /// P4_INTARRAY.
-    alt_map: ?[]const u32 = null,
     seq_count: i64 = 0,
     /// Column cache valid while equal to Vdbe.cache_ctr.
     cache_status: u32 = cache_stale,
-    /// Result of the last seek; for pseudo cursors, the register of the
-    /// record.
-    seek_result: i32 = 0,
-    alt_cursor: ?*VdbeCursor = null,
-    uc: union(enum) { none, cursor: *btree.Cursor, sorter: *@import("sorter.zig").Sorter, pseudo, vtab: *@import("../sql/vtab.zig").VtabCursor } = .none,
     key_info: ?*KeyInfo = null,
     /// Offset of the next unparsed byte of the record header.
     i_hdr_offset: u32 = 0,
-    pgno_root: Pgno = 0,
     n_field: i16,
     /// Header fields parsed so far.
     n_hdr_parsed: u16 = 0,
-    moveto_target: i64 = 0,
     /// Offsets of the fields (n_field + 1 entries).
     offsets: []u32,
     /// The record, if it is all on one page.
@@ -449,15 +501,66 @@ pub const VdbeCursor = struct {
     sz_row: u32 = 0,
     /// Serial types of the fields (n_field entries).
     types: []u32,
+
+    /// The cursor's kind (eCurType) and what it reads (uc). A cursor
+    /// keeps its kind, from its allocation to its close.
+    pub const Kind = union(CurType) {
+        btree: OnBtree,
+        sorter: *@import("sorter.zig").Sorter,
+        vtab: *@import("../sql/vtab.zig").VtabCursor,
+        /// The register that holds the record (OP_OpenPseudo's P2), or
+        /// none for the cursor of OP_NullRow that only has NULL rows (C:
+        /// seekResult 0, IsNullCursor()).
+        pseudo: operand.Reg,
+    };
+
+    pub fn curType(c: *const VdbeCursor) CurType {
+        return c.kind;
+    }
 };
 
-/// The allocation of a cursor: the VdbeCursor and the b-tree cursor it may
-/// use.
+/// A cursor on a b-tree (a table, an index or an ephemeral table).
+pub const OnBtree = struct {
+    /// Open from the cursor's allocation to its close (in its
+    /// BtreeCursorBox).
+    cursor: *btree.Cursor,
+    /// The root page.
+    pgno_root: Pgno,
+    /// A rowid table rather than an index (no KeyInfo).
+    is_table: bool,
+    /// Opened with OPFLAG_SEEKEQ (BTREE_SEEK_EQ): only equality seeks.
+    seek_eq: bool = false,
+    /// A seek to `moveto_target` is pending (OP_DeferredSeek).
+    deferred_moveto: bool = false,
+    moveto_target: i64 = 0,
+    /// Table to index column mapping (aAltMap): the elements of a
+    /// P4_INTARRAY.
+    alt_map: ?[]const u32 = null,
+    alt_cursor: ?*VdbeCursor = null,
+    /// The separate b-tree of an ephemeral table, shared with OP_OpenDup
+    /// cursors. It closes itself with its last cursor (BTREE_SINGLE).
+    btx: ?*btree.Btree = null,
+    /// How the key of the last seek compares with the entry it left the
+    /// cursor at (C's seekResult -1, 0, 1), for an OP_Insert or
+    /// OP_IdxInsert with OPFLAG_USESEEKRESULT; null if there was no seek,
+    /// or the entry was deleted since (C: 0 as well, which there is also
+    /// "equal").
+    seek_result: ?std.math.Order = null,
+};
+
+/// The allocation of a cursor: the VdbeCursor and the arrays of its
+/// column cache.
 pub const CursorBox = struct {
     vc: VdbeCursor,
-    bc: btree.Cursor = undefined,
     /// The one allocation that `vc.types` and `vc.offsets` are slices of.
     cache: []u32,
+};
+
+/// The allocation of a b-tree cursor, with its b-tree cursor
+/// (OnBtree.cursor).
+pub const BtreeCursorBox = struct {
+    box: CursorBox,
+    bc: btree.Cursor,
 };
 
 /// VdbeCursor.cache_status value that is never current (CACHE_STALE).

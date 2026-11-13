@@ -13,7 +13,7 @@ const int = @import("../../sql/sqlite_int.zig");
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const Op = vi.Op;
+const OpOf = vi.OpOf;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
@@ -31,14 +31,14 @@ pub const handlers = .{
 
 // ================================================================ row sets
 
-pub fn opRowSetAdd(e: *Exec, op: *Op) Error!Flow {
+pub fn opRowSetAdd(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
     const in1 = e.reg(op.p1);
     if (!in1.flags.Blob) try rowset.memSetRowSet(in1, e.db.gpa);
     try rowset.fromMem(in1).insert(e.reg(op.p2).u.i);
     return .next;
 }
 
-pub fn opRowSetRead(e: *Exec, op: *Op) Error!Flow {
+pub fn opRowSetRead(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Error!Flow {
     const in1 = e.reg(op.p1);
     const val: ?i64 = if (!in1.flags.Blob)
         null
@@ -52,7 +52,7 @@ pub fn opRowSetRead(e: *Exec, op: *Op) Error!Flow {
     return .jump_p2_check;
 }
 
-pub fn opRowSetTest(e: *Exec, op: *Op) Error!Flow {
+pub fn opRowSetTest(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Error!Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
     const i_set = op.p4As(.int32);
@@ -68,13 +68,11 @@ pub fn opRowSetTest(e: *Exec, op: *Op) Error!Flow {
 
 // =========================================================== Bloom filters
 
-/// Port of filterHash(): the Bloom filter hash of P4 registers from P3.
-fn filterHash(regs: []Mem, op: *const Op) u64 {
+/// Port of filterHash(): the Bloom filter hash of the P4 registers from P3
+/// of OP_FilterAdd or OP_Filter `op`.
+fn filterHash(e: *Exec, op: anytype) u64 {
     var h: u64 = 0;
-    var i: usize = @intCast(op.p3);
-    const end = i + @as(usize, @intCast(op.p4As(.int32)));
-    while (i < end) : (i += 1) {
-        const m = &regs[i];
+    for (e.regRange(op.p3, @intCast(op.p4As(.int32)))) |*m| {
         if (m.flags.intersects(.{ .Int = true, .IntReal = true })) {
             h +%= @bitCast(m.u.i);
         } else if (m.flags.Real) {
@@ -105,17 +103,17 @@ fn filterHash(regs: []Mem, op: *const Op) u64 {
     return h;
 }
 
-pub fn opFilterAdd(e: *Exec, op: *Op) Flow {
+pub fn opFilterAdd(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Flow {
     const in1 = e.reg(op.p1);
-    var h = filterHash(e.regs, op);
+    var h = filterHash(e, op);
     h %= @as(u64, @intCast(in1.n)) * 8;
     in1.z.?[@intCast(h / 8)] |= @as(u8, 1) << @intCast(h & 7);
     return .next;
 }
 
-pub fn opFilter(e: *Exec, op: *Op) Flow {
+pub fn opFilter(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Flow {
     const in1 = e.reg(op.p1);
-    var h = filterHash(e.regs, op);
+    var h = filterHash(e, op);
     h %= @as(u64, @intCast(in1.n)) * 8;
     if (in1.z.?[@intCast(h / 8)] & (@as(u8, 1) << @intCast(h & 7)) == 0) {
         e.v.counters[vi.STMTSTATUS.FILTER_HIT] += 1;
@@ -128,7 +126,7 @@ pub fn opFilter(e: *Exec, op: *Op) Flow {
 /// The opcodes that only mark the program for others: OP_Noop,
 /// OP_Explain, OP_CursorHint, OP_Abortable, OP_ReleaseReg, and
 /// OP_Permutation (read by the OP_Compare that follows).
-pub fn opNoop(e: *Exec, op: *Op) Flow {
+pub fn opNoop(e: *Exec, op: *OpOf(null)) Flow {
     _ = e;
     _ = op;
     return .next;
@@ -137,7 +135,7 @@ pub fn opNoop(e: *Exec, op: *Op) Flow {
 // ============================================================ not ported
 
 /// Offset and ColumnsUsed (not in the C build either).
-pub fn opNotSupported(e: *Exec, op: *Op) Error!Flow {
+pub fn opNotSupported(e: *Exec, op: *OpOf(null)) Error!Flow {
     aux.vdbeError(e.v, "not supported yet: OP_{s}", .{op.opcode.name()});
     return error.Error;
 }

@@ -22,6 +22,17 @@
 //! tells them apart takes the opcode as a comptime parameter, so that
 //! each arm gets its own copy without the test.
 //!
+//! A handler takes its instruction as a vi.OpOf(): P1, P2 and P3 with the
+//! types operand.kinds() gives them (operand.Reg, operand.Cursor, a jump
+//! or an address, or a number), checked at compile time against the
+//! opcodes it runs (see `modules`). Registers and cursors are reached
+//! through them, `e.reg(op.p3)`, `e.csr(op.p1)`, `e.regsFrom(op.p2)`,
+//! so that a handler that reads a cursor where the opcode has a register
+//! does not compile, as aux.emit() does not let the code generator pass
+//! one for the other. A number that is a register only under a flag of
+//! P5 (OP_OpenWrite's P2 with OPFLAG_P2ISREG) is `.int` in the table and
+//! converted with `.from()` where the handler tests the flag.
+//!
 //! Each handler returns a `Flow`, which stands in for the gotos of the C
 //! code: `.next` continues, `.jump_p2` goes to P2, `.goto` to the address
 //! it carries, `.frame` to an address of the program the handler
@@ -41,6 +52,7 @@ const mem = @import("mem.zig");
 const aux = @import("aux.zig");
 const int = @import("../sql/sqlite_int.zig");
 const util = @import("../sql/util.zig");
+const operand = @import("operand.zig");
 
 const control = @import("exec/control.zig");
 const register = @import("exec/register.zig");
@@ -59,6 +71,8 @@ const Mem = vi.Mem;
 const MEM = vi.MEM;
 const OP = vi.OP;
 const VdbeCursor = vi.VdbeCursor;
+const Reg = operand.Reg;
+const Cursor = operand.Cursor;
 const Sqlite3 = int.Sqlite3;
 const RC = int.RC;
 
@@ -118,9 +132,19 @@ pub const Flow = packed struct(u64) {
 /// The modules of handlers. Each declares `handlers`, a tuple of entries
 /// `.{ .ops = .{ .Add, .Subtract, ... }, .f = opArith }` naming the
 /// opcodes a function runs, with `.call = .always_inline` where the run
-/// loop is to inline it. The function is `fn (*Exec, *Op) Flow` (or
-/// `Error!Flow`), or takes a third parameter `comptime opc: OP`, the
+/// loop is to inline it. The function is `fn (*Exec, *OpOf(shape)) Flow`
+/// (or `Error!Flow`), or takes a third parameter `comptime opc: OP`, the
 /// opcode it runs, if it runs several and tells them apart.
+///
+/// The second parameter is the instruction with its operands typed (see
+/// vi.OpOf()). `shape` is what the handler takes P1, P2 and P3 to be,
+/// `.{ .reg, .jump, .int }` and the like, and must be operand.kinds() of
+/// every opcode it runs: the handler of OP_Gosub cannot read its P1 as a
+/// cursor, and an entry of the kinds table that does not say what the
+/// handler reads does not compile. A handler of opcodes whose operands
+/// differ (OP_Last and OP_SeekEnd) takes `op: anytype` with the opcode,
+/// and gets the shape of each opcode in its copy for that opcode; one
+/// that reads no operand takes `*OpOf(null)`.
 ///
 /// Inlined are the handlers of the opcodes of inner loops (stepping and
 /// seeking cursors, OP_Column, register copies, arithmetic, comparisons,
@@ -157,10 +181,34 @@ const handler_index: [256]?HandlerAt = blk: {
 fn handler(comptime opc: OP) type {
     const at = handler_index[@backingInt(opc)].?;
     const entry = modules[at.module].handlers[at.entry];
+    const params = @typeInfo(@TypeOf(entry.f)).@"fn".param_types;
+    const name = "the handler of OP_" ++ @tagName(opc);
     return struct {
         const f = entry.f;
         const call: std.builtin.CallModifier = if (@hasField(@TypeOf(entry), "call")) entry.call else .auto;
+        const takes_opc = params.len == 3;
+        /// The type of the instruction it takes: its own, which must
+        /// fit the opcode, or the opcode's for `op: anytype`.
+        const Ins = if (params[1]) |P| blk: {
+            const pointer = switch (@typeInfo(P)) {
+                .pointer => |p| p,
+                else => @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpOf(shape)"),
+            };
+            const V = pointer.child;
+            if (!@hasDecl(V, "kinds") or V != vi.OpOf(V.kinds)) @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpOf(shape)");
+            if (V.kinds) |k| if (!std.meta.eql(k, operand.kinds(opc))) {
+                @compileError(name ++ " takes its operands to be " ++ shapeName(k) ++ ", operand.kinds() says " ++ shapeName(operand.kinds(opc)));
+            };
+            break :blk P;
+        } else blk: {
+            if (!takes_opc) @compileError(name ++ " takes `op: anytype` without the opcode");
+            break :blk *vi.OpOf(operand.kinds(opc));
+        };
     };
+}
+
+fn shapeName(comptime k: [3]operand.Kind) []const u8 {
+    return ".{ ." ++ @tagName(k[0]) ++ ", ." ++ @tagName(k[1]) ++ ", ." ++ @tagName(k[2]) ++ " }";
 }
 
 /// Port of sqlite3VdbeExec(): run the program until it produces a row
@@ -226,19 +274,55 @@ pub const Exec = struct {
     /// (the run loop keeps its own copy in a local).
     progress_limit: u64 = std.math.maxInt(u64),
 
-    pub fn reg(e: *Exec, i: i32) *Mem {
-        return &e.regs[@intCast(i)];
+    // The registers and cursors that operands name. A handler passes an
+    // operand of its OpOf() (`e.reg(op.p1)`), which has the type the
+    // kinds table gives it, or the register after one
+    // (`e.reg(op.p2.at(i))`). A number that is a register only in some
+    // uses of the opcode (`.int` in the table) is converted where the
+    // handler knows it is one, with `Reg.from()` (OP_OpenWrite's P2 under
+    // OPFLAG_P2ISREG), as is an operand of another instruction than the
+    // handler's own if it is not read through opAt().
+
+    pub fn reg(e: *Exec, r: Reg) *Mem {
+        return &e.regs[@intCast(r.int())];
     }
 
-    /// Register `i` of the main program, even inside a trigger.
-    pub fn rootReg(e: *Exec, i: i32) *Mem {
-        const frame = vi.rootFrame(e.v.frame orelse return e.reg(i));
-        return &frame.mem[@intCast(i)];
+    /// The registers from `r` on, as an UnpackedRecord takes them.
+    pub fn regsFrom(e: *Exec, r: Reg) [*]Mem {
+        return e.regs[@intCast(r.int())..].ptr;
     }
 
-    /// Cursor `i`, which must be open.
-    pub fn csr(e: *Exec, i: i32) *VdbeCursor {
-        return e.v.csr[@intCast(i)].?;
+    /// The `n` registers from `r` on.
+    pub fn regRange(e: *Exec, r: Reg, n: usize) []Mem {
+        return e.regs[@intCast(r.int())..][0..n];
+    }
+
+    /// Register `r` of the main program, even inside a trigger.
+    pub fn rootReg(e: *Exec, r: Reg) *Mem {
+        const frame = vi.rootFrame(e.v.frame orelse return e.reg(r));
+        return &frame.mem[@intCast(r.int())];
+    }
+
+    /// Cursor `c`, which must be open.
+    pub fn csr(e: *Exec, c: Cursor) *VdbeCursor {
+        return e.v.csr[@intCast(c.int())].?;
+    }
+
+    /// Cursor `c`, or null if it is not open.
+    pub fn csrIfOpen(e: *Exec, c: Cursor) ?*VdbeCursor {
+        return e.v.csr[@intCast(c.int())];
+    }
+
+    /// The slot of cursor `c`, open or not.
+    pub fn csrSlot(e: *Exec, c: Cursor) *?*VdbeCursor {
+        return &e.v.csr[@intCast(c.int())];
+    }
+
+    /// The instruction at `addr` of the current program, which is an
+    /// `opc` (a handler that reads the instruction before or after its
+    /// own), with its operands typed as that opcode's.
+    pub fn opAt(e: *Exec, comptime opc: OP, addr: usize) *vi.OpOf(operand.kinds(opc)) {
+        return vi.opAs(&e.ops[addr], opc);
     }
 
     /// abort_due_to_error with result code `rc` (C: `rc = X; goto
@@ -257,7 +341,7 @@ pub const Exec = struct {
     }
 
     /// Port of out2Prerelease(): register P2, ready to take an integer.
-    pub fn out2Prerelease(e: *Exec, op: *const Op) *Mem {
+    pub fn out2Prerelease(e: *Exec, op: anytype) *Mem {
         const out = e.reg(op.p2);
         if (out.isDynamic()) mem.setNull(out);
         out.flags = .{ .Int = true };
@@ -314,10 +398,11 @@ pub const Exec = struct {
                     t0 = hwtime();
                 }
                 const h = handler(opc);
-                const r = if (comptime @typeInfo(@TypeOf(h.f)).@"fn".param_types.len == 3)
-                    @call(h.call, h.f, .{ e, op, opc })
+                const ins: h.Ins = @ptrCast(op);
+                const r = if (h.takes_opc)
+                    @call(h.call, h.f, .{ e, ins, opc })
                 else
-                    @call(h.call, h.f, .{ e, op });
+                    @call(h.call, h.f, .{ e, ins });
                 const flow: Flow = if (@typeInfo(@TypeOf(r)) == .error_union)
                     r catch |err| return e.abortDueToError(err, n_vm_step)
                 else

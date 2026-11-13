@@ -185,7 +185,7 @@ pub fn render(gpa: std.mem.Allocator, dia: dialect.Dialect, d: Decoded, regs: an
     var i: usize = 0;
     while (it.next()) |v| : (i += 1) {
         if (i > 0) out.writeAll(c.value_separator) catch return error.OutOfMemory;
-        const m = regs.reg(v.reg);
+        const m = regs.reg(.from(v.reg));
         if (c.value_text) |text_of| {
             if (text_of(gpa, out, v.type, m, it.row) catch return error.OutOfMemory) continue;
             if (in_field) {

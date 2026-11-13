@@ -517,7 +517,7 @@ pub fn idxRowid(db: *int.Sqlite3, cur: *btree.Cursor) (mem.Error || btree.Error)
 /// Port of sqlite3VdbeIdxKeyCompare(): compare the index entry under the
 /// cursor (ignoring its rowid) with `r`.
 pub fn idxKeyCompare(db: *int.Sqlite3, c: *VdbeCursor, r: *UnpackedRecord) (mem.Error || btree.Error)!i32 {
-    const cur = c.uc.cursor;
+    const cur = c.kind.btree.cursor;
     const n_cell_key = cur.payloadSize();
     if (n_cell_key == 0 or n_cell_key > 0x7fffffff) return error.Corrupt;
     var m: Mem = .{ .db = db, .flags = .{} };
@@ -528,17 +528,18 @@ pub fn idxKeyCompare(db: *int.Sqlite3, c: *VdbeCursor, r: *UnpackedRecord) (mem.
 
 /// Port of sqlite3VdbeFinishMoveto(): carry out a deferred seek.
 pub fn finishMoveto(c: *VdbeCursor) btree.Error!void {
-    std.debug.assert(c.deferred_moveto and c.is_table and c.e_cur_type == .btree);
-    const res = try c.uc.cursor.tableMoveto(c.moveto_target, false);
+    const b = &c.kind.btree;
+    std.debug.assert(b.deferred_moveto and b.is_table);
+    const res = try b.cursor.tableMoveto(b.moveto_target, false);
     if (res != .eq) return error.Corrupt;
-    c.deferred_moveto = false;
+    b.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
 }
 
 /// Port of sqlite3VdbeHandleMovedCursor(): the row under the cursor moved
 /// (deleted or rebalanced); restore the position, or make it a NULL row.
 pub fn handleMovedCursor(c: *VdbeCursor) btree.Error!void {
-    const different = try c.uc.cursor.restore();
+    const different = try c.kind.btree.cursor.restore();
     c.cache_status = vi.cache_stale;
     if (different) c.null_row = true;
 }
@@ -547,8 +548,8 @@ pub fn handleMovedCursor(c: *VdbeCursor) btree.Error!void {
 pub fn cursorRestore(c: *VdbeCursor) btree.Error!void {
     // A null cursor (OP_NullRow on a cursor never opened) is a pseudo
     // cursor here; C gives it a fake b-tree cursor that never moves.
-    const cur = switch (c.uc) {
-        .cursor => |cur| cur,
+    const cur = switch (c.kind) {
+        .btree => |b| b.cursor,
         else => return,
     };
     if (cur.hasMoved()) return handleMovedCursor(c);

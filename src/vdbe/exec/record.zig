@@ -18,11 +18,12 @@ const record_fmt = @import("xqlite_storage").record;
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const Op = vi.Op;
+const OpOf = vi.OpOf;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const ENC = vi.ENC;
 const VdbeCursor = vi.VdbeCursor;
+const Reg = @import("../operand.zig").Reg;
 const RC = int.RC;
 const Aff = int.Aff;
 
@@ -45,15 +46,17 @@ fn memTypeName(m: *const Mem) []const u8 {
 /// sqlite3StdType.
 pub const std_type = [_][]const u8{ "ANY", "BLOB", "INT", "INTEGER", "REAL", "TEXT" };
 
-pub fn opIsType(e: *Exec, op: *Op) Flow {
+pub fn opIsType(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
+    // P1 is a cursor, whose column P3 is tested, or -1, and P3 the
+    // register to test.
     const type_mask: u16 = if (op.p1 >= 0) blk: {
-        const c = e.csr(op.p1);
+        const c = e.csr(.from(op.p1));
         if (op.p3 >= c.n_hdr_parsed) break :blk @as(u16, 1) << @intCast(op.p4As(.int32) - 1);
         const st = c.types[@intCast(op.p3)];
         if (st >= 12) break :blk if (st & 1 != 0) 0x04 else 0x08;
         const masks = [_]u16{ 0x10, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x2, 0x01, 0x01, 0x10, 0x10 };
         break :blk masks[st];
-    } else @as(u16, 1) << @intCast(mem.valueType(e.reg(op.p3)) - 1);
+    } else @as(u16, 1) << @intCast(mem.valueType(e.reg(.from(op.p3))) - 1);
     return if (type_mask & op.p5 != 0) .jump_p2 else .next;
 }
 
@@ -66,7 +69,7 @@ fn columnCorrupt(e: *Exec) Error!Flow {
 }
 
 /// Port of OP_Column.
-pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
+pub fn opColumn(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow {
     const v = e.v;
     var c = e.csr(op.p1);
     var p2: u32 = @intCast(op.p2);
@@ -83,9 +86,14 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
         var end_hdr: u32 = undefined;
         if (c.cache_status != v.cache_ctr) {
             if (c.null_row) {
-                if (c.e_cur_type == .pseudo and c.seek_result > 0) {
-                    // The register of a pseudo cursor holds the record.
-                    const preg = e.reg(c.seek_result);
+                // The register of a pseudo cursor holds the record (none:
+                // the cursor of OP_NullRow).
+                const record: Reg = switch (c.kind) {
+                    .pseudo => |r| r,
+                    else => .none,
+                };
+                if (record != .none) {
+                    const preg = e.reg(record);
                     c.payload_size = @intCast(preg.n);
                     c.sz_row = @intCast(preg.n);
                     c.row = preg.z;
@@ -94,12 +102,13 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
                     return .next;
                 }
             } else {
-                const cur = c.uc.cursor;
-                if (c.deferred_moveto) {
-                    if (c.alt_map) |map| {
+                const b = &c.kind.btree;
+                const cur = b.cursor;
+                if (b.deferred_moveto) {
+                    if (b.alt_map) |map| {
                         const i_map = map[p2];
                         if (i_map > 0) {
-                            c = c.alt_cursor.?;
+                            c = b.alt_cursor.?;
                             p2 = i_map - 1;
                             continue :restart;
                         }
@@ -133,7 +142,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
                 i_parse = 0;
                 hdr_parse = hd.len;
             }
-        } else if (c.e_cur_type == .btree and c.uc.cursor.hasMoved()) {
+        } else if (c.kind == .btree and c.kind.btree.cursor.hasMoved()) {
             try serial.handleMovedCursor(c);
             continue :restart;
         }
@@ -147,7 +156,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
                     z_data = row[0..c.sz_row];
                 } else {
                     s_mem = .{ .db = e.db, .flags = .{} };
-                    try mem.fromBtreeZeroOffset(c.uc.cursor, end_hdr, &s_mem);
+                    try mem.fromBtreeZeroOffset(c.kind.btree.cursor, end_hdr, &s_mem);
                     z_data = s_mem.bytes();
                 }
                 parse = true;
@@ -261,7 +270,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
 fn columnFromOverflow(e: *Exec, c: *VdbeCursor, t: u32, offset: u32, dest: *Mem) !void {
     const len = record_fmt.serialTypeLen(t);
     if (len > e.db.limit(.length)) return error.TooBig;
-    try mem.fromBtree(c.uc.cursor, offset, len, dest);
+    try mem.fromBtree(c.kind.btree.cursor, offset, len, dest);
     serial.serialGet(dest.z.?[0..len], 0, t, dest);
     if (t & 1 != 0 and dest.enc == ENC.UTF8) {
         dest.z.?[len] = 0;
@@ -272,10 +281,10 @@ fn columnFromOverflow(e: *Exec, c: *VdbeCursor, t: u32, offset: u32, dest: *Mem)
 
 // ===================================================== affinity and types
 
-pub fn opTypeCheck(e: *Exec, op: *Op) Error!Flow {
+pub fn opTypeCheck(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     const tab = op.p4As(.table);
     const cols = tab.cols;
-    var in1: i32 = op.p1;
+    var in1 = op.p1;
     // P3 below 2: every column; otherwise only column P3-2.
     var i: usize = if (op.p3 < 2) 0 else @intCast(op.p3 - 2);
     const n_col: usize = if (op.p3 < 2) cols.len else i + 1;
@@ -284,7 +293,7 @@ pub fn opTypeCheck(e: *Exec, op: *Op) Error!Flow {
         if (col.col_flags.intersects(int.COLFLAG.GENERATED) and op.p3 < 2) {
             if (col.col_flags.VIRTUAL) continue;
             if (op.p3 != 0) {
-                in1 += 1;
+                in1 = in1.at(1);
                 continue;
             }
         }
@@ -319,35 +328,29 @@ pub fn opTypeCheck(e: *Exec, op: *Op) Error!Flow {
                 return e.abort(RC.CONSTRAINT_DATATYPE);
             }
         }
-        in1 += 1;
+        in1 = in1.at(1);
     }
     return .next;
 }
 
-pub fn opAffinity(e: *Exec, op: *Op) Error!Flow {
-    const aff = op.p4As(.z);
-    var in1 = op.p1;
-    var i: usize = 0;
-    while (aff[i] != 0) : (i += 1) {
-        const a = aff[i];
-        const m = e.reg(in1);
+pub fn opAffinity(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
+    const aff = std.mem.span(op.p4As(.z));
+    for (e.regRange(op.p1, aff.len), aff) |*m, a| {
         try mem.applyAffinity(m, a, e.encoding);
         if (a == Aff.real and m.flags.Int) {
             m.u = .{ .r = @floatFromInt(m.u.i) };
             m.flags.Real = true;
             m.flags.clear(.{ .Int = true, .Str = true });
         }
-        in1 += 1;
     }
     return .next;
 }
 
 // ============================================================ OP_MakeRecord
 
-pub fn opMakeRecord(e: *Exec, op: *Op) Error!Flow {
+pub fn opMakeRecord(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Error!Flow {
     const n_field: usize = @intCast(op.p2);
-    const data0: usize = @intCast(op.p1);
-    const recs = e.regs[data0..][0..n_field];
+    const recs = e.regRange(op.p1, n_field);
     const out = e.reg(op.p3);
     if (op.p4type == .z) {
         const aff = op.p4As(.z);

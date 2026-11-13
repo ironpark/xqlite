@@ -73,7 +73,7 @@ fn seekToRow(p: *Incrblob, i_row: i64, err: *?[:0]u8) i32 {
     }
     if (rc == RC.ROW) {
         const c = v.csr[0].?;
-        std.debug.assert(c.e_cur_type == .btree);
+        std.debug.assert(c.curType() == .btree);
         const t: u32 = if (c.n_hdr_parsed > p.i_col) c.types[p.i_col] else 0;
         if (t < 12) {
             msg = std.fmt.allocPrintSentinel(db.gpa, "cannot open value of type {s}", .{
@@ -85,7 +85,7 @@ fn seekToRow(p: *Incrblob, i_row: i64, err: *?[:0]u8) i32 {
         } else {
             p.i_offset = @intCast(c.offsets[p.i_col]);
             p.n_byte = @intCast(record.serialTypeLen(t));
-            p.csr = c.uc.cursor;
+            p.csr = c.kind.btree.cursor;
             p.csr.?.incrblobCursor();
         }
     }

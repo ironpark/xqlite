@@ -706,7 +706,7 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, cur: 
                 const right = try expr_mod.exprAlloc(p.arena, TK.REGISTER, null, false);
                 compare.right = right;
                 right.i_table = reg.int();
-                ec.exprIfFalse(p, compare, .of(level.addr_cont), vi.SQLITE_JUMPIFNULL);
+                ec.exprIfFalse(p, compare, level.addr_cont, vi.SQLITE_JUMPIFNULL);
                 compare.left = null;
             }
         }
@@ -1008,7 +1008,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
                     skip_like = aux.emitAny(v, if (x & 1 != 0) OP.IfNot else OP.If, .{ .reg, .jump, .int }, .{Reg.from(@intCast(x >> 1))});
                 }
             }
-            ec.exprIfFalse(p, e, .of(addr_cont), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, e, addr_cont, vi.SQLITE_JUMPIFNULL);
             if (skip_like) |a| aux.landHere(v, a);
             term.wt_flags.CODED = true;
         }
@@ -1036,7 +1036,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         }
         var e_alt = alt.expr.*;
         e_alt.left = e.left;
-        ec.exprIfFalse(p, &e_alt, .of(addr_cont), vi.SQLITE_JUMPIFNULL);
+        ec.exprIfFalse(p, &e_alt, addr_cont, vi.SQLITE_JUMPIFNULL);
         alt.wt_flags.CODED = true;
     }
 
@@ -1096,7 +1096,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
                 continue;
             }
             if (tab_item.fg.jointype.LTORJ) continue;
-            ec.exprIfFalse(p, term.expr, .of(addr_cont), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, term.expr, addr_cont, vi.SQLITE_JUMPIFNULL);
             term.wt_flags.CODED = true;
         }
     }

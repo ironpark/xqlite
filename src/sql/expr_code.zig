@@ -653,8 +653,14 @@ fn oomZero(p: *Parse) Reg {
 
 /// Port of sqlite3ExprCodeIN(): code "x IN (...)": jump to
 /// `dest_if_false` if the left side is not in the set, to `dest_if_null`
-/// if NULLs make that unknown, and fall through if it is.
-fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
+/// if NULLs make that unknown, and fall through if it is. Each is a
+/// Label, an Addr or a Jump.
+inline fn codeIN(p: *Parse, e: *Expr, dest_if_false: anytype, dest_if_null: anytype) void {
+    codeINJump(p, e, Jump.of(dest_if_false), Jump.of(dest_if_null));
+}
+
+/// codeIN() on Jumps: the one body.
+fn codeINJump(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
     var r_rhs_has_null: Reg = .none;
     const ok_const_factor = p.ok_const_factor;
     const left = e.left.?;
@@ -1427,7 +1433,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                 const dest_if_false = aux.newLabel(p);
                 const dest_if_null = aux.newLabel(p);
                 _ = aux.emit(v, .Null, .{ 0, out });
-                codeIN(p, e, Jump.of(dest_if_false), Jump.of(dest_if_null));
+                codeIN(p, e, dest_if_false, dest_if_null);
                 _ = aux.emit(v, .Integer, .{ 1, out });
                 aux.place(v, dest_if_false);
                 _ = aux.emit(v, .AddImm, .{ out, 0 });
@@ -1544,7 +1550,7 @@ fn codeCase(p: *Parse, e: *Expr, out: Reg, reg_free1: *Reg) void {
             test_expr = items[i].expr;
         }
         const next_case = aux.newLabel(p);
-        exprIfFalse(p, test_expr, .of(next_case), JUMPIFNULL);
+        exprIfFalse(p, test_expr, next_case, JUMPIFNULL);
         exprCode(p, items[i + 1].expr, out);
         _ = aux.emit(v, .Goto, .{ 0, end_label });
         aux.place(v, next_case);
@@ -1770,11 +1776,11 @@ pub fn codeExprList(p: *Parse, list: *ExprList, target: Reg, src_reg: Reg, flags
     return n;
 }
 
-/// The jumps of exprCodeBetween(): exprIfTrue or exprIfFalse.
+/// The jumps of exprCodeBetween(): ifTrue or ifFalse.
 const JumpFn = *const fn (p: *Parse, e: ?*Expr, dest: Jump, jump_if_null: u16) void;
 
 /// Where exprCodeBetween() puts its result: in a register, or a jump
-/// (exprIfTrue or exprIfFalse) to a place.
+/// (ifTrue or ifFalse) to a place.
 const BetweenDest = union(enum) {
     reg: Reg,
     jump: struct { f: JumpFn, to: Jump },
@@ -1800,9 +1806,15 @@ fn codeBetween(p: *Parse, e: *Expr, dest: BetweenDest, jump_if_null: u16) void {
     releaseTempReg(p, reg_free1);
 }
 
-/// Port of sqlite3ExprIfTrue(): jump to `dest` if `e` is true; also if
-/// it is NULL and `jump_if_null` is SQLITE_JUMPIFNULL.
-pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
+/// Port of sqlite3ExprIfTrue(): jump to `to` (a Label, an Addr or a
+/// Jump) if `e` is true; also if it is NULL and `jump_if_null` is
+/// SQLITE_JUMPIFNULL.
+pub inline fn exprIfTrue(p: *Parse, e: ?*Expr, to: anytype, jump_if_null: u16) void {
+    ifTrue(p, e, Jump.of(to), jump_if_null);
+}
+
+/// exprIfTrue() on a Jump: the one body, also the JumpFn of codeBetween().
+fn ifTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
     const v = p.vdbe orelse return;
     const e = e_arg orelse return;
     var jump_if_null = jump_if_null_arg;
@@ -1820,7 +1832,7 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) voi
             const first, const second = if (evalRhsFirst(e)) .{ e.right, e.left } else .{ e.left, e.right };
             if (op == TK.AND) {
                 const d2 = aux.newLabel(p);
-                exprIfFalse(p, first, .of(d2), jump_if_null ^ JUMPIFNULL);
+                exprIfFalse(p, first, d2, jump_if_null ^ JUMPIFNULL);
                 exprIfTrue(p, second, to, jump_if_null);
                 aux.place(v, d2);
             } else {
@@ -1868,11 +1880,11 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) voi
             _ = aux.emitAny(v, OP.fromTk(op), .{ .reg, .jump, .int }, .{ r1, to });
             return;
         },
-        TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = exprIfTrue, .to = to } }, jump_if_null),
+        TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = ifTrue, .to = to } }, jump_if_null),
         TK.IN => {
             const dest_if_false = aux.newLabel(p);
             const dest_if_null = if (jump_if_null != 0) to else Jump.of(dest_if_false);
-            codeIN(p, e, Jump.of(dest_if_false), dest_if_null);
+            codeIN(p, e, dest_if_false, dest_if_null);
             _ = aux.emit(v, .Goto, .{ 0, to });
             aux.place(v, dest_if_false);
             return;
@@ -1889,9 +1901,15 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) voi
     }
 }
 
-/// Port of sqlite3ExprIfFalse(): jump to `to` if `e` is false; also if
-/// it is NULL and `jump_if_null` is SQLITE_JUMPIFNULL.
-pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
+/// Port of sqlite3ExprIfFalse(): jump to `to` (a Label, an Addr or a
+/// Jump) if `e` is false; also if it is NULL and `jump_if_null` is
+/// SQLITE_JUMPIFNULL.
+pub inline fn exprIfFalse(p: *Parse, e: ?*Expr, to: anytype, jump_if_null: u16) void {
+    ifFalse(p, e, Jump.of(to), jump_if_null);
+}
+
+/// exprIfFalse() on a Jump: the one body, also the JumpFn of codeBetween().
+fn ifFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
     const v = p.vdbe orelse return;
     const e = e_arg orelse return;
     var jump_if_null = jump_if_null_arg;
@@ -1914,7 +1932,7 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) vo
                 exprIfFalse(p, second, to, jump_if_null);
             } else {
                 const d2 = aux.newLabel(p);
-                exprIfTrue(p, first, .of(d2), jump_if_null ^ JUMPIFNULL);
+                exprIfTrue(p, first, d2, jump_if_null ^ JUMPIFNULL);
                 exprIfFalse(p, second, to, jump_if_null);
                 aux.place(v, d2);
             }
@@ -1961,13 +1979,13 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) vo
             _ = aux.emitAny(v, OP.fromTk(op), .{ .reg, .jump, .int }, .{ r1, to });
             return;
         },
-        TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = exprIfFalse, .to = to } }, jump_if_null),
+        TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = ifFalse, .to = to } }, jump_if_null),
         TK.IN => {
             if (jump_if_null != 0) {
                 codeIN(p, e, to, to);
             } else {
                 const dest_if_null = aux.newLabel(p);
-                codeIN(p, e, to, Jump.of(dest_if_null));
+                codeIN(p, e, to, dest_if_null);
                 aux.place(v, dest_if_null);
             }
             return;
@@ -1985,7 +2003,7 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) vo
 }
 
 /// Port of sqlite3ExprIfFalseDup(): exprIfFalse() on a copy of `e`.
-pub fn exprIfFalseDup(p: *Parse, e: ?*Expr, dest: Jump, jump_if_null: u16) void {
+pub fn exprIfFalseDup(p: *Parse, e: ?*Expr, dest: anytype, jump_if_null: u16) void {
     const c = dup(p, e);
     if (!p.db.malloc_failed) exprIfFalse(p, c, dest, jump_if_null);
 }

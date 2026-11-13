@@ -1763,8 +1763,8 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         const ck_ok = aux.newLabel(p);
         p.i_self_tab = data_cur.int() + 1;
         var kk = check.len() - 1;
-        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, .of(ck_fault), 0);
-        ec.exprIfTrue(p, check.at(0).expr, .of(ck_ok), vi.SQLITE_JUMPIFNULL);
+        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, ck_fault, 0);
+        ec.exprIfTrue(p, check.at(0).expr, ck_ok, vi.SQLITE_JUMPIFNULL);
         aux.place(v, ck_fault);
         p.i_self_tab = 0;
         const msg = try build.mprintf(p, "CHECK constraint failed in %s", &.{.{ .str = t.name }});

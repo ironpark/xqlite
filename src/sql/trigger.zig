@@ -687,7 +687,7 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) Oom!?*Tr
         if (!db.malloc_failed) if (resolve.resolveExprNames(&nc, w)) |_| {
             const end = aux.newLabel(&sub);
             end_trigger = end;
-            ec.exprIfFalse(&sub, w, .of(end), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(&sub, w, end, vi.SQLITE_JUMPIFNULL);
         } else |_| {};
     }
 

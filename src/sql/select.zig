@@ -578,17 +578,18 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
     sort.addr_push_end = aux.here(v).plus(-1);
 }
 
-/// Port of codeOffset(): skip the row (go to `skip`) while the OFFSET
-/// counter is positive.
-fn codeOffset(v: *Vdbe, offset: Reg, skip: Jump) void {
+/// Port of codeOffset(): skip the row (go to `skip`, a Label, an Addr or
+/// a Jump) while the OFFSET counter is positive.
+fn codeOffset(v: *Vdbe, offset: Reg, skip: anytype) void {
     if (!offset.isNone()) _ = aux.emit(v, .IfPos, .{ offset, skip, 1 });
 }
 
 /// Port of codeDistinct(): code the DISTINCT test of the row in
-/// registers from `elem`, jumping to `repeat` for a duplicate.
+/// registers from `elem`, jumping to `repeat` (a Label, an Addr or a
+/// Jump) for a duplicate.
 /// Returns what the test uses: the table `tab`, the previous-row
 /// registers (WHERE_DISTINCT_ORDERED) or nothing (WHERE_DISTINCT_UNIQUE).
-fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat: Jump, e_list: *ExprList, elem: Reg) int.Distinct {
+fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat: anytype, e_list: *ExprList, elem: Reg) int.Distinct {
     const n_result_col: i32 = @intCast(e_list.len());
     const v = p.vdbe.?;
     switch (e_tnct_type) {
@@ -645,8 +646,14 @@ fn fixDistinctOpenEph(p: *Parse, d: int.Distinct, open_eph: Addr) void {
 /// Port of selectInnerLoop(): the inside of the loop of a SELECT: compute
 /// the row (or read it from `src_tab` if there is one), apply DISTINCT,
 /// OFFSET and LIMIT, and send it to `dest` (or the sorter). `continue_to`
-/// is where the next row starts, `break_to` where the loop ends.
-fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, distinct: ?*DistinctCtx, dest: *SelectDest, continue_to: Jump, break_to: Jump) void {
+/// is where the next row starts, `break_to` where the loop ends; each is
+/// a Label, an Addr or a Jump.
+inline fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort: ?*SortCtx, distinct: ?*DistinctCtx, dest: *SelectDest, continue_to: anytype, break_to: anytype) void {
+    innerLoop(p, s, src_tab, sort, distinct, dest, Jump.of(continue_to), Jump.of(break_to));
+}
+
+/// selectInnerLoop() on Jumps: the one body.
+fn innerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, distinct: ?*DistinctCtx, dest: *SelectDest, continue_to: Jump, break_to: Jump) void {
     const v = p.vdbe.?;
     const e_dest = dest.e_dest;
     var n_prefix_reg: i32 = 0;
@@ -904,7 +911,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         b_seq = 0;
     } else {
         addr = aux.emit(v, .Sort, .{ tab, done }).plus(1);
-        codeOffset(v, s.i_offset, .of(next));
+        codeOffset(v, s.i_offset, next);
         sort_tab = tab;
         b_seq = 1;
         if (!s.i_offset.isNone()) _ = aux.emit(v, .AddImm, .{ s.i_limit, -1 });
@@ -1460,8 +1467,8 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     _ = aux.emit(v, .Delete, .{queue});
 
     const cont = aux.newLabel(p);
-    codeOffset(v, offset_reg, .of(cont));
-    selectInnerLoop(p, s, current, null, null, dest, .of(cont), .of(done));
+    codeOffset(v, offset_reg, cont);
+    selectInnerLoop(p, s, current, null, null, dest, cont, done);
     if (!limit_reg.isNone()) _ = aux.emit(v, .DecrJumpZero, .{ limit_reg, done });
     aux.place(v, cont);
 
@@ -1493,7 +1500,7 @@ fn multiSelectValues(p: *Parse, s_arg: *Select, dest: *SelectDest) i32 {
     _ = aux.explain(p, false, "SCAN {d} CONSTANT ROW{s}", .{ n_row, if (n_row == 1) "" else "S" });
     var it: ?*Select = s;
     while (it) |x| {
-        selectInnerLoop(p, x, null, null, null, dest, .of(Addr.from(1)), .of(Addr.from(1)));
+        selectInnerLoop(p, x, null, null, null, dest, Addr.from(1), Addr.from(1));
         if (!show_all) break;
         x.n_select_row = @truncate(n_row); // C stores the int into a LogEst
         it = x.next;
@@ -1627,7 +1634,7 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
     }
     if (p.db.malloc_failed) return .from(0);
 
-    codeOffset(v, s.i_offset, .of(cont));
+    codeOffset(v, s.i_offset, cont);
 
     switch (dest.e_dest) {
         SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
@@ -3354,7 +3361,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
             }
             const filtered = aux.newLabel(p);
             next = filtered;
-            ec.exprIfFalse(p, filter, .of(filtered), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, filter, filtered, vi.SQLITE_JUMPIFNULL);
         }
         if (f.i_ob_tab) |ob_tab| {
             // The arguments go to the ORDER BY table; OP_AggStep runs at
@@ -3396,7 +3403,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
         if (list) |l| switch (f.distinct) {
             .table => |cur| {
                 if (next == null) next = aux.newLabel(p);
-                f.distinct = codeDistinct(p, e_distinct_type, cur, .of(next.?), l, reg_distinct);
+                f.distinct = codeDistinct(p, e_distinct_type, cur, next.?, l, reg_distinct);
             },
             else => {},
         };
@@ -3960,13 +3967,12 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             subq.xq_end = aux.here(v);
             aux.landHere(v, addr_init);
             expr_mod.clearTempRegCache(p);
-        } else if (item.fg.is_cte and item.u2.cte_use.?.addr_m9e != null) {
+        } else if (if (item.fg.is_cte) item.u2.cte_use.?.m9e else null) |m9e| {
             // A CTE already materialized: run its subroutine and use a
             // copy of its table.
-            const use = item.u2.cte_use.?;
-            _ = aux.emit(v, .Gosub, .{ use.reg_rtn, use.addr_m9e.? });
-            if (item.i_cursor != use.i_cur.int()) _ = aux.emit(v, .OpenDup, .{ Cursor.from(item.i_cursor), use.i_cur });
-            sub.n_select_row = use.n_row_est;
+            _ = aux.emit(v, .Gosub, .{ m9e.reg_rtn, m9e.addr });
+            if (item.i_cursor != m9e.cur.int()) _ = aux.emit(v, .OpenDup, .{ Cursor.from(item.i_cursor), m9e.cur });
+            sub.n_select_row = item.u2.cte_use.?.n_row_est;
         } else if (isSelfJoinView(tab_list, item, 0, i)) |prior| {
             // Materialized by an earlier term of this FROM clause.
             const prior_subq = prior.u4.subq.?;
@@ -3994,9 +4000,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             expr_mod.clearTempRegCache(p);
             if (item.fg.is_cte and !item.fg.is_correlated) {
                 const use = item.u2.cte_use.?;
-                use.addr_m9e = subq.addr_fill_sub;
-                use.reg_rtn = subq.reg_return;
-                use.i_cur = .from(item.i_cursor);
+                use.m9e = .{ .addr = top_addr.plus(1), .reg_rtn = reg_return, .cur = .from(item.i_cursor) };
                 use.n_row_est = sub.n_select_row;
             }
         }
@@ -4103,13 +4107,13 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             aux.place(v, addr_gosub);
             // The inner-loop subroutine.
             sort.label_ob_lopt = null;
-            selectInnerLoop(p, s, null, &sort, &distinct, dest, .of(cont), .of(brk));
+            selectInnerLoop(p, s, null, &sort, &distinct, dest, cont, brk);
             aux.place(v, cont);
             _ = aux.emit(v, .Return, .{reg_gosub});
             aux.place(v, brk);
         } else {
             // The standard inner loop.
-            selectInnerLoop(p, s, null, &sort, &distinct, dest, .of(where_mod.continueLabel(w)), .of(where_mod.breakLabel(w)));
+            selectInnerLoop(p, s, null, &sort, &distinct, dest, where_mod.continueLabel(w), where_mod.breakLabel(w));
             where_mod.whereEnd(w);
         }
     } else {
@@ -4318,8 +4322,8 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             _ = aux.emit(v, .IfPos, .{ use_flag, addr_output_row.plus(2) });
             _ = aux.emit(v, .Return, .{reg_output_row});
             finalizeAggFunctions(p, agg);
-            ec.exprIfFalse(p, having, .of(addr_output_row.plus(1)), vi.SQLITE_JUMPIFNULL);
-            selectInnerLoop(p, s, null, &sort, &distinct, dest, .of(addr_output_row.plus(1)), .of(addr_set_abort));
+            ec.exprIfFalse(p, having, addr_output_row.plus(1), vi.SQLITE_JUMPIFNULL);
+            selectInnerLoop(p, s, null, &sort, &distinct, dest, addr_output_row.plus(1), addr_set_abort);
             _ = aux.emit(v, .Return, .{reg_output_row});
 
             // The subroutine resetting the accumulators.
@@ -4402,8 +4406,8 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             }
 
             sort.order_by = null;
-            ec.exprIfFalse(p, having, .of(addr_end), vi.SQLITE_JUMPIFNULL);
-            selectInnerLoop(p, s, null, null, null, dest, .of(addr_end), .of(addr_end));
+            ec.exprIfFalse(p, having, addr_end, vi.SQLITE_JUMPIFNULL);
+            selectInnerLoop(p, s, null, null, null, dest, addr_end, addr_end);
         }
         aux.place(v, addr_end);
     }

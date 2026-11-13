@@ -364,7 +364,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     if (partial) |pe| {
         const l = aux.newLabel(p);
         skip_row = l;
-        ec.exprIfFalse(p, pe, .of(l), vi.SQLITE_JUMPIFNULL);
+        ec.exprIfFalse(p, pe, l, vi.SQLITE_JUMPIFNULL);
         loop.ws_flags.PARTIALIDX = true;
     }
     const reg_record = expr_mod.getTempReg(p);
@@ -444,7 +444,7 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
             if (!term.wt_flags.VIRTUAL and
                 expr_mod.isSingleTableConstraint(e, tab_list, i_src, false))
             {
-                ec.exprIfFalse(p, term.expr, .of(addr_cont), vi.SQLITE_JUMPIFNULL);
+                ec.exprIfFalse(p, term.expr, addr_cont, vi.SQLITE_JUMPIFNULL);
             }
         }
         if (loop.ws_flags.IPK) {
@@ -1531,7 +1531,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             (n_tab_list == 0 or exprIsDeterministic(x)) and
             !(x.flags.InnerON and tab_list.at(0).fg.jointype.LTORJ))
         {
-            ec.exprIfFalse(p, x, .of(w.i_break), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, x, w.i_break, vi.SQLITE_JUMPIFNULL);
             t.wt_flags.CODED = true;
         }
     }

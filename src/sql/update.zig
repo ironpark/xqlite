@@ -360,7 +360,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // The INSERT left the data cursor on the row to update: no
             // search, only the WHERE of the DO UPDATE.
             e_one_pass = ONEPASS.SINGLE;
-            ec.exprIfFalse(p, where, .of(label_break), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, where, label_break, vi.SQLITE_JUMPIFNULL);
             b_finish_seek = false;
         } else {
             // The rows to update. A one-pass update of several rows is not

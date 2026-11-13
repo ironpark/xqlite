@@ -613,10 +613,10 @@ pub const With = struct {
 /// Per-statement usage of a CTE (CteUse).
 pub const CteUse = struct {
     n_use: i32 = 0,
-    /// The subroutine that materializes the CTE, once it is coded.
-    addr_m9e: ?Addr = null,
-    reg_rtn: Reg = .none,
-    i_cur: Cursor = .from(0),
+    /// The subroutine that materializes the CTE, once it is coded: its
+    /// start, its return-address register and the cursor of the table
+    /// it fills, which later uses copy with OP_OpenDup.
+    m9e: ?struct { addr: Addr, reg_rtn: Reg, cur: Cursor } = null,
     n_row_est: LogEst = 0,
     e_m10d: M10d = .any,
 };

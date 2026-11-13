@@ -425,7 +425,7 @@ pub fn generateIndexKey(p: *Parse, idx: *Index, data_cur: Cursor, reg_out: Reg, 
             const label = aux.newLabel(p);
             lbl.* = label;
             p.i_self_tab = data_cur.int() + 1;
-            ec.exprIfFalseDup(p, w, .of(label), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalseDup(p, w, label, vi.SQLITE_JUMPIFNULL);
             p.i_self_tab = 0;
             // The WHERE clause may have clobbered the prior key.
             prior = null;

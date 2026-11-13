@@ -1334,7 +1334,7 @@ fn generateConstraintChecksImpl(
             }
             const all_ok = aux.newLabel(p);
             const copy = try expr_mod.exprDup(p.arena, e);
-            if (!db.malloc_failed) ec.exprIfTrue(p, copy, .of(all_ok), vi.SQLITE_JUMPIFNULL);
+            if (!db.malloc_failed) ec.exprIfTrue(p, copy, all_ok, vi.SQLITE_JUMPIFNULL);
             if (on_error == OE.Ignore) {
                 _ = aux.emit(v, .Goto, .{ 0, ignore });
             } else {
@@ -1544,7 +1544,7 @@ fn generateConstraintChecksImpl(
         if (idx.part_idx_where) |w| {
             _ = aux.emit(v, .Null, .{ 0, idx_rec });
             p.i_self_tab = -new_data.at(1).int();
-            ec.exprIfFalseDup(p, w, .of(unique_ok), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalseDup(p, w, unique_ok, vi.SQLITE_JUMPIFNULL);
             p.i_self_tab = 0;
         }
 

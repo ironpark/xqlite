@@ -140,10 +140,10 @@ fn isDeferred(p: *Parse, fk: *const FKey) bool {
 /// Port of fkLookupParent(): look for the parent row of the child row in
 /// the registers from `reg_data` (rowid, then the columns), adding `n_incr`
 /// to the constraint counter if it is missing. `ai_col` maps the parent
-/// key columns to child columns. `deferred`: isDeferred(p, fk).
-fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: []const i32, reg_data: Reg, n_incr: i32, is_ignore: bool, is_update: bool) void {
+/// key columns to child columns. `deferred`: isDeferred(p, fk). `cur` is
+/// the cursor to open on the parent table or index.
+fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: []const i32, reg_data: Reg, n_incr: i32, is_ignore: bool, is_update: bool, cur: Cursor) void {
     const v = build.getVdbe(p) orelse return;
-    const cur: Cursor = .from(p.n_tab - 1);
     const ok = aux.newLabel(p);
     // The child row: its rowid, then its columns.
     const rowid = reg_data;
@@ -160,7 +160,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
     if (!is_ignore) {
         if (idx) |ix| {
             const n_col: i32 = @intCast(fk.cols.len);
-            const temp: Reg = expr_mod.getTempRange(p, n_col);
+            const temp = expr_mod.getTempRange(p, n_col);
             _ = aux.emit(v, .OpenRead, .{ cur, ix.tnum, i_db });
             aux.setP4KeyInfo(p, ix);
             for (0..fk.cols.len) |i| {
@@ -172,9 +172,8 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
                 const jump = aux.here(v).plus(n_col + 1);
                 for (0..fk.cols.len) |i| {
                     const child = cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[i])));
-                    var parent = cols.at(build.tableColumnToStorage(ix.table, ix.ai_column[i]));
-                    // A composite key that includes the IPK.
-                    if (ix.ai_column[i] == t.i_pkey) parent = rowid;
+                    // A composite key may include the IPK.
+                    const parent = build.columnRegister(ix.table, rowid, ix.ai_column[i]);
                     _ = aux.emit(v, .Ne, .{ child, jump, parent });
                     aux.changeP5(v, vi.SQLITE_JUMPIFNULL);
                 }
@@ -186,7 +185,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
         } else {
             // The parent key is the INTEGER PRIMARY KEY: a child key that
             // is not an integer has no parent.
-            const temp: Reg = expr_mod.getTempReg(p);
+            const temp = expr_mod.getTempReg(p);
             _ = aux.emit(v, .SCopy, .{ cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[0]))), temp });
             const must_be_int = aux.emit(v, .MustBeInt, .{ temp, 0 });
             // A row inserted into its own parent table satisfies itself.
@@ -420,7 +419,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: Reg, reg_new: Reg, a_change: ?[]co
                 // counts as empty, so each child row with a non-NULL key
                 // was a violation.
                 const v = build.getVdbe(p) orelse return;
-                const jump = aux.here(v).plus(@as(i32, @intCast(fk.cols.len)) + 1);
+                const jump = aux.here(v).plus(fk.cols.len + 1);
                 const old_cols = reg_old.at(1);
                 for (fk.cols) |c| {
                     const reg = old_cols.at(build.tableColumnToStorage(fk.from, @intCast(c.i_from)));
@@ -446,11 +445,11 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: Reg, reg_new: Reg, a_change: ?[]co
 
         // A shared-cache advisory read lock on the parent table.
         build.tableLock(p, @intCast(i_db), pt.tnum, false, pt.name);
-        p.n_tab += 1;
+        const cur = p.newCursor();
         // A child row removed may resolve a violation; one added may
         // cause one (but not as the SET NULL action of this very key).
-        if (!reg_old.isNone()) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_old, -1, b_ignore, a_change != null);
-        if (!reg_new.isNone() and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_new, 1, b_ignore, a_change != null);
+        if (!reg_old.isNone()) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_old, -1, b_ignore, a_change != null, cur);
+        if (!reg_new.isNone() and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_new, 1, b_ignore, a_change != null, cur);
     }
 
     // The foreign keys referring to `t` (as the parent).

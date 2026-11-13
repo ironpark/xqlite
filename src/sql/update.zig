@@ -138,8 +138,8 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     // Cursors for the table and all its indexes (used or not, the index
     // cursors follow the table's).
-    const i_base_cur = p.n_tab;
-    var data_cur: Cursor = p.newCursor();
+    const base_cur = p.newCursor();
+    var data_cur = base_cur;
     var idx_cur = data_cur.at(1);
     const pk: ?*Index = if (t.hasRowid()) null else build.primaryKeyIndex(t);
     var n_idx: usize = 0;
@@ -153,7 +153,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         // The cursors the INSERT opened.
         data_cur = u.i_data_cur;
         idx_cur = u.i_idx_cur;
-        p.n_tab = i_base_cur;
+        p.n_tab = base_cur.int();
     }
     tab_list.at(0).i_cursor = data_cur.int();
 
@@ -276,12 +276,12 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         old_rowid = p.newReg();
         new_rowid = old_rowid;
         if (chng_pk or trig != null or has_fk != 0) {
-            reg_old = p.newRegs(@intCast(t.cols.len));
+            reg_old = p.newRegs(t.cols.len);
         }
         if (chng_key or trig != null or has_fk != 0) {
             new_rowid = p.newReg();
         }
-        reg_new = p.newRegs(@intCast(t.cols.len));
+        reg_new = p.newRegs(t.cols.len);
     }
 
     // The checks of the view's triggers are made on behalf of the view.
@@ -326,8 +326,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         addr_open = aux.emit(v, .OpenEphemeral, .{ eph_cur, 0, row_set });
     } else {
         n_pk = if (pk) |k| k.n_key_col else 0;
-        pk_reg = p.newRegs(n_pk);
-        p.n_mem += n_change_from;
+        pk_reg = p.newRegs(n_pk + n_change_from);
         key = p.newReg();
         if (upsert == null) {
             const n_eph_col = n_pk + n_change_from + (if (is_view) @as(i32, @intCast(t.cols.len)) else 0);
@@ -379,7 +378,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                 main_mod.multiWrite(p);
                 if (e_one_pass == ONEPASS.MULTI) {
                     if (ai_cur_one_pass[1]) |c| {
-                        if (c != data_cur and to_open[@intCast(c.int() - i_base_cur)]) e_one_pass = ONEPASS.OFF;
+                        if (c != data_cur and to_open[c.offsetFrom(base_cur)]) e_one_pass = ONEPASS.OFF;
                     }
                 }
             }
@@ -419,14 +418,14 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // Open the indexes to update.
             if (e_one_pass != ONEPASS.OFF) {
                 for (ai_cur_one_pass) |cur| {
-                    if (cur) |c| to_open[@intCast(c.int() - i_base_cur)] = false;
+                    if (cur) |c| to_open[c.offsetFrom(base_cur)] = false;
                 }
             }
             var addr_once: ?Addr = null;
             if (e_one_pass == ONEPASS.MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] != null) > 0) addr_once = aux.emit(v, .Once, .{});
             var not_used1: Cursor = undefined;
             var not_used2: Cursor = undefined;
-            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, .from(i_base_cur), to_open, &not_used1, &not_used2);
+            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, base_cur, to_open, &not_used1, &not_used2);
             if (addr_once) |a| aux.jumpHereOrPopInst(v, a);
         }
 

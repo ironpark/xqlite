@@ -994,10 +994,10 @@ fn windowCheckValue(p: *Parse, reg: Reg, e_cond: usize) void {
     };
     const ops = [_]OP{ OP.Ge, OP.Ge, OP.Gt, OP.Ge, OP.Ge };
     const v = p.vdbe.?;
-    const reg_zero: Reg = expr_mod.getTempReg(p);
+    const reg_zero = expr_mod.getTempReg(p);
     _ = aux.emit(v, .Integer, .{ 0, reg_zero });
     if (e_cond >= WINDOW_STARTING_NUM) {
-        const reg_string: Reg = expr_mod.getTempReg(p);
+        const reg_string = expr_mod.getTempReg(p);
         _ = aux.emit4(v, .String8, .{ 0, reg_string }, .{ .z = "" });
         _ = aux.emit(v, .Ge, .{ reg_string, aux.here(v).plus(2), reg });
         aux.changeP5(v, Aff.numeric | vi.SQLITE_JUMPIFNULL);
@@ -1087,7 +1087,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
         var reg_arg = reg;
 
         if (win.filter != null) {
-            const reg_tmp: Reg = expr_mod.getTempReg(p);
+            const reg_tmp = expr_mod.getTempReg(p);
             _ = aux.emit(v, .Column, .{ csr, win.i_arg_col + n_arg, reg_tmp });
             addr_if = aux.emit(v, .IfNot, .{ reg_tmp, 0, 1 });
             expr_mod.releaseTempReg(p, reg_tmp);
@@ -1115,13 +1115,11 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
         } else if (func.x_sfunc.? != &noopStepFunc) {
             const list = win.owner.?.x.list;
             if (win.expr_args) {
-                var i_op = aux.here(v);
+                const start = aux.here(v);
                 n_arg = @intCast(list.?.len());
                 reg_arg = expr_mod.getTempRange(p, n_arg);
                 _ = ec.codeExprList(p, list.?, reg_arg, .none, 0);
-                const i_end = aux.here(v);
-                while (i_op.int() < i_end.int()) : (i_op = i_op.plus(1)) {
-                    const op = aux.getOp(v, i_op);
+                for (aux.opsBetween(v, start, aux.here(v))) |*op| {
                     if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr.int()) op.p1 = csr.int();
                 }
             }
@@ -1194,8 +1192,8 @@ fn windowFullScan(cx: *WindowCodeArg) void {
     const lbl_next = aux.newLabel(p);
     const lbl_brk = aux.newLabel(p);
 
-    const reg_c_rowid: Reg = expr_mod.getTempReg(p);
-    const reg_rowid: Reg = expr_mod.getTempReg(p);
+    const reg_c_rowid = expr_mod.getTempReg(p);
+    const reg_rowid = expr_mod.getTempReg(p);
     var reg_c_peer: Reg = .none;
     var reg_peer: Reg = .none;
     if (n_peer != 0) {
@@ -1275,7 +1273,7 @@ fn windowReturnOneRow(cx: *WindowCodeArg) void {
                 const csr = win.csr_app.?;
                 const reg_app = win.reg_app;
                 const lbl = aux.newLabel(p);
-                const tmp_reg: Reg = expr_mod.getTempReg(p);
+                const tmp_reg = expr_mod.getTempReg(p);
                 _ = aux.emit(v, .Null, .{ 0, reg_result });
 
                 if (isFunc(func, nth_value_name)) {
@@ -1294,7 +1292,7 @@ fn windowReturnOneRow(cx: *WindowCodeArg) void {
                 const n_arg = windowArgCount(win);
                 const csr = win.csr_app.?;
                 const lbl = aux.newLabel(p);
-                const tmp_reg: Reg = expr_mod.getTempReg(p);
+                const tmp_reg = expr_mod.getTempReg(p);
 
                 if (n_arg < 3) {
                     _ = aux.emit(v, .Null, .{ 0, reg_result });
@@ -1307,7 +1305,7 @@ fn windowReturnOneRow(cx: *WindowCodeArg) void {
                     _ = aux.emit(v, .AddImm, .{ tmp_reg, val });
                 } else {
                     const op = if (isFunc(func, lead_name)) OP.Add else OP.Subtract;
-                    const tmp_reg2: Reg = expr_mod.getTempReg(p);
+                    const tmp_reg2 = expr_mod.getTempReg(p);
                     _ = aux.emit(v, .Column, .{ eph, win.i_arg_col + 1, tmp_reg2 });
                     _ = aux.emitAny(v, op, arith_shape, .{ tmp_reg2, tmp_reg, tmp_reg });
                     expr_mod.releaseTempReg(p, tmp_reg2);
@@ -1399,8 +1397,8 @@ fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: Cursor, reg_val: Re
     const p = cx.parse;
     const v = p.vdbe.?;
     const order_by = cx.m_win.order_by.?;
-    const reg1: Reg = expr_mod.getTempReg(p);
-    const reg2: Reg = expr_mod.getTempReg(p);
+    const reg1 = expr_mod.getTempReg(p);
+    const reg2 = expr_mod.getTempReg(p);
     const reg_string = p.newReg();
     var arith: OP = OP.Add;
     const lbl_done = aux.newLabel(p);
@@ -1515,8 +1513,8 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: Reg, jump_on_eof: bo
     // cursor (if a>b), nor the end cursor reach EOF while the input is
     // still finding rows.
     if (m_win.e_start == m_win.e_end and !reg_countdown.isNone() and m_win.e_frm_type == TK.RANGE) {
-        const reg_rowid1: Reg = expr_mod.getTempReg(p);
-        const reg_rowid2: Reg = expr_mod.getTempReg(p);
+        const reg_rowid1 = expr_mod.getTempReg(p);
+        const reg_rowid2 = expr_mod.getTempReg(p);
         if (op == WINDOW_AGGINVERSE) {
             _ = aux.emit(v, .Rowid, .{ cx.start.csr, reg_rowid1 });
             _ = aux.emit(v, .Rowid, .{ cx.end.csr, reg_rowid2 });
@@ -1907,7 +1905,7 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
             _ = aux.emit(v, .Integer, .{ 1, m_win.reg_start_rowid });
             _ = aux.emit(v, .Integer, .{ 0, m_win.reg_end_rowid });
         }
-        aux.changeP1(v, addr_integer, aux.here(v).int());
+        aux.changeP1(v, addr_integer, v.nOp());
         _ = aux.emit(v, .Return, .{reg_flush_part});
     }
 }

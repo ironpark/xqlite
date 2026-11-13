@@ -1664,11 +1664,7 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
                     } else {
                         item.i_ob_tab = null;
                     }
-                    if (e.flags.Distinct and !item.b_ob_unique) {
-                        item.i_distinct = p.newCursor().int();
-                    } else {
-                        item.i_distinct = -1;
-                    }
+                    item.distinct = if (e.flags.Distinct and !item.b_ob_unique) .{ .table = p.newCursor() } else .none;
                     try agg.funcs.append(p.arena, item);
                 }
                 e.i_agg = @intCast(i);
@@ -1762,9 +1758,9 @@ pub fn releaseTempReg(p: *Parse, reg: Reg) void {
     }
 }
 
-/// Port of sqlite3GetTempRange(): the first of `n_reg` registers in a
-/// row.
-pub fn getTempRange(p: *Parse, n_reg: i32) Reg {
+/// Port of sqlite3GetTempRange(): the first of `n` registers in a row.
+pub fn getTempRange(p: *Parse, n: anytype) Reg {
+    const n_reg: i32 = @intCast(n);
     if (n_reg == 1) return getTempReg(p);
     if (n_reg > p.n_range_reg) return p.newRegs(n_reg);
     const first = p.i_range_reg;
@@ -1774,7 +1770,8 @@ pub fn getTempRange(p: *Parse, n_reg: i32) Reg {
 }
 
 /// Port of sqlite3ReleaseTempRange().
-pub fn releaseTempRange(p: *Parse, reg: Reg, n_reg: i32) void {
+pub fn releaseTempRange(p: *Parse, reg: Reg, n: anytype) void {
+    const n_reg: i32 = @intCast(n);
     if (n_reg == 1) return releaseTempReg(p, reg);
     if (n_reg > p.n_range_reg) {
         p.n_range_reg = n_reg;

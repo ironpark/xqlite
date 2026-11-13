@@ -65,7 +65,6 @@ const COLFLAG = int.COLFLAG;
 const Aff = int.Aff;
 const OP = vi.OP;
 const Reg = aux.operand.Reg;
-const Cursor = aux.operand.Cursor;
 const Context = vi.Context;
 const Mem = vi.Mem;
 const Walker = walker.Walker;
@@ -357,7 +356,7 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
     const v = build.getVdbe(p) orelse return;
     // The schema format must be at least 3, but one below 3 is not raised
     // to 4, which would corrupt existing DESC indexes.
-    const r1: Reg = expr_mod.getTempReg(p);
+    const r1 = expr_mod.getTempReg(p);
     _ = aux.emit(v, .ReadCookie, .{ i_db, r1, @backingInt(btree.Meta.file_format) });
     aux.usesBtree(v, @intCast(i_db));
     _ = aux.emit(v, .AddImm, .{ r1, -2 });
@@ -1511,22 +1510,20 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
     // stored).
     if (p.n_err == 0 and !t.cols[i_col].col_flags.VIRTUAL) {
         const v = build.getVdbe(p) orelse return;
-        var pk: ?*Index = null;
+        const pk: ?*Index = if (t.hasRowid()) null else build.primaryKeyIndex(t).?;
         var n_field: i32 = 0;
         const cur = p.newCursor();
         insert_mod.openTable(p, cur, i_db, t, OP.OpenWrite);
         const addr = aux.emit(v, .Rewind, .{cur});
-        const reg = p.newReg();
-        if (t.hasRowid()) {
-            _ = aux.emit(v, .Rowid, .{ cur, reg });
-            p.n_mem += @intCast(t.cols.len);
-        } else {
-            pk = build.primaryKeyIndex(t);
-            p.n_mem += pk.?.n_column;
-            for (0..pk.?.n_key_col) |i| {
+        // The rowid (not used WITHOUT ROWID), then the fields of the record.
+        const reg = p.newRegs(1 + if (pk) |k| k.n_column else t.cols.len);
+        if (pk) |k| {
+            for (0..k.n_key_col) |i| {
                 _ = aux.emit(v, .Column, .{ cur, i, reg.at(i + 1) });
             }
-            n_field = pk.?.n_key_col;
+            n_field = k.n_key_col;
+        } else {
+            _ = aux.emit(v, .Rowid, .{ cur, reg });
         }
         const rec = p.newReg();
         for (t.cols, 0..) |*c, i| {

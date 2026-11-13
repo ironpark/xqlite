@@ -291,7 +291,7 @@ pub const ExprListItem = struct {
     } = .{},
     u: union {
         x: struct { order_by_col: u16 = 0, alias: u16 = 0 },
-        const_expr_reg: i32,
+        const_expr_reg: Reg,
     } = .{ .x = .{} },
 };
 
@@ -1445,16 +1445,29 @@ pub const AggInfoCol = struct {
     i_sorter_column: i32,
 };
 
+/// What the DISTINCT test of a SELECT or an aggregate uses (C's int:
+/// a cursor, a register, 0 or -1).
+pub const Distinct = union(enum) {
+    /// No DISTINCT.
+    none,
+    /// An ephemeral table of the rows seen.
+    table: Cursor,
+    /// WHERE_DISTINCT_ORDERED: the registers of the previous row.
+    prev: Reg,
+    /// WHERE_DISTINCT_UNIQUE: no test, the rows are distinct.
+    unique,
+};
+
 /// An aggregate function of a query (AggInfo_func).
 pub const AggInfoFunc = struct {
     f_expr: *Expr,
     func: ?*const FuncDef,
-    /// The ephemeral table of a DISTINCT aggregate (-1: none). Once
-    /// updateAccumulator() has coded the test, what codeDistinct()
-    /// returned: still the table, the previous-row registers
-    /// (WHERE_DISTINCT_ORDERED) or 0 (WHERE_DISTINCT_UNIQUE).
-    i_distinct: i32 = -1,
-    /// The OP_OpenEphemeral of the i_distinct table.
+    /// The DISTINCT test of a DISTINCT aggregate: its ephemeral table
+    /// until updateAccumulator() codes the test, then what codeDistinct()
+    /// returned.
+    distinct: Distinct = .none,
+    /// The OP_OpenEphemeral of the DISTINCT table (a placeholder for
+    /// fixDistinctOpenEph() if the test turned out to need none).
     i_dist_addr: Addr = .from(0),
     /// The ephemeral table of an aggregate's ORDER BY, if it has one.
     i_ob_tab: ?Cursor = null,
@@ -2166,10 +2179,15 @@ pub const Parse = struct {
     }
 
     /// The first of `n` new registers in a row.
-    pub fn newRegs(p: *Parse, n: i32) Reg {
-        const first: Reg = .from(p.n_mem + 1);
-        p.n_mem += n;
+    pub fn newRegs(p: *Parse, n: anytype) Reg {
+        const first = p.nextReg();
+        p.n_mem += @as(i32, @intCast(n));
         return first;
+    }
+
+    /// The register newReg() would return next, without taking it.
+    pub fn nextReg(p: *const Parse) Reg {
+        return .from(p.n_mem + 1);
     }
 
     /// A new cursor (pParse->nTab++).
@@ -2178,10 +2196,15 @@ pub const Parse = struct {
     }
 
     /// The first of `n` new cursors in a row.
-    pub fn newCursors(p: *Parse, n: i32) Cursor {
-        const first: Cursor = .from(p.n_tab);
-        p.n_tab += n;
+    pub fn newCursors(p: *Parse, n: anytype) Cursor {
+        const first = p.nextCursor();
+        p.n_tab += @as(i32, @intCast(n));
         return first;
+    }
+
+    /// The cursor newCursor() would return next, without taking it.
+    pub fn nextCursor(p: *const Parse) Cursor {
+        return .from(p.n_tab);
     }
 };
 

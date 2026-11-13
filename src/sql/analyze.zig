@@ -470,8 +470,8 @@ fn analyzeDatabase(p: *Parse, i_db: usize) Oom!void {
     build.beginWriteOperation(p, false, i_db);
     const stat_cur = p.newCursors(3);
     openStatTable(p, i_db, stat_cur, null, "");
-    const first_reg: Reg = .from(p.n_mem + 1);
-    const first_cur: Cursor = .from(p.n_tab);
+    const first_reg = p.nextReg();
+    const first_cur = p.nextCursor();
     var it = db.dbs.items[i_db].schema.tbl_order.iterator();
     while (it.next()) |t| try analyzeOneTable(p, t, null, stat_cur, first_reg, first_cur);
     loadAnalysis(p, i_db);
@@ -488,7 +488,7 @@ fn analyzeTable(p: *Parse, t: *Table, only_idx: ?*Index) Oom!void {
     } else {
         openStatTable(p, i_db, stat_cur, t.name, "tbl");
     }
-    try analyzeOneTable(p, t, only_idx, stat_cur, .from(p.n_mem + 1), .from(p.n_tab));
+    try analyzeOneTable(p, t, only_idx, stat_cur, p.nextReg(), p.nextCursor());
     loadAnalysis(p, i_db);
 }
 
@@ -522,8 +522,8 @@ fn analyzeTablesImpl(p: *Parse, tables: []const *Table) Oom!void {
         }
         const stat_cur = p.newCursors(3);
         openStatTable(p, i_db, stat_cur, first.name, "tbl");
-        const first_reg: Reg = .from(p.n_mem + 1);
-        const first_cur: Cursor = .from(p.n_tab);
+        const first_reg = p.nextReg();
+        const first_cur = p.nextCursor();
         for (tables[i..]) |t| {
             if (t.schema == first.schema) try analyzeOneTable(p, t, null, stat_cur, first_reg, first_cur);
         }
@@ -682,8 +682,8 @@ pub fn optimize(p: *Parse, v: *Vdbe, i_db_arg: usize, all_dbs: bool, right: ?[]c
             }
             const sub_sql = try build.mprintf(p, "ANALYZE \"%w\".\"%w\"", &.{ .{ .str = db.dbs.items[i_db].name }, .{ .str = t.name } });
             if (op_mask & 0x01 != 0) {
-                const r1: Reg = expr.getTempReg(p);
-                _ = aux.emitStr(v, .String8, .{ 0, r1 }, sub_sql);
+                const r1 = expr.getTempReg(p);
+                _ = aux.loadString(v, r1, sub_sql);
                 _ = aux.emit(v, .ResultRow, .{ r1, 1 });
             } else {
                 _ = aux.emitStr(v, .SqlExec, .{ @as(i32, if (n_limit != 0) 0x02 else 0), n_limit }, sub_sql);

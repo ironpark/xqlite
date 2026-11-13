@@ -175,7 +175,7 @@ pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, cur: Cursor) O
     if (idx) |ix| if (cur != data_cur) {
         // Move the table cursor to the conflicting row.
         if (t.hasRowid()) {
-            const rowid: Reg = expr_mod.getTempReg(p);
+            const rowid = expr_mod.getTempReg(p);
             _ = aux.emit(v, .IdxRowid, .{ cur, rowid });
             _ = aux.emit(v, .SeekRowid, .{ data_cur, 0, rowid });
             expr_mod.releaseTempReg(p, rowid);

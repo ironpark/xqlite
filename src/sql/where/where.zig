@@ -40,7 +40,6 @@ const Reg = aux.operand.Reg;
 const Cursor = aux.operand.Cursor;
 const Label = aux.operand.Label;
 const Addr = aux.operand.Addr;
-const Jump = aux.operand.Jump;
 const OP = vi.OP;
 const EP = int.EP;
 const JT = int.JT;
@@ -159,11 +158,8 @@ pub fn isSorted(w: *WhereInfo) bool {
 /// and OP_Rowid becomes OP_Sequence on `i_autoidx_cur` (P1 0 without one).
 fn translateColumnToCopy(p: *Parse, i_start: Addr, i_tab_cur: Cursor, i_register: Reg, i_autoidx_cur: ?Cursor) void {
     const v = p.vdbe.?;
-    const i_end = aux.here(v);
     if (p.db.malloc_failed) return;
-    var addr = i_start;
-    while (addr.int() < i_end.int()) : (addr = addr.plus(1)) {
-        const op = aux.getOp(v, addr);
+    for (aux.opsBetween(v, i_start, aux.here(v))) |*op| {
         if (op.p1 != i_tab_cur.int()) continue;
         if (op.opcode == OP.Column) {
             op.opcode = OP.Copy;
@@ -185,9 +181,7 @@ fn translateColumnToCopy(p: *Parse, i_start: Addr, i_tab_cur: Cursor, i_register
 fn translateColumnRange(p: *Parse, i_start: Addr, i_end: Addr, i_tab_cur: Cursor, i_register: Reg) void {
     const v = p.vdbe.?;
     if (p.db.malloc_failed) return;
-    var addr = i_start;
-    while (addr.int() < i_end.int()) : (addr = addr.plus(1)) {
-        const op = aux.getOp(v, addr);
+    for (aux.opsBetween(v, i_start, i_end)) |*op| {
         if (op.p1 != i_tab_cur.int() or op.opcode != OP.Column) continue;
         op.opcode = OP.Copy;
         op.p1 = i_register.at(op.p2).int();
@@ -199,15 +193,15 @@ fn translateColumnRange(p: *Parse, i_start: Addr, i_end: Addr, i_tab_cur: Cursor
 
 /// Port of explainAutomaticIndex(): for sqlite3_stmt_scanstatus() (but
 /// not in EXPLAIN QUERY PLAN, whose output stays as it was), an
-/// OP_Explain "CREATE AUTOMATIC INDEX ON t(cols)"; its address, or 0.
-fn explainAutomaticIndex(p: *Parse, idx: *Index, partial: bool) Addr {
-    if (!aux.isStmtScanStatus(p.db) or p.explain == 2) return .from(0);
+/// OP_Explain "CREATE AUTOMATIC INDEX ON t(cols)"; its address, or null.
+fn explainAutomaticIndex(p: *Parse, idx: *Index, partial: bool) ?Addr {
+    if (!aux.isStmtScanStatus(p.db) or p.explain == 2) return null;
     const t = idx.table;
     var cols: std.ArrayList(u8) = .empty;
     defer cols.deinit(p.db.gpa);
     for (idx.ai_column[0 .. idx.ai_column.len - 1], 0..) |i_col, ii| {
-        if (ii > 0) cols.appendSlice(p.db.gpa, ", ") catch return .from(0);
-        cols.appendSlice(p.db.gpa, t.cols[@intCast(i_col)].name()) catch return .from(0);
+        if (ii > 0) cols.appendSlice(p.db.gpa, ", ") catch return null;
+        cols.appendSlice(p.db.gpa, t.cols[@intCast(i_col)].name()) catch return null;
     }
     return aux.explain(p, false, "CREATE AUTOMATIC INDEX ON {s}({s}){s}", .{ t.name, cols.items, if (partial) " WHERE <expr>" else "" });
 }
@@ -373,13 +367,13 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         ec.exprIfFalse(p, pe, .of(l), vi.SQLITE_JUMPIFNULL);
         loop.ws_flags.PARTIALIDX = true;
     }
-    const reg_record: Reg = expr_mod.getTempReg(p);
+    const reg_record = expr_mod.getTempReg(p);
     const reg_base: Reg = delete.generateIndexKey(p, idx, tab_cur, reg_record, false, null, null, .none);
     if (!level.reg_filter.isNone()) {
         std.debug.assert(we.loopBloomable(loop));
         _ = aux.emitInt(v, .FilterAdd, .{ level.reg_filter, 0, reg_base }, loop.btree.n_eq);
     }
-    aux.scanStatusCounters(v, addr_exp, addr_exp.int(), aux.here(v).int());
+    aux.scanStatusCounters(v, addr_exp, addr_exp, aux.here(v));
     _ = aux.emit(v, .IdxInsert, .{ idx_cur, reg_record });
     aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
     if (skip_row) |l| aux.place(v, l);
@@ -400,7 +394,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
 
     // Jump here when skipping the initialization.
     aux.landHere(v, addr_init);
-    aux.scanStatusRange(v, addr_exp, addr_exp.int(), -1);
+    if (addr_exp) |a| aux.scanStatusRange(v, a, .{ .span = .{ .start = a } });
 }
 
 /// Port of sqlite3ConstructBloomFilter(): code the initialization of the
@@ -454,14 +448,14 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
             }
         }
         if (loop.ws_flags.IPK) {
-            const r1: Reg = expr_mod.getTempReg(p);
+            const r1 = expr_mod.getTempReg(p);
             _ = aux.emit(v, .Rowid, .{ cur, r1 });
             _ = aux.emitInt(v, .FilterAdd, .{ filter, 0, r1 }, 1);
             expr_mod.releaseTempReg(p, r1);
         } else {
             const idx = loop.btree.index.?;
             const n: i32 = loop.btree.n_eq;
-            const r1: Reg = expr_mod.getTempRange(p, n);
+            const r1 = expr_mod.getTempRange(p, n);
             var jj: i32 = 0;
             while (jj < n) : (jj += 1) {
                 std.debug.assert(idx.table == item.s_tab.?);
@@ -1829,7 +1823,6 @@ pub fn whereEnd(w: *WhereInfo) void {
     const db = p.db;
     const i_end = aux.here(v);
     var n_rj: u8 = 0;
-    var addr_seek: ?Addr = null;
 
     // Loop termination code.
     var i: usize = w.n_level;
@@ -1847,7 +1840,10 @@ pub fn whereEnd(w: *WhereInfo) void {
             n_rj += 1;
         }
         const loop = level.w_loop.?;
-        if (level.op != OP.Noop) {
+        // The seek of skip-ahead DISTINCT, which jumps past the loop's end.
+        var addr_seek: ?Addr = null;
+        if (level.end == .step) {
+            const step = level.end.step;
             // Skip-ahead DISTINCT (SQLITE_DISABLE_SKIPAHEAD_DISTINCT off).
             if (w.e_distinct == int.WHERE_DISTINCT.ORDERED and
                 i == w.n_level - 1 and // Ticket [ef9318757b152e3] 2017-10-21
@@ -1857,7 +1853,7 @@ pub fn whereEnd(w: *WhereInfo) void {
                 loop.btree.index.?.ai_row_log_est[loop.btree.n_distinct_col] >= 36)
             {
                 const n: i32 = loop.btree.n_distinct_col;
-                const r1: Reg = .from(p.n_mem + 1);
+                const r1 = p.newRegs(n + 1);
                 const idx_cur = level.i_idx_cur;
                 var addr_if_null: ?Addr = null;
                 if (!level.i_left_join.isNone()) {
@@ -1867,12 +1863,9 @@ pub fn whereEnd(w: *WhereInfo) void {
                 while (j < n) : (j += 1) {
                     _ = aux.emit(v, .Column, .{ idx_cur, j, r1.at(j) });
                 }
-                p.n_mem += n + 1;
-                const op: OP = if (level.op == OP.Prev) OP.SeekLT else OP.SeekGT;
-                const seek = aux.emitAny(v, op, .{ .cursor, .jump, .reg }, .{ idx_cur, 0, r1 });
-                aux.changeP4(v, seek, .{ .int32 = n });
-                addr_seek = seek;
-                _ = aux.emit(v, .Goto, .{ 1, level.p2 });
+                const op: OP = if (step.op == OP.Prev) OP.SeekLT else OP.SeekGT;
+                addr_seek = aux.emitAnyInt(v, op, .{ .cursor, .jump, .reg }, .{ idx_cur, 0, r1 }, n);
+                _ = aux.emit(v, .Goto, .{ 1, step.top });
                 if (addr_if_null) |a| aux.landHere(v, a);
             }
         }
@@ -1881,20 +1874,19 @@ pub fn whereEnd(w: *WhereInfo) void {
             _ = aux.emit(v, .Goto, .{ 0, level.addr_brk });
         }
         aux.place(v, level.addr_cont);
-        if (level.op != OP.Noop) {
-            // Not emitAny(): the opcode that ends the loop (OP_Next,
-            // OP_Prev, OP_VNext, OP_Goto, OP_Return) and its operands are
-            // what codeOneLoopStart() left in the level.
-            _ = aux.emitRaw(v, level.op, level.p1, level.p2.int(), level.p3);
-            aux.changeP5(v, level.p5);
-            if (addr_seek) |a| {
-                aux.landHere(v, a);
-                addr_seek = null;
-            }
-            if (level.addr_bignull) |l| {
-                aux.place(v, l);
-                _ = aux.emit(v, .DecrJumpZero, .{ level.reg_bignull, level.p2.plus(-1) });
-            }
+        switch (level.end) {
+            .none => {},
+            .step => |step| {
+                _ = aux.emitAny(v, step.op, .{ .cursor, .jump, .int }, .{ step.cur, step.top, step.p3 });
+                aux.changeP5(v, step.p5);
+                if (addr_seek) |a| aux.landHere(v, a);
+                if (level.addr_bignull) |l| {
+                    aux.place(v, l);
+                    _ = aux.emit(v, .DecrJumpZero, .{ level.reg_bignull, step.top.plus(-1) });
+                }
+            },
+            .goto => |top| _ = aux.emit(v, .Goto, .{ 0, top }),
+            .ret => |r| _ = aux.emit(v, .Return, .{ r.reg, r.top }),
         }
         if (loop.ws_flags.IN_ABLE and level.nIn() > 0) {
             aux.place(v, level.addr_nxt);
@@ -1967,10 +1959,9 @@ pub fn whereEnd(w: *WhereInfo) void {
                     if (in_.e_end_loop_op != OP.Noop) _ = aux.emit(v, .NullRow, .{in_.i_cur});
                 }
             }
-            if (level.op == OP.Return) {
-                _ = aux.emit(v, .Gosub, .{ Reg.from(level.p1), level.addr_first });
-            } else {
-                _ = aux.emit(v, .Goto, .{ 0, level.addr_first });
+            switch (level.end) {
+                .ret => |r| _ = aux.emit(v, .Gosub, .{ r.reg, level.addr_first }),
+                else => _ = aux.emit(v, .Goto, .{ 0, level.addr_first }),
             }
             aux.landHere(v, addr);
         }
@@ -2025,11 +2016,11 @@ pub fn whereEnd(w: *WhereInfo) void {
                     }
                 }
             }
-            // The op at addr_body never reads the table, hence the +1.
-            var k = level.addr_body.plus(1);
-            std.debug.assert(k.int() <= last.int());
-            while (true) {
-                const op = aux.getOp(v, k);
+            // The op at addr_body never reads the table, hence the +1. As
+            // in C, the op after it is looked at even if it is `last`.
+            const first = level.addr_body.plus(1);
+            std.debug.assert(first.int() <= last.int());
+            for (aux.opsBetween(v, first, if (first == last) last.plus(1) else last)) |*op| {
                 if (op.p1 != level.i_tab_cur.int()) {
                     // no-op
                 } else if (op.opcode == OP.Column) {
@@ -2066,8 +2057,6 @@ pub fn whereEnd(w: *WhereInfo) void {
                 } else if (op.opcode == OP.IfNullRow) {
                     op.p1 = level.i_idx_cur.int();
                 }
-                k = k.plus(1);
-                if (k.int() >= last.int()) break;
             }
         }
     }

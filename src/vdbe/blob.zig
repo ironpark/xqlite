@@ -223,7 +223,7 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
     // handling of the VDBE. Finalizing it closes the cursor and ends the
     // transaction.
     const schema = tab.schema.?;
-    const row_cur: operand.Cursor = .from(0);
+    const row_cur: operand.Cursor = .first;
     // The rowid, set by seekToRow(), then the imaginary column below.
     const reg: operand.Reg = .from(1);
     _ = aux.emitInt(v, .Transaction, .{ i_db, wr_flag, schema.schema_cookie }, schema.i_generation);

@@ -116,12 +116,11 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
 
     // Cursors for the table and its indexes.
     const tab_cur = p.newCursor();
-    const i_tab_cur = tab_cur.int();
-    tab_list.at(0).i_cursor = i_tab_cur;
+    tab_list.at(0).i_cursor = tab_cur.int();
     var n_idx: usize = 0;
     var idx_opt = t.index;
     while (idx_opt) |ix| : (idx_opt = ix.next) {
-        p.n_tab += 1;
+        _ = p.newCursor();
         n_idx += 1;
     }
 
@@ -220,7 +219,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             @memset(o, true);
             o[n_idx + 1] = false;
             for (ai_cur_one_pass) |cur| {
-                if (cur) |c| o[@intCast(c.int() - i_tab_cur)] = false;
+                if (cur) |c| o[c.offsetFrom(tab_cur)] = false;
             }
             to_open = o;
             if (addr_eph_open) |a| _ = aux.changeToNoop(v, a);
@@ -250,7 +249,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         // The loop over the keys found.
         var addr_loop: Addr = undefined;
         if (e_one_pass != ONEPASS.OFF) {
-            if (!t.isVirtual() and to_open.?[@intCast(data_cur.int() - i_tab_cur)]) {
+            if (!t.isVirtual() and to_open.?[data_cur.offsetFrom(tab_cur)]) {
                 _ = aux.emitInt(v, .NotFound, .{ data_cur, bypass, key }, n_key);
             }
         } else if (pk != null) {
@@ -345,7 +344,7 @@ pub fn generateRowDelete(
     if (fkey.fkRequired(p, t, null, false) != 0 or trig != null) {
         var mask = trigger.triggerColmask(p, trig, null, false, int.TRIGGER_BEFORE | int.TRIGGER_AFTER, t, onconf);
         mask |= fkey.fkOldmask(p, t);
-        old = p.newRegs(1 + @as(i32, @intCast(t.cols.len)));
+        old = p.newRegs(1 + t.cols.len);
         _ = aux.emit(v, .Copy, .{ pk_reg, old });
         for (0..t.cols.len) |i_col| {
             if (mask == 0xffffffff or (i_col <= 31 and mask & (@as(u32, 1) << @intCast(i_col)) != 0)) {
@@ -356,7 +355,7 @@ pub fn generateRowDelete(
         const addr_start = aux.here(v);
         trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_BEFORE, t, old, onconf, gone);
         // BEFORE triggers may have moved the cursor or deleted the row.
-        if (addr_start.int() < aux.here(v).int()) {
+        if (addr_start.int() < v.nOp()) {
             _ = aux.emitAnyInt(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }, n_pk);
             idx_no_seek = null;
         }

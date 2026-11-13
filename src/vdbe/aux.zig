@@ -30,6 +30,7 @@ const RC = int.RC;
 const OE = int.OE;
 const Reg = operand.Reg;
 const Addr = operand.Addr;
+const Cursor = operand.Cursor;
 
 /// Port of sqlite3VdbeCreate(): a new program for `p`, starting with
 /// OP_Init.
@@ -93,30 +94,24 @@ pub const PREPARE_MASK: u8 = 0x3f;
 /// those at the end left out being 0), each of the type operand.kinds()
 /// gives it: a Reg, a Cursor, a Label or Addr to jump to, or a number.
 /// Returns its address.
-pub fn emit(v: *Vdbe, comptime op: OP, args: anytype) operand.Addr {
-    const kinds = comptime operand.kinds(op);
-    if (args.len > 3) @compileError("more than P1, P2 and P3");
-    var p: [3]i32 = .{ 0, 0, 0 };
-    inline for (args, 0..) |arg, n| p[n] = operand.value(op, n, kinds[n], arg);
-    return .from(addOp3(v, op, p[0], p[1], p[2]));
+pub fn emit(v: *Vdbe, comptime op: OP, args: anytype) Addr {
+    return emitShaped(v, op, op, comptime operand.kinds(op), args);
 }
 
 /// emit() with P4.
-pub fn emit4(v: *Vdbe, comptime op: OP, args: anytype, p4: P4) operand.Addr {
+pub fn emit4(v: *Vdbe, comptime op: OP, args: anytype, p4: P4) Addr {
     const addr = emit(v, op, args);
     changeP4(v, addr, p4);
     return addr;
 }
 
 /// emit() with a number as P4 (sqlite3VdbeAddOp4Int()).
-pub fn emitInt(v: *Vdbe, comptime op: OP, args: anytype, p4: i32) operand.Addr {
-    const addr = emit(v, op, args);
-    if (!v.db.malloc_failed) v.ops.items[@intCast(addr.int())].setP4(.{ .int32 = p4 });
-    return addr;
+pub fn emitInt(v: *Vdbe, comptime op: OP, args: anytype, p4: i32) Addr {
+    return emit4(v, op, args, .{ .int32 = p4 });
 }
 
 /// emit() with a copy of `z` as P4 (P4_DYNAMIC).
-pub fn emitStr(v: *Vdbe, comptime op: OP, args: anytype, z: ?[]const u8) operand.Addr {
+pub fn emitStr(v: *Vdbe, comptime op: OP, args: anytype, z: ?[]const u8) Addr {
     const addr = emit(v, op, args);
     changeP4Str(v, addr, z);
     return addr;
@@ -125,37 +120,48 @@ pub fn emitStr(v: *Vdbe, comptime op: OP, args: anytype, z: ?[]const u8) operand
 /// emit() for an opcode chosen when the statement is compiled (OP_NotExists
 /// or OP_NotFound, by the kind of table): `shape` is what the operands of
 /// every opcode `op` can be are, and the arguments are checked against it.
-pub fn emitAny(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype) operand.Addr {
+pub fn emitAny(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype) Addr {
     std.debug.assert(std.meta.eql(operand.kinds(op), shape));
-    if (args.len > 3) @compileError("more than P1, P2 and P3");
-    var p: [3]i32 = .{ 0, 0, 0 };
-    inline for (args, 0..) |arg, n| p[n] = operand.value(null, n, shape[n], arg);
-    return .from(addOp3(v, op, p[0], p[1], p[2]));
+    return emitShaped(v, op, null, shape, args);
 }
 
 /// emitAny() with P4.
-pub fn emitAny4(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype, p4: P4) operand.Addr {
+pub fn emitAny4(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype, p4: P4) Addr {
     const addr = emitAny(v, op, shape, args);
     changeP4(v, addr, p4);
     return addr;
 }
 
 /// emitAny() with a number as P4.
-pub fn emitAnyInt(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype, p4: i32) operand.Addr {
-    const addr = emitAny(v, op, shape, args);
-    if (!v.db.malloc_failed) v.ops.items[@intCast(addr.int())].setP4(.{ .int32 = p4 });
-    return addr;
+pub fn emitAnyInt(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype, p4: i32) Addr {
+    return emitAny4(v, op, shape, args, .{ .int32 = p4 });
+}
+
+/// The operands `args` of `op` checked against `shape` (`name` is the
+/// opcode in the compile errors, if it is known then).
+fn emitShaped(v: *Vdbe, op: OP, comptime name: ?OP, comptime shape: [3]operand.Kind, args: anytype) Addr {
+    if (args.len > 3) @compileError("more than P1, P2 and P3");
+    inline for (args.len..3) |n| if (shape[n] == .cursor) @compileError("P" ++ .{'1' + n} ++ " is a cursor: Cursor.first for cursor 0");
+    var p: [3]i32 = .{ 0, 0, 0 };
+    inline for (args, 0..) |arg, n| p[n] = operand.value(name, n, shape[n], arg);
+    return .from(addOp3(v, op, p[0], p[1], p[2]));
 }
 
 /// The address of the next instruction (sqlite3VdbeCurrentAddr()).
-pub fn here(v: *Vdbe) operand.Addr {
+pub fn here(v: *Vdbe) Addr {
     std.debug.assert(v.e_vdbe_state == .init);
     return .from(v.nOp());
 }
 
 /// The jump at `addr` goes to the next instruction (sqlite3VdbeJumpHere()).
 pub fn landHere(v: *Vdbe, addr: Addr) void {
-    changeP2(v, addr, v.nOp());
+    setJump(v, addr, here(v));
+}
+
+/// The jump at `addr` goes to `to`, a Label, an Addr or a Jump: P2 of an
+/// instruction already coded (sqlite3VdbeChangeP2() with a jump target).
+pub fn setJump(v: *Vdbe, addr: Addr, to: anytype) void {
+    changeP2(v, addr, operand.Jump.of(to).int());
 }
 
 /// A new label (sqlite3VdbeMakeLabel()): a negative number until the
@@ -181,11 +187,9 @@ pub fn place(v: *Vdbe, label: operand.Label) void {
 }
 
 /// emit() with every operand a number and the opcode chosen at run time:
-/// for an instruction whose operands cannot be typed, because it is a copy
-/// of an instruction already coded or its operands were kept as numbers
-/// together with an opcode that gives them their meaning. Code that knows
-/// its opcode, or the shape of the opcodes it chooses from, uses emit() or
-/// emitAny().
+/// for a copy of an instruction already coded, whose operands cannot be
+/// typed. Code that knows its opcode, or the shape of the opcodes it
+/// chooses from, uses emit() or emitAny().
 pub fn emitRaw(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32) Addr {
     return .from(addOp3(v, op, p1, p2, p3));
 }
@@ -275,18 +279,19 @@ pub fn explainParent(p: *Parse) i32 {
 
 /// Port of sqlite3VdbeExplain(): an OP_Explain line for EXPLAIN QUERY PLAN,
 /// made the parent of later lines if `push`. Only when EXPLAIN QUERY PLAN
-/// is running, or the statement records scan status.
-pub fn explain(p: *Parse, push: bool, comptime fmt: []const u8, args: anytype) Addr {
-    if (p.explain != 2 and !isStmtScanStatus(p.db)) return .from(0);
+/// is running, or the statement records scan status: its address, null
+/// if none was coded.
+pub fn explain(p: *Parse, push: bool, comptime fmt: []const u8, args: anytype) ?Addr {
+    if (p.explain != 2 and !isStmtScanStatus(p.db)) return null;
     const v = p.vdbe.?;
     const msg = std.fmt.allocPrintSentinel(v.alloc(), fmt, args, 0) catch {
         p.db.oomFault();
-        return .from(0);
+        return null;
     };
     const this = v.nOp();
     const addr = emit4(v, .Explain, .{ this, p.addr_explain }, .{ .z = msg });
     if (push) p.addr_explain = this;
-    scanStatus(v, addr, -1, -1, 0, null);
+    scanStatus(v, addr, null, null, 0, null);
     return addr;
 }
 
@@ -301,36 +306,60 @@ pub inline fn isStmtScanStatus(db: *const Sqlite3) bool {
     return db.flags.StmtScanStatus;
 }
 
+/// The number kept in vi.ScanStatus for an address that may be none: 0.
+fn scanAddr(a: ?Addr) i32 {
+    return if (a) |x| x.int() else 0;
+}
+
 /// Port of sqlite3VdbeScanStatus(): add an entry for
-/// sqlite3_stmt_scanstatus().
-pub fn scanStatus(v: *Vdbe, addr_explain: Addr, addr_loop: i32, addr_visit: i32, n_est: i16, name: ?[]const u8) void {
+/// sqlite3_stmt_scanstatus(). `addr_explain` is the OP_Explain of the
+/// entry (null: none, as for a MULTI-INDEX OR loop); `addr_loop` and
+/// `addr_visit` are the instructions counting the loops and the rows
+/// visited.
+pub fn scanStatus(v: *Vdbe, addr_explain: ?Addr, addr_loop: ?Addr, addr_visit: ?Addr, n_est: i16, name: ?[]const u8) void {
     if (!isStmtScanStatus(v.db)) return;
     const z: ?[:0]const u8 = if (name) |n| v.alloc().dupeSentinel(u8, n, 0) catch null else null;
     v.scans.append(v.alloc(), .{
-        .addr_explain = addr_explain.int(),
-        .addr_loop = addr_loop,
-        .addr_visit = addr_visit,
+        .addr_explain = scanAddr(addr_explain),
+        .addr_loop = scanAddr(addr_loop),
+        .addr_visit = scanAddr(addr_visit),
         .n_est = n_est,
         .name = z,
     }) catch v.db.oomFault();
 }
 
-fn findScan(v: *Vdbe, addr_explain: Addr) ?*vi.ScanStatus {
+/// The latest entry of the OP_Explain at `addr_explain`; null finds the
+/// latest entry without one, as 0 does in C.
+fn findScan(v: *Vdbe, addr_explain: ?Addr) ?*vi.ScanStatus {
     var i = v.scans.items.len;
     while (i > 0) {
         i -= 1;
-        if (v.scans.items[i].addr_explain == addr_explain.int()) return &v.scans.items[i];
+        if (v.scans.items[i].addr_explain == scanAddr(addr_explain)) return &v.scans.items[i];
     }
     return null;
 }
 
-/// Port of sqlite3VdbeScanStatusRange(): add the instructions from
-/// `start` to `end` (the last one coded if negative) to the cycles of
-/// the entry of the OP_Explain at `addr_explain`.
-pub fn scanStatusRange(v: *Vdbe, addr_explain: Addr, start: i32, end_arg: i32) void {
+/// Instructions whose cycles count toward an entry of
+/// sqlite3_stmt_scanstatus() (the two forms of C's
+/// sqlite3VdbeScanStatusRange() arguments).
+pub const ScanRange = union(enum) {
+    /// The instructions from `start` to `end`, both included (null: the
+    /// last one coded).
+    span: struct { start: Addr, end: ?Addr = null },
+    /// Every instruction on the cursor that counts cycles (OPFLG_NCYCLE);
+    /// C passes -1 and the cursor.
+    cursor: Cursor,
+};
+
+/// Port of sqlite3VdbeScanStatusRange(): add `range` to the cycles of the
+/// entry of the OP_Explain at `addr_explain`.
+pub fn scanStatusRange(v: *Vdbe, addr_explain: ?Addr, range: ScanRange) void {
     if (!isStmtScanStatus(v.db)) return;
     const scan = findScan(v, addr_explain) orelse return;
-    const end = if (end_arg < 0) v.nOp() - 1 else end_arg;
+    const start: i32, const end: i32 = switch (range) {
+        .span => |r| .{ r.start.int(), if (r.end) |e| e.int() else v.nOp() - 1 },
+        .cursor => |c| .{ -1, c.int() },
+    };
     var i: usize = 0;
     while (i < scan.addr_range.len) : (i += 2) {
         if (scan.addr_range[i] == 0) {
@@ -342,12 +371,13 @@ pub fn scanStatusRange(v: *Vdbe, addr_explain: Addr, start: i32, end_arg: i32) v
 }
 
 /// Port of sqlite3VdbeScanStatusCounters(): the instructions counting
-/// the loops and the rows visited of the entry at `addr_explain`.
-pub fn scanStatusCounters(v: *Vdbe, addr_explain: Addr, addr_loop: i32, addr_visit: i32) void {
+/// the loops and the rows visited of the entry at `addr_explain` (null,
+/// or address 0: left as they are).
+pub fn scanStatusCounters(v: *Vdbe, addr_explain: ?Addr, addr_loop: ?Addr, addr_visit: ?Addr) void {
     if (!isStmtScanStatus(v.db)) return;
     const scan = findScan(v, addr_explain) orelse return;
-    if (addr_loop > 0) scan.addr_loop = addr_loop;
-    if (addr_visit > 0) scan.addr_visit = addr_visit;
+    if (scanAddr(addr_loop) > 0) scan.addr_loop = scanAddr(addr_loop);
+    if (scanAddr(addr_visit) > 0) scan.addr_visit = scanAddr(addr_visit);
 }
 
 /// Port of sqlite3VdbeExplainPop().
@@ -624,6 +654,16 @@ pub fn getOp(v: *Vdbe, addr: Addr) *Op {
         return &v.dummy_op;
     }
     return &v.ops.items[@intCast(addr.int())];
+}
+
+/// The instructions from `start` up to, not including, `end`, to read or
+/// change in place; none once out of memory (getOp() would give the dummy
+/// instruction). Coding another instruction may move them, so a loop that
+/// codes as it goes uses getOp().
+pub fn opsBetween(v: *Vdbe, start: Addr, end: Addr) []Op {
+    std.debug.assert(v.e_vdbe_state == .init);
+    if (v.db.malloc_failed or start.int() >= end.int()) return &.{};
+    return v.ops.items[@intCast(start.int())..@intCast(end.int())];
 }
 
 /// Port of sqlite3VdbeGetLastOp().

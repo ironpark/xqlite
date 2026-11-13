@@ -39,6 +39,10 @@ pub const Reg = enum(i32) {
 
 /// A cursor number.
 pub const Cursor = enum(i32) {
+    /// Cursor 0, the first a statement allocates: where a small fixed
+    /// program (the schema table's, the AUTOINCREMENT counters',
+    /// sqlite3_blob_open()'s) opens its table without allocating it.
+    first = 0,
     _,
 
     pub fn from(i: i32) Cursor {
@@ -52,6 +56,11 @@ pub const Cursor = enum(i32) {
     /// The cursor `i` after this one (the indexes of a table follow it).
     pub fn at(c: Cursor, i: anytype) Cursor {
         return @fromBackingInt(@intCast(@backingInt(c) + @as(i32, @intCast(i))));
+    }
+
+    /// How far after `base` this cursor is: the `i` of `base.at(i)`.
+    pub fn offsetFrom(c: Cursor, base: Cursor) usize {
+        return @intCast(@backingInt(c) - @backingInt(base));
     }
 };
 
@@ -83,20 +92,16 @@ pub const Addr = enum(i32) {
     }
 
     /// The instruction `n` after this one.
-    pub fn plus(a: Addr, n: i32) Addr {
-        return @fromBackingInt(@intCast(@backingInt(a) + n));
+    pub fn plus(a: Addr, n: anytype) Addr {
+        return @fromBackingInt(@intCast(@backingInt(a) + @as(i32, @intCast(n))));
     }
 };
 
 /// Where a jump goes, for a parameter that takes a Label or an Addr
-/// (`Jump.of()`). `Jump.from()` takes the number of an address, 0 for no
-/// jump.
+/// (`Jump.of()`); `none` (0) is no jump.
 pub const Jump = enum(i32) {
+    none = 0,
     _,
-
-    pub fn from(i: i32) Jump {
-        return @fromBackingInt(@intCast(i));
-    }
 
     pub fn int(j: Jump) i32 {
         return @backingInt(j);
@@ -105,7 +110,7 @@ pub const Jump = enum(i32) {
     /// A Label or an Addr as a Jump, for a place that takes either.
     pub fn of(x: anytype) Jump {
         if (@TypeOf(x) != Label and @TypeOf(x) != Addr and @TypeOf(x) != Jump) @compileError("not a Label or an Addr: " ++ @typeName(@TypeOf(x)));
-        return .from(x.int());
+        return @fromBackingInt(x.int());
     }
 };
 
@@ -246,9 +251,11 @@ comptime {
 pub inline fn value(comptime op: ?OP, comptime n: usize, comptime kind: Kind, arg: anytype) i32 {
     const T = @TypeOf(arg);
     const name = (if (op) |o| @tagName(o) else "the opcode's") ++ " P" ++ .{'1' + n};
-    // 0 is "not used" for an operand of any kind.
+    // 0 is "not used" for an operand of any kind but a cursor, where 0 is
+    // a cursor like any other (Cursor.first).
     if (T == comptime_int) {
         if (arg != 0 and kind != .int) @compileError(name ++ " is a " ++ @tagName(kind) ++ ", not a number");
+        if (kind == .cursor) @compileError(name ++ " is a cursor, not a number (Cursor.first is cursor 0)");
         return arg;
     }
     switch (kind) {

@@ -139,9 +139,7 @@ pub fn tableAffinity(p: *Parse, t: *Table, first: Reg) void {
             prev.opcode = OP.TypeCheck;
             const p3 = prev.p3;
             prev.p3 = 0;
-            const p1 = prev.p1;
-            const p2 = prev.p2;
-            _ = aux.emit(v, .MakeRecord, .{ Reg.from(p1), p2, Reg.from(p3) });
+            _ = aux.emitRaw(v, .MakeRecord, prev.p1, prev.p2, p3);
         } else {
             _ = aux.emit(v, .TypeCheck, .{ first, t.n_nv_col });
             aux.appendP4(v, .{ .table = t });
@@ -166,11 +164,8 @@ pub fn tableAffinity(p: *Parse, t: *Table, first: Reg) void {
 /// indexes) of database `i_db` for reading.
 fn readsTable(p: *Parse, i_db: usize, t: *Table) bool {
     const v = p.vdbe.?;
-    const end = aux.here(v);
     const vt: ?*int.VTable = if (t.isVirtual()) vtab.getVTable(p.db, t) else null;
-    var i: Addr = .from(1);
-    while (i.int() < end.int()) : (i = i.plus(1)) {
-        const op = aux.getOp(v, i);
+    for (aux.opsBetween(v, .from(1), aux.here(v))) |*op| {
         if (op.opcode == OP.VOpen and op.p4.vtab == vt) return true;
         if (op.opcode == OP.OpenRead and op.p3 == @as(i32, @intCast(i_db))) {
             const tnum: int.Pgno = @intCast(op.p2);
@@ -286,7 +281,7 @@ pub fn autoincrementBegin(p: *Parse) void {
         // The table name, the largest rowid, its rowid in sqlite_sequence
         // and the original largest rowid are the registers around reg_ctr.
         const ctr = a.reg_ctr;
-        const seq_cur: Cursor = .from(0);
+        const seq_cur: Cursor = .first;
         openTable(p, seq_cur, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenRead);
         _ = aux.loadString(v, ctr.at(-1), a.tab.name);
         const not_found = aux.newLabel(p);
@@ -326,7 +321,7 @@ pub fn autoincrementEnd(p: *Parse) void {
     var info = p.ainc;
     while (info) |a| : (info = a.next) {
         const ctr = a.reg_ctr;
-        const seq_cur: Cursor = .from(0);
+        const seq_cur: Cursor = .first;
         const i_rec = expr_mod.getTempReg(p);
         _ = aux.emit(v, .Le, .{ ctr.at(2), aux.here(v).plus(7), ctr });
         openTable(p, seq_cur, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenWrite);
@@ -369,13 +364,13 @@ fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void 
 /// xqlite: the value in register `val`, stored into a column, through
 /// `st` (typing.Store.pick()).
 pub fn codeStore(p: *Parse, st: typing.Conv, val: Reg) void {
-    const tmp: Reg = expr_mod.getTempReg(p);
+    const tmp = expr_mod.getTempReg(p);
     if (st.n_consts == 0) {
         _ = aux.addFunctionCall(p, 0, val, tmp, 1, st.def, 0);
     } else {
         // The value and the constants after it.
         const n: i32 = 1 + @as(i32, st.n_consts);
-        const base: Reg = expr_mod.getTempRange(p, n);
+        const base = expr_mod.getTempRange(p, n);
         _ = aux.emit(p.vdbe.?, .Copy, .{ val, base });
         for (st.consts[0..st.n_consts], 0..) |c, i| _ = aux.emit(p.vdbe.?, .Integer, .{ c, base.at(1 + i) });
         _ = aux.addFunctionCall(p, 0, base, tmp, n, st.def, 0);
@@ -530,7 +525,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     const autoinc = autoIncBegin(p, i_db, t);
 
     // The rowid and the columns of the new row.
-    var rowid = p.newRegs(@as(i32, @intCast(t.cols.len)) + 1);
+    var rowid = p.newRegs(t.cols.len + 1);
     var ins_reg = rowid;
     if (t.isVirtual()) {
         // xUpdate takes the rowid to delete first.
@@ -621,8 +616,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         if (trig != null or readsTable(p, i_db, t)) use_temp_table = true;
         if (use_temp_table) {
             src_tab = p.newCursor();
-            const rec: Reg = expr_mod.getTempReg(p);
-            const temp_rowid: Reg = expr_mod.getTempReg(p);
+            const rec = expr_mod.getTempReg(p);
+            const temp_rowid = expr_mod.getTempReg(p);
             _ = aux.emit(v, .OpenEphemeral, .{ src_tab.?, n_column });
             const addr_l = aux.emit(v, .Yield, .{dest.parm.reg});
             _ = aux.emit(v, .MakeRecord, .{ select_reg, n_column, rec });
@@ -805,7 +800,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     // BEFORE (and INSTEAD OF) triggers, given the NEW.* row.
     if (tmask & int.TRIGGER_BEFORE != 0) {
         const n_col: i32 = @intCast(t.cols.len);
-        const cols_reg: Reg = expr_mod.getTempRange(p, n_col + 1);
+        const cols_reg = expr_mod.getTempRange(p, n_col + 1);
         // The rowid of a NULL INTEGER PRIMARY KEY is not known before the
         // insert: it is -1 here.
         if (ipk_column < 0) {
@@ -1079,9 +1074,9 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
     const src_cur = p.newCursor();
     const dest_cur = p.newCursor();
     const autoinc = autoIncBegin(p, i_db_dest, dest);
-    const data: Reg = expr_mod.getTempReg(p);
+    const data = expr_mod.getTempReg(p);
     _ = aux.emit(v, .Null, .{ 0, data });
-    const rowid: Reg = expr_mod.getTempReg(p);
+    const rowid = expr_mod.getTempReg(p);
     openTable(p, dest_cur, i_db_dest, dest, OP.OpenWrite);
     std.debug.assert(dest.hasRowid() or dest_has_unique_idx);
     var empty_dest_test: ?Addr = null;
@@ -1296,7 +1291,7 @@ fn generateConstraintChecksImpl(
                 } else if (b2nd_pass and !is_generated) {
                     continue;
                 }
-                const col_reg = new_data.at(1).at(build.tableColumnToStorage(t, @intCast(i)));
+                const col_reg = build.columnRegister(t, new_data, @intCast(i));
                 switch (on_error) {
                     OE.Replace => {
                         const addr1 = aux.emit(v, .NotNull, .{col_reg});
@@ -1565,8 +1560,7 @@ fn generateConstraintChecksImpl(
             } else if (i_field == int.XN_ROWID or i_field == t.i_pkey) {
                 _ = aux.emit(v, .IntCopy, .{ new_data, key_reg.at(i) });
             } else {
-                const x = new_data.at(1).at(build.tableColumnToStorage(t, i_field));
-                _ = aux.emit(v, .SCopy, .{ x, key_reg.at(i) });
+                _ = aux.emit(v, .SCopy, .{ build.columnRegister(t, new_data, i_field), key_reg.at(i) });
             }
         }
         _ = aux.emit(v, .MakeRecord, .{ key_reg, idx.n_column, idx_rec });
@@ -1630,14 +1624,12 @@ fn generateConstraintChecksImpl(
                     const cmp_reg = if (idx.isPrimaryKey()) key_reg else other_key;
                     for (0..k.n_key_col) |ii| {
                         const coll = @import("coll.zig").locateCollSeq(p, k.coll[ii]);
-                        var x: i32 = k.ai_column[ii];
                         if (ii == k.n_key_col - 1) {
                             addr_jump = .of(unique_ok);
                             op = OP.Eq;
                         }
-                        x = build.tableColumnToStorage(t, @intCast(x));
-                        const cmp = aux.emitAny(v, op, .{ .reg, .jump, .reg }, .{ old_data.at(1 + x), addr_jump, cmp_reg.at(ii) });
-                        aux.changeP4(v, cmp, if (coll) |cl| .{ .collseq = cl } else .notused);
+                        const old = build.columnRegister(t, old_data, k.ai_column[ii]);
+                        _ = aux.emitAny4(v, op, .{ .reg, .jump, .reg }, .{ old, addr_jump, cmp_reg.at(ii) }, if (coll) |cl| .{ .collseq = cl } else .notused);
                         aux.changeP5(v, vi.SQLITE_NOTNULL);
                     }
                 }
@@ -1770,6 +1762,11 @@ pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor
     aux.changeP5(v, pik_flags);
 }
 
+/// The cursors openTableAndIndices() gives a virtual table, which opens
+/// none: as in C, a number that is no cursor's, so that nothing matches
+/// or reuses them by accident.
+pub const vtab_no_cursor: Cursor = .from(-999);
+
 /// Port of sqlite3OpenTableAndIndices(): open cursors on `t` and its
 /// indexes from `base_arg` (or the next free cursor if null), those
 /// with `to_open` set if given. Returns the number of indexes; the cursor
@@ -1778,13 +1775,13 @@ pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor
 pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, base_arg: ?Cursor, to_open: ?[]const bool, data_cur: *Cursor, idx_cur: *Cursor) usize {
     var p5 = p5_arg;
     if (t.e_tab_type == .vtab) {
-        data_cur.* = .from(-999);
-        idx_cur.* = .from(-999);
+        data_cur.* = vtab_no_cursor;
+        idx_cur.* = vtab_no_cursor;
         return 0;
     }
     const i_db: usize = @intCast(prepare.schemaToIndex(p.db, t.schema));
     const v = p.vdbe.?;
-    var base: Cursor = base_arg orelse .from(p.n_tab);
+    var base: Cursor = base_arg orelse p.nextCursor();
     const tab_cur = base;
     base = base.at(1);
     data_cur.* = tab_cur;

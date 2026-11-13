@@ -133,6 +133,29 @@ pub const InLoop = struct {
     e_end_loop_op: OP = @fromBackingInt(0),
 };
 
+/// The instruction that ends the loop of a WhereLevel.
+pub const LoopEnd = union(enum) {
+    /// None: the loop is of one row at most (OP_Noop in C).
+    none,
+    /// OP_Next or OP_Prev on a table or index cursor, OP_VNext on a
+    /// virtual table, back to `top`.
+    step: struct {
+        op: OP,
+        cur: Cursor,
+        top: Addr,
+        /// P3: 1 if the loop wants a unique index entry (WHERE_UNQ_WANTED).
+        p3: u8 = 0,
+        /// P5: the counter of sqlite3_stmt_status() it counts in
+        /// (STMTSTATUS.FULLSCAN_STEP), if any.
+        p5: u8 = 0,
+    },
+    /// OP_Goto to the OP_Yield of a co-routine.
+    goto: Addr,
+    /// OP_Return of the subroutine of a MULTI-INDEX OR loop; `top` (P2) is
+    /// only a hint for the indentation of EXPLAIN.
+    ret: struct { reg: Reg, top: Addr },
+};
+
 /// How one nested loop is implemented (WhereLevel). WhereInfo.a[0] is the
 /// outer loop.
 pub const WhereLevel = struct {
@@ -179,15 +202,9 @@ pub const WhereLevel = struct {
     rj: ?*WhereRightJoin = null,
     /// Which entry in the FROM clause.
     i_from: u8 = 0,
-    /// Opcode, P3 & P5 of the opcode that ends the loop.
-    op: OP = @fromBackingInt(0),
-    p3: u8 = 0,
-    p5: u8 = 0,
-    /// P1 of the opcode used to end the loop: a cursor (OP_Next, OP_Prev,
-    /// OP_VNext), a register (OP_Return) or 0 (OP_Goto), so a number.
-    p1: i32 = 0,
-    /// P2 of the opcode used to end the loop: the top of the loop.
-    p2: Addr = .from(0),
+    /// The instruction that ends the loop, which whereEnd() codes (C's
+    /// op, p1, p2, p3 and p5); none until codeOneLoopStart() sets it.
+    end: LoopEnd = .none,
     /// u.in: the IN operators (pWLoop->wsFlags & WHERE_IN_ABLE).
     in_loops: []InLoop = &.{},
     /// u.pCoveringIdx: possible covering index for WHERE_MULTI_OR.

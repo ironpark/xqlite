@@ -1344,7 +1344,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
     const reg_row = p.newReg();
     // The table that is checked is open on cursor 0, the parents of its
     // foreign keys on the cursors from 1.
-    const child_cur: Cursor = .from(0);
+    const child_cur: Cursor = .first;
     // As in C, nothing is checked if the schema has no tables, even if a
     // table is named.
     var it = db.dbs.items[i_db].schema.tbl_order.iterator();
@@ -1516,7 +1516,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         aux.changeP5(v, @intCast(i));
         var addr = aux.emit(v, .IsNull, .{ck.text});
         const in_db = try build.mprintf(p, "*** in database %s ***\n", &.{.{ .str = db.dbs.items[i].name }});
-        _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, in_db);
+        _ = aux.loadString(v, ck.msg, in_db);
         _ = aux.emit(v, .Concat, .{ ck.text, ck.msg, ck.msg });
         _ = integrityCheckResultRow(v);
         aux.landHere(v, addr);
@@ -1646,7 +1646,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         const a1 = aux.emitInt(v, .IdxGT, .{ data_cur, 0, r2 }, n_key);
         _ = aux.emit(v, .IsNull, .{r2});
         const msg = try build.mprintf(p, "row not in PRIMARY KEY order for %s", &.{.{ .str = t.name }});
-        _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
+        _ = aux.loadString(v, ck.msg, msg);
         _ = integrityCheckResultRow(v);
         aux.landHere(v, a1);
         aux.landHere(v, a1.plus(1));
@@ -1709,7 +1709,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 jmp3 = aux.emit(v, .NotNull, .{ ck.msg, label_ok });
             }
             const msg = try build.mprintf(p, "NULL value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
-            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
+            _ = aux.loadString(v, ck.msg, msg);
             if (do_type_check) {
                 _ = aux.emit(v, .Goto, .{ 0, label_error });
                 aux.landHere(v, jmp2);
@@ -1733,13 +1733,13 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 .{ .str = t.name },
                 .{ .str = col.name() },
             });
-            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
+            _ = aux.loadString(v, ck.msg, msg);
         } else if (!strict and col.affinity == int.Aff.text) {
             // (3) TEXT columns hold NULL, TEXT or BLOB.
             _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
             aux.changeP5(v, 0x1c); // NULL, TEXT or BLOB
             const msg = try build.mprintf(p, "NUMERIC value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
-            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
+            _ = aux.loadString(v, ck.msg, msg);
         } else if (!strict and col.affinity >= int.Aff.numeric) {
             // (4) Numeric columns hold no TEXT that looks like a number.
             _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
@@ -1749,7 +1749,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             _ = aux.emitInt(v, .IsType, .{ -1, label_ok, ck.msg.int() }, p4);
             aux.changeP5(v, 0x1c); // NULL, TEXT or BLOB
             const msg = try build.mprintf(p, "TEXT value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
-            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
+            _ = aux.loadString(v, ck.msg, msg);
         }
         aux.place(v, label_error);
         _ = integrityCheckResultRow(v);
@@ -1768,7 +1768,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         aux.place(v, ck_fault);
         p.i_self_tab = 0;
         const msg = try build.mprintf(p, "CHECK constraint failed in %s", &.{.{ .str = t.name }});
-        _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, msg);
+        _ = aux.loadString(v, ck.msg, msg);
         _ = integrityCheckResultRow(v);
         aux.place(v, ck_ok);
     };
@@ -1798,7 +1798,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             _ = aux.emitInt(v, .Found, .{ cur, ck_uniq, key }, n_column);
             const jmp2 = aux.emit4(v, .IFindKey, .{ cur, ck_uniq, key }, .{ .index = idx });
             const imprecise = try build.mprintf(p, "index %s stores an imprecise floating-point value for row ", &.{.{ .str = idx.name }});
-            _ = aux.emitStr(v, .String8, .{ 0, ck.msg }, imprecise);
+            _ = aux.loadString(v, ck.msg, imprecise);
             _ = aux.emit(v, .Concat, .{ ck.rows, ck.msg, ck.msg });
             _ = integrityCheckResultRow(v);
             _ = aux.emit(v, .Goto, .{ 0, ck_uniq });

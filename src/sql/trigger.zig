@@ -28,7 +28,6 @@ const Trigger = int.Trigger;
 const NameContext = int.NameContext;
 const RC = int.RC;
 const Reg = aux.operand.Reg;
-const Cursor = aux.operand.Cursor;
 const Label = aux.operand.Label;
 const Jump = aux.operand.Jump;
 const Expr = int.Expr;
@@ -730,7 +729,7 @@ pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: Reg, orco
     const recursive = !trig.is_fk_action and !p.db.flags.RecTriggers;
     // Without `ignore_jump` (a foreign key action, which never does
     // RAISE(IGNORE)) P2 is 0.
-    const ignore: Jump = if (ignore_jump) |l| .of(l) else .from(0);
+    const ignore: Jump = if (ignore_jump) |l| .of(l) else .none;
     _ = aux.emit4(v, .Program, .{ reg, ignore, p.newReg() }, .{ .subprogram = prg.program });
     aux.changeP5(v, @intFromBool(recursive));
 }

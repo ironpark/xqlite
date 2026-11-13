@@ -406,8 +406,8 @@ pub fn finishCoding(p: *Parse) void {
         if (p.const_expr) |el| {
             p.ok_const_factor = false;
             for (el.slice()) |*item| {
-                std.debug.assert(item.u.const_expr_reg > 0);
-                @import("expr_code.zig").exprCode(p, item.expr, .from(item.u.const_expr_reg));
+                std.debug.assert(!item.u.const_expr_reg.isNone());
+                @import("expr_code.zig").exprCode(p, item.expr, item.u.const_expr_reg);
             }
         }
 
@@ -953,7 +953,7 @@ fn codeTableLocks(p: *Parse) void {
 pub fn openSchemaTable(p: *Parse, i_db: usize) void {
     const v = getVdbe(p) orelse return;
     tableLock(p, i_db, int.SCHEMA_ROOT, true, int.LEGACY_SCHEMA_TABLE);
-    _ = aux.emitInt(v, .OpenWrite, .{ 0, int.SCHEMA_ROOT, i_db }, 5);
+    _ = aux.emitInt(v, .OpenWrite, .{ Cursor.first, int.SCHEMA_ROOT, i_db }, 5);
     if (p.n_tab == 0) p.n_tab = 1;
 }
 
@@ -1207,11 +1207,11 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         }
         openSchemaTable(p, i_db);
         // sqlite_schema is open on cursor 0.
-        _ = aux.emit(v, .NewRowid, .{ 0, reg1 });
+        _ = aux.emit(v, .NewRowid, .{ Cursor.first, reg1 });
         _ = aux.emitStr(v, .Blob, .{ 6, reg3 }, &null_row);
-        _ = aux.emit(v, .Insert, .{ 0, reg3, reg1 });
+        _ = aux.emit(v, .Insert, .{ Cursor.first, reg3, reg1 });
         aux.changeP5(v, OPFLAG.APPEND);
-        _ = aux.emit(v, .Close, .{});
+        _ = aux.emit(v, .Close, .{Cursor.first});
     } else if (db.init.imposter_table != 0) {
         t.tab_flags.Imposter = true;
         if (db.init.imposter_table >= 2) t.tab_flags.Readonly = true;
@@ -1914,7 +1914,7 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: TF, sel:
     // Unless reading the schema, code the table's sqlite_schema row.
     if (!db.init.busy) {
         const v = getVdbe(p) orelse return;
-        _ = aux.emit(v, .Close, .{});
+        _ = aux.emit(v, .Close, .{Cursor.first});
         const typ: []const u8, const typ2: []const u8 = if (t.isOrdinary()) .{ "table", "TABLE" } else .{ "view", "VIEW" };
 
         if (sel) |s| {
@@ -2687,7 +2687,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: ?Reg) void {
     _ = aux.emit4(v, .SorterOpen, .{ sorter, 0, idx.n_key_col }, key_p4);
     insert_mod.openTable(p, tab_cur, @intCast(i_db), t, OP.OpenRead);
     var addr1 = aux.emit(v, .Rewind, .{tab_cur});
-    const record: Reg = expr_mod.getTempReg(p);
+    const record = expr_mod.getTempReg(p);
     main_mod.multiWrite(p);
     var part_idx_label: ?Label = null;
     _ = delete_mod.generateIndexKey(p, idx, tab_cur, record, false, &part_idx_label, null, .none);
@@ -2911,7 +2911,7 @@ pub fn keyInfoOfIndex(p: *Parse, idx: *Index) ?*vi.KeyInfo {
 /// one's sqlite_schema row.
 fn destroyRootPage(p: *Parse, i_table: int.Pgno, i_db: usize) void {
     const v = getVdbe(p) orelse return;
-    const r1: Reg = expr_mod.getTempReg(p);
+    const r1 = expr_mod.getTempReg(p);
     if (i_table < 2) util.errorMsg(p, "corrupt schema", .{});
     _ = aux.emit(v, .Destroy, .{ i_table, r1, i_db });
     main_mod.mayAbort(p);

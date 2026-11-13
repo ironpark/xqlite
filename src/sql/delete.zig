@@ -47,9 +47,9 @@ const ONEPASS = where_mod.ONEPASS;
 
 /// Port of sqlite3CodeChangeCount(): return the number of rows changed
 /// as the statement's result.
-pub fn codeChangeCount(v: *Vdbe, reg_counter: i32, col_name: [:0]const u8) void {
+pub fn codeChangeCount(v: *Vdbe, reg_counter: Reg, col_name: [:0]const u8) void {
     _ = aux.emit(v, .FkCheck, .{});
-    _ = aux.emit(v, .ResultRow, .{ Reg.from(reg_counter), 1 });
+    _ = aux.emit(v, .ResultRow, .{ reg_counter, 1 });
     aux.setNumCols(v, 1);
     aux.setColName(v, 0, vi.COLNAME_NAME, col_name);
 }
@@ -134,13 +134,9 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
 
     // A view (with INSTEAD OF triggers) is realized into an ephemeral
     // table.
-    var i_data_cur: i32 = 0;
-    var i_idx_cur: i32 = 0;
-    if (is_view) {
-        materializeView(p, t, where, null, null, i_tab_cur);
-        i_data_cur = i_tab_cur;
-        i_idx_cur = i_tab_cur;
-    }
+    var data_cur: Cursor = tab_cur;
+    var idx_cur: Cursor = tab_cur;
+    if (is_view) materializeView(p, t, where, null, null, tab_cur);
 
     var nc: NameContext = .{ .parse = p, .src_list = tab_list };
     resolve.resolveExprNames(&nc, where) catch return;
@@ -205,12 +201,12 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         var key: Reg = undefined;
         if (pk) |k| {
             for (0..k.n_key_col) |i| {
-                ec.codeGetColumnOfTable(v, t, .from(i_tab_cur), k.ai_column[i], pk_reg.at(i));
+                ec.codeGetColumnOfTable(v, t, tab_cur, k.ai_column[i], pk_reg.at(i));
             }
             key = pk_reg;
         } else {
             key = p.newReg();
-            ec.codeGetColumnOfTable(v, t, .from(i_tab_cur), -1, key);
+            ec.codeGetColumnOfTable(v, t, tab_cur, -1, key);
         }
 
         var n_key: i16 = undefined;
@@ -246,15 +242,15 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         if (!is_view) {
             // With several rows in one pass, the cursors are opened once.
             const once: ?Addr = if (e_one_pass == ONEPASS.MULTI) aux.emit(v, .Once, .{}) else null;
-            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, OPFLAG.FORDELETE, i_tab_cur, to_open, &i_data_cur, &i_idx_cur);
+            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, OPFLAG.FORDELETE, tab_cur, to_open, &data_cur, &idx_cur);
             if (once) |a| aux.jumpHereOrPopInst(v, a);
         }
 
         // The loop over the keys found.
         var addr_loop: Addr = undefined;
         if (e_one_pass != ONEPASS.OFF) {
-            if (!t.isVirtual() and to_open.?[@intCast(i_data_cur - i_tab_cur)]) {
-                _ = aux.emitInt(v, .NotFound, .{ Cursor.from(i_data_cur), bypass, key }, n_key);
+            if (!t.isVirtual() and to_open.?[@intCast(data_cur.int() - i_tab_cur)]) {
+                _ = aux.emitInt(v, .NotFound, .{ data_cur, bypass, key }, n_key);
             }
         } else if (pk != null) {
             addr_loop = aux.emit(v, .Rewind, .{eph_cur});
@@ -278,7 +274,8 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             _ = aux.emit4(v, .VUpdate, .{ 0, 1, key }, build.vtabP4(db, t));
             aux.changeP5(v, OE.Abort.int());
         } else {
-            generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, key.int(), n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
+            const idx_no_seek: ?Cursor = if (ai_cur_one_pass[1] >= 0) .from(ai_cur_one_pass[1]) else null;
+            generateRowDelete(p, t, trig, data_cur, idx_cur, key, n_key, p.nested == 0, OE.Default, e_one_pass, idx_no_seek);
         }
 
         if (e_one_pass != ONEPASS.OFF) {
@@ -294,16 +291,16 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     }
 
     if (p.nested == 0 and p.trigger_tab == null) insert.autoincrementEnd(p);
-    if (!mem_cnt.isNone()) codeChangeCount(v, mem_cnt.int(), "rows deleted");
+    if (!mem_cnt.isNone()) codeChangeCount(v, mem_cnt, "rows deleted");
 }
 
 /// Port of sqlite3MaterializeView(): code the rows of view `view` that
 /// match `where` into the ephemeral table `i_cur`.
-pub fn materializeView(p: *Parse, view: *Table, where: ?*Expr, order_by: ?*ExprList, limit: ?*Expr, i_cur: i32) void {
-    materializeViewImpl(p, view, where, order_by, limit, i_cur) catch build.oomFault(p);
+pub fn materializeView(p: *Parse, view: *Table, where: ?*Expr, order_by: ?*ExprList, limit: ?*Expr, cur: Cursor) void {
+    materializeViewImpl(p, view, where, order_by, limit, cur) catch build.oomFault(p);
 }
 
-fn materializeViewImpl(p: *Parse, view: *Table, where_arg: ?*Expr, order_by: ?*ExprList, limit: ?*Expr, i_cur: i32) int.Oom!void {
+fn materializeViewImpl(p: *Parse, view: *Table, where_arg: ?*Expr, order_by: ?*ExprList, limit: ?*Expr, cur: Cursor) int.Oom!void {
     const db = p.db;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, view.schema));
     const where = try expr_mod.exprDup(p.arena, where_arg);
@@ -312,37 +309,34 @@ fn materializeViewImpl(p: *Parse, view: *Table, where_arg: ?*Expr, order_by: ?*E
     item.name = try p.arena.dupeSentinel(u8, view.name, 0);
     item.u4 = .{ .database = try p.arena.dupeSentinel(u8, db.dbs.items[i_db].name, 0) };
     const sel = try select_mod.selectNew(p, null, from, where, null, null, order_by, .{ .IncludeHidden = true }, limit);
-    var dest = select_mod.selectDestInit(select_mod.SRT.EphemTab, i_cur);
+    var dest = select_mod.selectDestInit(select_mod.SRT.EphemTab, cur.int());
     select_mod.select(p, sel, &dest) catch {};
 }
 
 /// Port of sqlite3GenerateRowDelete(): delete one row and its index
-/// entries. Its key is in the `n_pk` registers from `i_pk` (a record if
-/// `n_pk` is 0); with `e_mode` other than ONEPASS.OFF `i_data_cur`
-/// already points at it. `i_idx_no_seek`, if not negative, is an index
-/// cursor already on the row's entry.
+/// entries. Its key is in the `n_pk` registers from `pk_reg` (a record if
+/// `n_pk` is 0); with `e_mode` other than ONEPASS.OFF `data_cur` already
+/// points at it. `idx_no_seek`, if given, is an index cursor already on
+/// the row's entry.
 pub fn generateRowDelete(
     p: *Parse,
     t: *Table,
     trig: ?*Trigger,
-    i_data_cur: i32,
-    i_idx_cur: i32,
-    i_pk: i32,
+    data_cur: Cursor,
+    idx_cur: Cursor,
+    pk_reg: Reg,
     n_pk: i16,
     count: bool,
     onconf: OE,
     e_mode: ONEPASS,
-    i_idx_no_seek_arg: i32,
+    idx_no_seek_arg: ?Cursor,
 ) void {
     const v = p.vdbe.?;
-    const data_cur: Cursor = .from(i_data_cur);
-    const pk_reg: Reg = .from(i_pk);
-    var i_idx_no_seek = i_idx_no_seek_arg;
-    var i_old: i32 = 0;
+    var idx_no_seek = idx_no_seek_arg;
+    var old: Reg = .none;
 
     // Seek the row; it may be gone already (deleted by a trigger).
     const gone = aux.newLabel(p);
-    const i_label = gone.int();
     const op_seek: OP = if (t.hasRowid()) .NotExists else .NotFound;
     const seek_shape = .{ .cursor, .jump, .reg };
     if (e_mode == ONEPASS.OFF) _ = aux.emitAnyInt(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }, n_pk);
@@ -351,48 +345,50 @@ pub fn generateRowDelete(
     if (fkey.fkRequired(p, t, null, false) != 0 or trig != null) {
         var mask = trigger.triggerColmask(p, trig, null, false, int.TRIGGER_BEFORE | int.TRIGGER_AFTER, t, onconf);
         mask |= fkey.fkOldmask(p, t);
-        i_old = p.newRegs(1 + @as(i32, @intCast(t.cols.len))).int();
-        _ = aux.emit(v, .Copy, .{ pk_reg, Reg.from(i_old) });
+        old = p.newRegs(1 + @as(i32, @intCast(t.cols.len)));
+        _ = aux.emit(v, .Copy, .{ pk_reg, old });
         for (0..t.cols.len) |i_col| {
             if (mask == 0xffffffff or (i_col <= 31 and mask & (@as(u32, 1) << @intCast(i_col)) != 0)) {
                 const kk = build.tableColumnToStorage(t, @intCast(i_col));
-                ec.codeGetColumnOfTable(v, t, .from(i_data_cur), @intCast(i_col), .from(i_old + kk + 1));
+                ec.codeGetColumnOfTable(v, t, data_cur, @intCast(i_col), old.at(kk + 1));
             }
         }
         const addr_start = aux.currentAddr(v);
-        trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_BEFORE, t, i_old, onconf, i_label);
+        trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_BEFORE, t, old, onconf, gone);
         // BEFORE triggers may have moved the cursor or deleted the row.
         if (addr_start < aux.currentAddr(v)) {
             _ = aux.emitAnyInt(v, op_seek, seek_shape, .{ data_cur, gone, pk_reg }, n_pk);
-            i_idx_no_seek = -1;
+            idx_no_seek = null;
         }
-        fkey.fkCheck(p, t, i_old, 0, null, false);
+        fkey.fkCheck(p, t, old, .none, null, false);
     }
 
     // The index entries and the row. OP_Delete with OPFLAG_NCHANGE counts
     // the change (and calls the update hook).
     if (!t.isView()) {
         var p5: u16 = 0;
-        generateRowIndexDelete(p, t, i_data_cur, i_idx_cur, null, i_idx_no_seek);
+        generateRowIndexDelete(p, t, data_cur, idx_cur, null, idx_no_seek);
         _ = aux.emit(v, .Delete, .{ data_cur, if (count) OPFLAG.NCHANGE else 0 });
         if (p.nested == 0 or std.ascii.eqlIgnoreCase(t.name, "sqlite_stat1")) aux.appendP4(v, .{ .table = t });
         if (e_mode != ONEPASS.OFF) aux.changeP5(v, OPFLAG.AUXDELETE);
-        if (i_idx_no_seek >= 0 and i_idx_no_seek != i_data_cur) _ = aux.emit(v, .Delete, .{Cursor.from(i_idx_no_seek)});
+        if (idx_no_seek) |c| if (c != data_cur) {
+            _ = aux.emit(v, .Delete, .{c});
+        };
         if (e_mode == ONEPASS.MULTI) p5 |= OPFLAG.SAVEPOSITION;
         aux.changeP5(v, p5);
     }
 
-    fkey.fkActions(p, t, null, i_old, null, false);
-    if (trig != null) trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_AFTER, t, i_old, onconf, i_label);
+    fkey.fkActions(p, t, null, old, null, false);
+    if (trig != null) trigger.codeRowTrigger(p, trig, TK.DELETE, null, int.TRIGGER_AFTER, t, old, onconf, gone);
     aux.place(v, gone);
 }
 
 /// Port of sqlite3GenerateRowIndexDelete(): delete the index entries of
-/// the row `i_data_cur` points at (those with reg_idx[i] set, if given),
-/// except the one of cursor `i_idx_no_seek`.
-pub fn generateRowIndexDelete(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: i32, reg_idx: ?[]const i32, i_idx_no_seek: i32) void {
+/// the row `data_cur` points at (those with reg_idx[i] set, if given),
+/// except the one of cursor `idx_no_seek`.
+pub fn generateRowIndexDelete(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor, reg_idx: ?[]const Reg, idx_no_seek: ?Cursor) void {
     const v = p.vdbe.?;
-    var r1: i32 = -1;
+    var r1: Reg = .none;
     var prior: ?*Index = null;
     const pk: ?*Index = if (t.hasRowid()) null else build.primaryKeyIndex(t);
     var i: usize = 0;
@@ -401,14 +397,14 @@ pub fn generateRowIndexDelete(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: 
         idx_opt = idx.next;
         i += 1;
     }) {
-        if (reg_idx) |r| if (r[i] == 0) continue;
+        if (reg_idx) |r| if (r[i].isNone()) continue;
         if (idx == pk) continue;
-        const cur = i_idx_cur + @as(i32, @intCast(i));
-        if (cur == i_idx_no_seek) continue;
-        var part_idx_label: i32 = 0;
-        r1 = generateIndexKey(p, idx, i_data_cur, 0, true, &part_idx_label, prior, r1);
-        const p3: i32 = if (idx.has_expr and reg_idx != null) reg_idx.?[i] else 0;
-        _ = aux.emit4(v, .IdxDelete, .{ Cursor.from(cur), Reg.from(r1), p3 }, .{ .index = idx });
+        const cur = idx_cur.at(i);
+        if (cur == idx_no_seek) continue;
+        var part_idx_label: ?Label = null;
+        r1 = generateIndexKey(p, idx, data_cur, .none, true, &part_idx_label, prior, r1);
+        const p3: i32 = if (idx.has_expr and reg_idx != null) reg_idx.?[i].int() else 0;
+        _ = aux.emit4(v, .IdxDelete, .{ cur, r1, p3 }, .{ .index = idx });
         aux.changeP5(v, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
         resolvePartIdxLabel(p, part_idx_label);
         prior = idx;
@@ -416,46 +412,46 @@ pub fn generateRowIndexDelete(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: 
 }
 
 /// Port of sqlite3GenerateIndexKey(): load the columns of the entry of
-/// `idx` for the row `i_data_cur` points at into a temporary register
+/// `idx` for the row `data_cur` points at into a temporary register
 /// block (returned, already released), and make it a record in `reg_out`
-/// if not 0. With `prefix_only` only a unique prefix. A partial index
+/// if not none. With `prefix_only` only a unique prefix. A partial index
 /// gets a label in `part_idx_label` to jump to when the row has no entry.
 /// `prior`/`reg_prior` are the key just made for another index, whose
 /// common columns need not be loaded again.
-pub fn generateIndexKey(p: *Parse, idx: *Index, i_data_cur: i32, reg_out: i32, prefix_only: bool, part_idx_label: ?*i32, prior_arg: ?*Index, reg_prior: i32) i32 {
+pub fn generateIndexKey(p: *Parse, idx: *Index, data_cur: Cursor, reg_out: Reg, prefix_only: bool, part_idx_label: ?*?Label, prior_arg: ?*Index, reg_prior: Reg) Reg {
     const v = p.vdbe.?;
     var prior = prior_arg;
     if (part_idx_label) |lbl| {
         if (idx.part_idx_where) |w| {
             const label = aux.newLabel(p);
-            lbl.* = label.int();
-            p.i_self_tab = i_data_cur + 1;
+            lbl.* = label;
+            p.i_self_tab = data_cur.int() + 1;
             ec.exprIfFalseDup(p, w, .of(label), vi.SQLITE_JUMPIFNULL);
             p.i_self_tab = 0;
             // The WHERE clause may have clobbered the prior key.
             prior = null;
         } else {
-            lbl.* = 0;
+            lbl.* = null;
         }
     }
     const n_col: i32 = if (prefix_only and idx.uniq_not_null) idx.n_key_col else idx.n_column;
     const reg_base = expr_mod.getTempRange(p, n_col);
-    if (prior) |pr| if (reg_base.int() != reg_prior or pr.part_idx_where != null) {
+    if (prior) |pr| if (reg_base != reg_prior or pr.part_idx_where != null) {
         prior = null;
     };
     for (0..@intCast(n_col)) |j| {
         if (prior) |pr| if (pr.ai_column[j] == idx.ai_column[j] and pr.ai_column[j] != int.XN_EXPR) continue;
-        ec.codeLoadIndexColumn(p, idx, .from(i_data_cur), j, reg_base.at(j));
+        ec.codeLoadIndexColumn(p, idx, data_cur, j, reg_base.at(j));
         // A REAL column stored as an integer goes back into the index as
         // an integer.
         if (idx.ai_column[j] >= 0) _ = aux.deletePriorOpcode(v, OP.RealAffinity);
     }
-    if (reg_out != 0) _ = aux.emit(v, .MakeRecord, .{ reg_base, n_col, Reg.from(reg_out) });
+    if (!reg_out.isNone()) _ = aux.emit(v, .MakeRecord, .{ reg_base, n_col, reg_out });
     expr_mod.releaseTempRange(p, reg_base, n_col);
-    return reg_base.int();
+    return reg_base;
 }
 
 /// Port of sqlite3ResolvePartIdxLabel().
-pub fn resolvePartIdxLabel(p: *Parse, label: i32) void {
-    if (label != 0) aux.place(p.vdbe.?, .from(label));
+pub fn resolvePartIdxLabel(p: *Parse, label: ?Label) void {
+    if (label) |l| aux.place(p.vdbe.?, l);
 }

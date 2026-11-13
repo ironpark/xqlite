@@ -39,6 +39,7 @@ const Violation = dialect.Violation;
 const Failure = dialect.Failure;
 const Type = @import("../sql/types.zig").Type;
 const Logical = @import("../sql/types.zig").Logical;
+const Reg = @import("../vdbe/operand.zig").Reg;
 
 /// Between the ErrorState and the message in P4.
 const unit_sep = '\x1f';
@@ -239,25 +240,25 @@ fn violation(p: *Parse, v: Violation, vals: Values) ?[:0]const u8 {
 /// VIRTUAL columns (which PostgreSQL may not show), or for a dialect
 /// that writes no values of its own (Constraint.value_text), whose
 /// messages show no row.
-fn rowValues(p: *Parse, t: *Table, reg_new: i32) Values {
-    if (reg_new == 0 or t.tab_flags.HasVirtual or hooksOf(p).?.value_text == null) return .{};
+fn rowValues(p: *Parse, t: *Table, reg_new: Reg) Values {
+    if (reg_new.isNone() or t.tab_flags.HasVirtual or hooksOf(p).?.value_text == null) return .{};
     const m = tableMeta(p, t);
     const vals = p.arena.alloc(Value, t.cols.len) catch return .{};
     for (vals, t.cols, 0..) |*v, *c, i| v.* = .{
-        .reg = build.columnRegister(t, reg_new, @intCast(i)),
+        .reg = build.columnRegister(t, reg_new, @intCast(i)).int(),
         .type = columnType(m, c.name()),
     };
     return .{ .values = vals, .row = true };
 }
 
 /// The values of the columns `i_cols` of `t` (-1: the rowid, XN_EXPR: an
-/// expression) in the registers from `reg` (0: none), with their types.
-fn keyValues(p: *Parse, t: *Table, i_cols: []const i16, reg: i32) Values {
-    if (reg == 0) return .{};
+/// expression) in the registers from `reg` (if any), with their types.
+fn keyValues(p: *Parse, t: *Table, i_cols: []const i16, reg: Reg) Values {
+    if (reg.isNone()) return .{};
     const m = if (hooksOf(p).?.value_text != null) tableMeta(p, t) else null;
     const vals = p.arena.alloc(Value, i_cols.len) catch return .{};
     for (vals, i_cols, 0..) |*v, i_col, i| v.* = .{
-        .reg = reg + @as(i32, @intCast(i)),
+        .reg = reg.at(i).int(),
         .type = if (i_col == int.XN_EXPR) null else columnType(m, columnName(t, i_col)),
     };
     return .{ .values = vals };
@@ -288,8 +289,8 @@ fn columnName(t: *const Table, i: i32) []const u8 {
 // ============================================================== the kinds
 
 /// NOT NULL of column `c` of `t`, whose new row is in the registers from
-/// `reg_new` (its rowid, then its columns; 0: not known).
-pub fn notNull(p: *Parse, t: *Table, c: *const int.Column, is_update: bool, reg_new: i32) ?[:0]const u8 {
+/// `reg_new` (its rowid, then its columns; none: not known).
+pub fn notNull(p: *Parse, t: *Table, c: *const int.Column, is_update: bool, reg_new: Reg) ?[:0]const u8 {
     if (hooksOf(p) == null) return null;
     const cols = p.arena.dupe([]const u8, &.{c.name()}) catch return oom(p);
     return violation(p, .{ .kind = .not_null, .op = if (is_update) .update else .insert, .database = database(p, t), .table = t.name, .columns = cols }, rowValues(p, t, reg_new));
@@ -299,7 +300,7 @@ pub fn notNull(p: *Parse, t: *Table, c: *const int.Column, is_update: bool, reg_
 /// its text). A dialect's type check (Hooks.check_errors, named after
 /// its message) is that message, in any dialect but SQLite's.
 /// The new row is in the registers from `reg_new`, as notNull()'s.
-pub fn check(p: *Parse, t: *Table, name: ?[]const u8, is_update: bool, reg_new: i32) ?[:0]const u8 {
+pub fn check(p: *Parse, t: *Table, name: ?[]const u8, is_update: bool, reg_new: Reg) ?[:0]const u8 {
     if (hooksOf(p) == null) return null;
     if (name) |n| if (dialect.checkState(n)) |st| return encode(p, .{ .msg = n, .state = st }, .{});
     const named: ?[]const u8 = if (name) |n| (if (Violation.unnamedCheck(n)) null else n) else null;
@@ -307,8 +308,8 @@ pub fn check(p: *Parse, t: *Table, name: ?[]const u8, is_update: bool, reg_new: 
 }
 
 /// A duplicate key of the UNIQUE or PRIMARY KEY index `idx`, its values
-/// in the registers from `reg_key` (0: CREATE UNIQUE INDEX found it).
-pub fn unique(p: *Parse, idx: *Index, reg_key: i32) ?[:0]const u8 {
+/// in the registers from `reg_key` (none: CREATE UNIQUE INDEX found it).
+pub fn unique(p: *Parse, idx: *Index, reg_key: Reg) ?[:0]const u8 {
     if (hooksOf(p) == null) return null;
     const t = idx.table;
     const i_cols = idx.ai_column[0..idx.n_key_col];
@@ -323,12 +324,12 @@ pub fn unique(p: *Parse, idx: *Index, reg_key: i32) ?[:0]const u8 {
         .unique_index => idx.name,
         else => recordedName(p, t, kind, cols),
     };
-    return violation(p, .{ .kind = kind, .op = if (reg_key != 0) .insert else .create_index, .database = database(p, t), .table = t.name, .columns = cols, .name = name }, keyValues(p, t, i_cols, reg_key));
+    return violation(p, .{ .kind = kind, .op = if (!reg_key.isNone()) .insert else .create_index, .database = database(p, t), .table = t.name, .columns = cols, .name = name }, keyValues(p, t, i_cols, reg_key));
 }
 
 /// A duplicate rowid of `t`: its INTEGER PRIMARY KEY, in register
-/// `reg_rowid` (0: not in a register).
-pub fn rowid(p: *Parse, t: *Table, reg_rowid: i32) ?[:0]const u8 {
+/// `reg_rowid` (none: not in a register).
+pub fn rowid(p: *Parse, t: *Table, reg_rowid: Reg) ?[:0]const u8 {
     if (hooksOf(p) == null) return null;
     const cols = p.arena.dupe([]const u8, &.{columnName(t, -1)}) catch return oom(p);
     return violation(p, .{ .kind = .primary_key, .op = .insert, .database = database(p, t), .table = t.name, .columns = cols, .name = recordedName(p, t, .primary_key, cols) }, keyValues(p, t, &.{-1}, reg_rowid));
@@ -337,10 +338,10 @@ pub fn rowid(p: *Parse, t: *Table, reg_rowid: i32) ?[:0]const u8 {
 /// Foreign key `fk` of a child row (`kind` foreign_key) or of a parent
 /// row (referenced) of the parent table `parent`, whose key is `idx`
 /// (null: its INTEGER PRIMARY KEY). The row is in the registers from
-/// `reg_data` (its rowid, then its columns; 0: not known); `ai_col` maps
+/// `reg_data` (its rowid, then its columns; none: not known); `ai_col` maps
 /// the parent key's columns to the child's (fkey.zig's aiCol; null: the
 /// one column of the foreign key).
-pub fn foreignKey(p: *Parse, kind: Violation.Kind, op: @FieldType(Violation, "op"), fk: *FKey, parent: *Table, idx: ?*Index, reg_data: i32, ai_col: ?[]const i32) ?[:0]const u8 {
+pub fn foreignKey(p: *Parse, kind: Violation.Kind, op: @FieldType(Violation, "op"), fk: *FKey, parent: *Table, idx: ?*Index, reg_data: Reg, ai_col: ?[]const i32) ?[:0]const u8 {
     const hk = hooksOf(p) orelse return null;
     const child = fk.from;
     const cols = p.arena.alloc([]const u8, fk.cols.len) catch return oom(p);
@@ -354,7 +355,7 @@ pub fn foreignKey(p: *Parse, kind: Violation.Kind, op: @FieldType(Violation, "op
     while (it) |x| : (it = x.next_from) ordinal += 1;
     // The key's values: the child's columns, or the parent's key.
     var vals: Values = .{};
-    if (reg_data != 0) {
+    if (!reg_data.isNone()) {
         const values = p.arena.alloc(Value, fk.cols.len) catch return oom(p);
         const t, const names = if (kind == .foreign_key) .{ child, cols } else .{ parent, pcols };
         const m = if (hk.value_text != null) tableMeta(p, t) else null;
@@ -362,7 +363,7 @@ pub fn foreignKey(p: *Parse, kind: Violation.Kind, op: @FieldType(Violation, "op
             const i_col: i32 = if (kind == .foreign_key)
                 (if (ai_col) |a| a[i] else fk.cols[0].i_from)
             else if (idx) |ix| ix.ai_column[i] else -1;
-            v.* = .{ .reg = build.columnRegister(t, reg_data, @intCast(i_col)), .type = columnType(m, n) };
+            v.* = .{ .reg = build.columnRegister(t, reg_data, @intCast(i_col)).int(), .type = columnType(m, n) };
         }
         vals = .{ .values = values };
     }

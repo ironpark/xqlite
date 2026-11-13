@@ -141,12 +141,12 @@ fn isDeferred(p: *Parse, fk: *const FKey) bool {
 /// the registers from `reg_data` (rowid, then the columns), adding `n_incr`
 /// to the constraint counter if it is missing. `ai_col` maps the parent
 /// key columns to child columns. `deferred`: isDeferred(p, fk).
-fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: []const i32, reg_data: i32, n_incr: i32, is_ignore: bool, is_update: bool) void {
+fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: []const i32, reg_data: Reg, n_incr: i32, is_ignore: bool, is_update: bool) void {
     const v = build.getVdbe(p) orelse return;
     const cur: Cursor = .from(p.n_tab - 1);
     const ok = aux.newLabel(p);
     // The child row: its rowid, then its columns.
-    const rowid: Reg = .from(reg_data);
+    const rowid = reg_data;
     const cols = rowid.at(1);
 
     // When decrementing, nothing to do if the counter is already zero.
@@ -194,7 +194,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
                 _ = aux.emit(v, .Eq, .{ rowid, ok, temp });
                 aux.changeP5(v, vi.SQLITE_NOTNULL);
             }
-            insert_mod.openTable(p, cur.int(), i_db, t, OP.OpenRead);
+            insert_mod.openTable(p, cur, i_db, t, OP.OpenRead);
             _ = aux.emit(v, .NotExists, .{ cur, 0, temp });
             _ = aux.emit(v, .Goto, .{ 0, ok });
             aux.landHere(v, aux.here(v).plus(-2));
@@ -208,7 +208,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
         // statement transaction.
         std.debug.assert(n_incr == 1);
         if (dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx, reg_data, ai_col)) |z| {
-            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, 0);
+            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, .none);
         } else {
             build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
         }
@@ -224,9 +224,9 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
 
 /// Port of exprTableRegister(): column `i_col` of `t` (-1 for the rowid)
 /// held in the registers from `reg_base`, with its affinity and collation.
-fn exprTableRegister(p: *Parse, t: *Table, reg_base: i32, i_col: i16) Oom!*Expr {
+fn exprTableRegister(p: *Parse, t: *Table, reg_base: Reg, i_col: i16) Oom!*Expr {
     var e = try expr_mod.expr(p.arena, TK.REGISTER, null);
-    e.i_table = build.columnRegister(t, reg_base, i_col);
+    e.i_table = build.columnRegister(t, reg_base, i_col).int();
     if (i_col >= 0 and i_col != t.i_pkey) {
         const col = &t.cols[@intCast(i_col)];
         e.aff_expr = col.affinity;
@@ -250,7 +250,7 @@ fn exprTableColumn(p: *Parse, t: *Table, i_cursor: i32, i_col: i16) Oom!*Expr {
 /// Port of fkScanChildren(): add `n_incr` to the constraint counter for
 /// each row of the child table `src` that refers to the parent row in the
 /// registers from `reg_data`. `deferred`: isDeferred(p, fk).
-fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: ?[]const i32, reg_data: i32, n_incr: i32, is_update: bool) Oom!void {
+fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, deferred: bool, ai_col: ?[]const i32, reg_data: Reg, n_incr: i32, is_update: bool) Oom!void {
     const v = build.getVdbe(p) orelse return;
     var fk_if_zero: ?Addr = null;
     if (n_incr < 0) fk_if_zero = aux.emit(v, .FkIfZero, .{ deferred, 0 });
@@ -337,7 +337,7 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
     if (!db.flags.DeferFKs) {
         _ = aux.emit(v, .FkIfZero, .{ 0, aux.here(v).plus(2) });
         if (dconstraint.foreignKeyUnknown(p)) |z| {
-            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, 0);
+            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, .none);
         } else {
             build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
         }
@@ -384,17 +384,17 @@ fn isSetNullAction(p: *Parse, fk: *FKey) bool {
 
 /// Port of sqlite3FkCheck(): code the foreign key checks of writing a row
 /// of `t`. For a DELETE the old row (rowid, then columns) is in registers
-/// from `reg_old` and `reg_new` is 0; for an INSERT the reverse. An UPDATE
+/// from `reg_old` and `reg_new` is none; for an INSERT the reverse. An UPDATE
 /// calls it twice: before deleting the old record and before inserting
 /// the new one. `a_change` (UPDATE) tells the changed columns.
-pub fn fkCheck(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]const i32, chng_rowid: bool) void {
+pub fn fkCheck(p: *Parse, t: *Table, reg_old: Reg, reg_new: Reg, a_change: ?[]const i32, chng_rowid: bool) void {
     fkCheckImpl(p, t, reg_old, reg_new, a_change, chng_rowid) catch build.oomFault(p);
 }
 
-fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]const i32, chng_rowid: bool) Oom!void {
+fn fkCheckImpl(p: *Parse, t: *Table, reg_old: Reg, reg_new: Reg, a_change: ?[]const i32, chng_rowid: bool) Oom!void {
     const db = p.db;
     const is_ignore_errors = p.disable_triggers;
-    std.debug.assert((reg_old == 0) != (reg_new == 0));
+    std.debug.assert(reg_old.isNone() != reg_new.isNone());
     if (!db.flags.ForeignKeys) return;
     if (!t.isOrdinary()) return;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
@@ -413,7 +413,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         var idx: ?*Index = null;
         var ai_free: ?[]i32 = null;
         if (to == null or fkLocateIndex(p, to.?, fk, &idx, &ai_free)) {
-            std.debug.assert(!is_ignore_errors or (reg_old != 0 and reg_new == 0));
+            std.debug.assert(!is_ignore_errors or (!reg_old.isNone() and reg_new.isNone()));
             if (!is_ignore_errors or db.malloc_failed) return;
             if (to == null) {
                 // DROP TABLE of a table whose parent is missing: the parent
@@ -421,7 +421,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
                 // was a violation.
                 const v = build.getVdbe(p) orelse return;
                 const jump = aux.here(v).plus(@as(i32, @intCast(fk.cols.len)) + 1);
-                const old_cols = Reg.from(reg_old).at(1);
+                const old_cols = reg_old.at(1);
                 for (fk.cols) |c| {
                     const reg = old_cols.at(build.tableColumnToStorage(fk.from, @intCast(c.i_from)));
                     _ = aux.emit(v, .IsNull, .{ reg, jump });
@@ -449,8 +449,8 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         p.n_tab += 1;
         // A child row removed may resolve a violation; one added may
         // cause one (but not as the SET NULL action of this very key).
-        if (reg_old != 0) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_old, -1, b_ignore, a_change != null);
-        if (reg_new != 0 and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_new, 1, b_ignore, a_change != null);
+        if (!reg_old.isNone()) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_old, -1, b_ignore, a_change != null);
+        if (!reg_new.isNone() and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, deferred, ai_col, reg_new, 1, b_ignore, a_change != null);
     }
 
     // The foreign keys referring to `t` (as the parent).
@@ -462,7 +462,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         // Inserting one row into a parent table cannot cause (or fix) an
         // immediate violation.
         if (!deferred and !db.flags.DeferFKs and p.toplevel == null and !p.is_multi_write) {
-            std.debug.assert(reg_old == 0 and reg_new != 0);
+            std.debug.assert(reg_old.isNone() and !reg_new.isNone());
             continue;
         }
 
@@ -481,8 +481,8 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         build.tableRef(p, fk.from);
         item.i_cursor = p.newCursor().int();
 
-        if (reg_new != 0) try fkScanChildren(p, src, t, idx, fk, deferred, ai_col, reg_new, -1, a_change != null);
-        if (reg_old != 0) {
+        if (!reg_new.isNone()) try fkScanChildren(p, src, t, idx, fk, deferred, ai_col, reg_new, -1, a_change != null);
+        if (!reg_old.isNone()) {
             var e_action = fk.a_action[@intFromBool(a_change != null)];
             if (db.flags.FkNoAction) e_action = OE.None;
             try fkScanChildren(p, src, t, idx, fk, deferred, ai_col, reg_old, 1, a_change != null);
@@ -666,7 +666,7 @@ fn dotExpr(p: *Parse, tbl: Token, col: Token) Oom!*Expr {
 /// actions of the foreign keys referring to `t`, for a DELETE (`changes`
 /// null) or UPDATE of the row whose old values are in registers from
 /// `reg_old`.
-pub fn fkActions(p: *Parse, t: *Table, changes: ?*ExprList, reg_old: i32, a_change: ?[]const i32, chng_rowid: bool) void {
+pub fn fkActions(p: *Parse, t: *Table, changes: ?*ExprList, reg_old: Reg, a_change: ?[]const i32, chng_rowid: bool) void {
     if (!p.db.flags.ForeignKeys) return;
     var it = fkReferences(t);
     while (it) |fk| : (it = fk.next_to) {
@@ -675,7 +675,7 @@ pub fn fkActions(p: *Parse, t: *Table, changes: ?*ExprList, reg_old: i32, a_chan
                 build.oomFault(p);
                 return;
             };
-            if (act) |trig| trigger_mod.codeRowTriggerDirect(p, trig, t, reg_old, OE.Abort, 0);
+            if (act) |trig| trigger_mod.codeRowTriggerDirect(p, trig, t, reg_old, OE.Abort, null);
         }
     }
 }

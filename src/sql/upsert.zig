@@ -165,13 +165,12 @@ pub fn ofIndex(list: ?*Upsert, idx: ?*Index) ?*Upsert {
 
 /// Port of sqlite3UpsertDoUpdate(): code the DO UPDATE of the clause for
 /// the failed constraint `idx` (null for the INTEGER PRIMARY KEY), whose
-/// cursor `i_cur` is on the conflicting row (an index cursor, or the
+/// cursor `cur` is on the conflicting row (an index cursor, or the
 /// table's).
-pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, i_cur: i32) Oom!void {
+pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, cur: Cursor) Oom!void {
     const v = p.vdbe.?;
     const a = p.arena;
-    const cur: Cursor = .from(i_cur);
-    const data_cur: Cursor = .from(top.i_data_cur);
+    const data_cur = top.i_data_cur;
     const u = ofIndex(top, idx).?;
     if (idx) |ix| if (cur != data_cur) {
         // Move the table cursor to the conflicting row.
@@ -200,7 +199,7 @@ pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, i_cur: i32) Oo
     // excluded.* columns of type REAL hold a real.
     for (t.cols, 0..) |*c, i| {
         if (c.affinity == int.Aff.real) {
-            _ = aux.emit(v, .RealAffinity, .{Reg.from(top.reg_data).at(build.tableColumnToStorage(t, @intCast(i)))});
+            _ = aux.emit(v, .RealAffinity, .{top.reg_data.at(build.tableColumnToStorage(t, @intCast(i)))});
         }
     }
     update_mod.update(p, src, try expr_mod.listDup(a, u.set), try expr_mod.exprDup(a, u.where), OE.Abort, null, null, u);

@@ -399,7 +399,7 @@ fn removeUnindexableInClauseTerms(p: *Parse, i_eq: usize, loop: *WhereLoop, x: *
 fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_rev_arg: bool, target: Reg) Oom!void {
     const x = term.expr;
     var e_type: ec.IN_INDEX = .NOOP;
-    var i_tab: i32 = 0;
+    var tab: Cursor = .from(0);
     const loop = level.w_loop.?;
     const v = p.vdbe.?;
     var n_eq: usize = 0;
@@ -424,7 +424,7 @@ fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_re
     }
 
     if (!x.useXSelect() or x.x.select.?.e_list.?.len() == 1) {
-        e_type = ec.findInIndex(p, x, ec.IN_INDEX_LOOP, null, null, &i_tab);
+        e_type = ec.findInIndex(p, x, ec.IN_INDEX_LOOP, null, null, &tab);
     } else {
         const x_mod = try removeUnindexableInClauseTerms(p, i_eq, loop, x);
         // An IN(SELECT ...) driving more than one index column disables
@@ -435,12 +435,11 @@ fn codeINTerm(p: *Parse, term: *WhereTerm, level: *WhereLevel, i_eq: usize, b_re
             const m = try p.arena.alloc(i32, n_col);
             @memset(m, 0);
             ai_map = m;
-            e_type = ec.findInIndex(p, x_mod, ec.IN_INDEX_LOOP, null, m, &i_tab);
+            e_type = ec.findInIndex(p, x_mod, ec.IN_INDEX_LOOP, null, m, &tab);
         }
     }
 
     if (e_type == .INDEX_DESC) b_rev = !b_rev;
-    const tab: Cursor = .from(i_tab);
     _ = aux.emitAny(v, if (b_rev) OP.Last else OP.Rewind, .{ .cursor, .jump, .int }, .{ tab, 0 });
 
     std.debug.assert(!loop.ws_flags.MULTI_OR);

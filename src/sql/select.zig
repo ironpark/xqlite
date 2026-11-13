@@ -4257,7 +4257,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                         base = expr_mod.skipCollateAndLikely(x);
                     }
                     if (base) |b| if (b.op != TK.AGG_COLUMN and b.op != TK.REGISTER) {
-                        expr_mod.toRegister(x, a_mem.at(j).int());
+                        expr_mod.toRegister(x, a_mem.at(j));
                     };
                 }
             }

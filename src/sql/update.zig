@@ -140,7 +140,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     // cursors follow the table's).
     const i_base_cur = p.n_tab;
     var data_cur: Cursor = p.newCursor();
-    var i_idx_cur = data_cur.int() + 1;
+    var idx_cur = data_cur.at(1);
     const pk: ?*Index = if (t.hasRowid()) null else build.primaryKeyIndex(t);
     var n_idx: usize = 0;
     var idx_opt = t.index;
@@ -151,18 +151,18 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     }
     if (upsert) |u| {
         // The cursors the INSERT opened.
-        data_cur = .from(u.i_data_cur);
-        i_idx_cur = u.i_idx_cur;
+        data_cur = u.i_data_cur;
+        idx_cur = u.i_idx_cur;
         p.n_tab = i_base_cur;
     }
     tab_list.at(0).i_cursor = data_cur.int();
 
     // ax_ref[i]: the change of column i, or -1. reg_idx: a register range
-    // per index to update (0 if not), and one for the record. to_open:
+    // per index to update (none if not), and one for the record. to_open:
     // the table and the indexes to open.
     const ax_ref = try p.arena.alloc(i32, t.cols.len);
     @memset(ax_ref, -1);
-    const reg_idx = try p.arena.alloc(i32, n_idx + 1);
+    const reg_idx = try p.arena.alloc(Reg, n_idx + 1);
     const to_open = try p.arena.alloc(bool, n_idx + 2);
     @memset(to_open, true);
     to_open[n_idx + 1] = false;
@@ -242,22 +242,22 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         idx_opt = ix.next;
         n_all_idx += 1;
     }) {
-        var reg: i32 = 0;
+        var reg: Reg = .none;
         if (chng_key or has_fk > 1 or ix == pk or indexWhereClauseMightChange(ix, ax_ref, chng_rowid)) {
-            reg = p.newRegs(1 + ix.n_column).int();
+            reg = p.newRegs(1 + ix.n_column);
         } else {
             for (0..ix.n_key_col) |i| {
                 if (indexColumnIsBeingUpdated(ix, i, ax_ref, chng_rowid)) {
-                    reg = p.newRegs(1 + ix.n_column).int();
+                    reg = p.newRegs(1 + ix.n_column);
                     if (on_error == OE.Default and ix.on_error == OE.Replace) b_replace = true;
                     break;
                 }
             }
         }
-        if (reg == 0) to_open[n_all_idx + 1] = false;
+        if (reg.isNone()) to_open[n_all_idx + 1] = false;
         reg_idx[n_all_idx] = reg;
     }
-    reg_idx[n_all_idx] = p.newReg().int();
+    reg_idx[n_all_idx] = p.newReg();
     // REPLACE may delete through any index.
     if (b_replace) @memset(to_open[0 .. n_idx + 1], true);
 
@@ -272,7 +272,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     var reg_old: Reg = .none;
     var reg_new: Reg = .none;
     if (!t.isVirtual()) {
-        row_set = .from(reg_idx[n_all_idx]);
+        row_set = reg_idx[n_all_idx];
         old_rowid = p.newReg();
         new_rowid = old_rowid;
         if (chng_pk or trig != null or has_fk != 0) {
@@ -291,7 +291,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     // A view (with INSTEAD OF triggers) is realized into an ephemeral
     // table.
-    if (n_change_from == 0 and is_view) delete_mod.materializeView(p, t, where, null, null, data_cur.int());
+    if (n_change_from == 0 and is_view) delete_mod.materializeView(p, t, where, null, null, data_cur);
 
     if (n_change_from == 0) resolve.resolveExprNames(&nc, where) catch return;
 
@@ -372,7 +372,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             {
                 flags.ONEPASS_MULTIROW = true;
             }
-            w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, i_idx_cur) orelse return;
+            w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, idx_cur.int()) orelse return;
             e_one_pass = where_mod.okOnePass(w.?, &ai_cur_one_pass);
             b_finish_seek = where_mod.usesDeferredSeek(w.?);
             if (e_one_pass != ONEPASS.SINGLE) {
@@ -388,7 +388,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // The rowid of the row: to the FIFO for two passes.
             _ = aux.emit(v, .Rowid, .{ data_cur, old_rowid });
             if (e_one_pass == ONEPASS.OFF) {
-                reg_idx[n_all_idx] = p.newReg().int();
+                reg_idx[n_all_idx] = p.newReg();
                 _ = aux.emit(v, .Insert, .{ eph_cur, row_set, old_rowid });
             } else if (addr_open) |a| {
                 _ = aux.changeToNoop(v, a);
@@ -422,9 +422,9 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             }
             var addr_once: ?Addr = null;
             if (e_one_pass == ONEPASS.MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] >= 0) > 0) addr_once = aux.emit(v, .Once, .{});
-            var not_used1: i32 = 0;
-            var not_used2: i32 = 0;
-            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, i_base_cur, to_open, &not_used1, &not_used2);
+            var not_used1: Cursor = undefined;
+            var not_used2: Cursor = undefined;
+            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, .from(i_base_cur), to_open, &not_used1, &not_used2);
             if (addr_once) |a| aux.jumpHereOrPopInst(v, a);
         }
 
@@ -515,10 +515,10 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                             // The value of a type known: as pick() goes
                             // (a string is not a numeric's text_store).
                             const known = typing.typeOf(db, x.xq_type).logical != .unknown;
-                            if (if (known) st.pick(db, x) else st.untyped()) |s| insert.codeStore(p, s, k.int());
+                            if (if (known) st.pick(db, x) else st.untyped()) |s| insert.codeStore(p, s, k);
                         } else if (st.pick(db, x)) |s| {
                             if (typing.readStoredLiteral(p, s, x) catch return build.oomFault(p)) return;
-                            insert.codeStore(p, s, k.int());
+                            insert.codeStore(p, s, k);
                         }
                     };
                 } else if (tmask & int.TRIGGER_BEFORE == 0 or i > 31 or newmask & (@as(u32, 1) << @intCast(i)) != 0) {
@@ -530,11 +530,11 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             }
         }
     }
-    if (t.tab_flags.intersects(TF.HasGenerated)) insert.computeGeneratedColumns(p, reg_new.int(), t);
+    if (t.tab_flags.intersects(TF.HasGenerated)) insert.computeGeneratedColumns(p, reg_new, t);
 
     if (tmask & int.TRIGGER_BEFORE != 0) {
-        insert.tableAffinity(p, t, reg_new.int());
-        trigger.codeRowTrigger(p, trig, TK.UPDATE, changes, int.TRIGGER_BEFORE, t, old_rowid.int(), on_error, label_continue.int());
+        insert.tableAffinity(p, t, reg_new);
+        trigger.codeRowTrigger(p, trig, TK.UPDATE, changes, int.TRIGGER_BEFORE, t, old_rowid, on_error, label_continue);
 
         if (!is_view) {
             // The trigger may have deleted the row: then go to the next.
@@ -555,13 +555,13 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                     ec.codeGetColumnOfTable(v, t, data_cur, @intCast(i), k);
                 }
             }
-            if (t.tab_flags.intersects(TF.HasGenerated)) insert.computeGeneratedColumns(p, reg_new.int(), t);
+            if (t.tab_flags.intersects(TF.HasGenerated)) insert.computeGeneratedColumns(p, reg_new, t);
         }
     }
 
     if (!is_view) {
         var replaced = b_replace;
-        insert.generateConstraintChecks(p, t, reg_idx, data_cur.int(), i_idx_cur, new_rowid.int(), old_rowid.int(), chng_key, on_error, label_continue.int(), &replaced, ax_ref, null);
+        insert.generateConstraintChecks(p, t, reg_idx, data_cur, idx_cur, new_rowid, old_rowid, chng_key, on_error, label_continue, &replaced, ax_ref, null);
         b_replace = replaced;
 
         // REPLACE or a new key may have moved the cursor.
@@ -573,22 +573,22 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             }
         }
 
-        if (has_fk != 0) fkey.fkCheck(p, t, old_rowid.int(), 0, ax_ref, chng_key);
+        if (has_fk != 0) fkey.fkCheck(p, t, old_rowid, .none, ax_ref, chng_key);
 
         // Replace the index entries and the record.
-        delete_mod.generateRowIndexDelete(p, t, data_cur.int(), i_idx_cur, reg_idx, -1);
+        delete_mod.generateRowIndexDelete(p, t, data_cur, idx_cur, reg_idx, null);
 
         // OP_FinishSeek resolves an OP_DeferredSeek if no OP_Column may
         // have run since; it is skipped when it surely did.
         if (b_finish_seek) _ = aux.emit(v, .FinishSeek, .{data_cur});
         if (has_fk > 1 or chng_key) _ = aux.emit(v, .Delete, .{data_cur});
-        if (has_fk != 0) fkey.fkCheck(p, t, 0, new_rowid.int(), ax_ref, chng_key);
-        insert.completeInsertion(p, t, data_cur.int(), i_idx_cur, new_rowid.int(), reg_idx, OPFLAG.ISUPDATE | (if (e_one_pass == ONEPASS.MULTI) OPFLAG.SAVEPOSITION else 0), false, false);
-        if (has_fk != 0) fkey.fkActions(p, t, changes, old_rowid.int(), ax_ref, chng_key);
+        if (has_fk != 0) fkey.fkCheck(p, t, .none, new_rowid, ax_ref, chng_key);
+        insert.completeInsertion(p, t, data_cur, idx_cur, new_rowid, reg_idx, OPFLAG.ISUPDATE | (if (e_one_pass == ONEPASS.MULTI) OPFLAG.SAVEPOSITION else 0), false, false);
+        if (has_fk != 0) fkey.fkActions(p, t, changes, old_rowid, ax_ref, chng_key);
     }
 
     if (!row_count.isNone()) _ = aux.emit(v, .AddImm, .{ row_count, 1 });
-    if (trig != null) trigger.codeRowTrigger(p, trig, TK.UPDATE, changes, int.TRIGGER_AFTER, t, old_rowid.int(), on_error, label_continue.int());
+    if (trig != null) trigger.codeRowTrigger(p, trig, TK.UPDATE, changes, int.TRIGGER_AFTER, t, old_rowid, on_error, label_continue);
 
     // The next row.
     if (e_one_pass == ONEPASS.SINGLE) {
@@ -603,7 +603,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     aux.place(v, label_break);
 
     if (p.nested == 0 and p.trigger_tab == null and upsert == null) insert.autoincrementEnd(p);
-    if (!row_count.isNone()) delete_mod.codeChangeCount(v, row_count.int(), "rows updated");
+    if (!row_count.isNone()) delete_mod.codeChangeCount(v, row_count, "rows updated");
 }
 
 /// Port of updateVirtualTable(): UPDATE of a virtual table. By default the
@@ -729,7 +729,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
 /// Port of sqlite3ColumnDefault(): after OP_Column of column `i` of `t`,
 /// give it the DEFAULT value for rows stored before the column was added
 /// (as P4), and REAL affinity if it has it.
-pub fn columnDefault(v: *vi.Vdbe, t: *int.Table, i: i32, reg: i32) void {
+pub fn columnDefault(v: *vi.Vdbe, t: *int.Table, i: i32, reg: Reg) void {
     const col = &t.cols[@intCast(i)];
     if (col.i_dflt != 0) {
         // columnDefaultUncommonCase().
@@ -739,7 +739,7 @@ pub fn columnDefault(v: *vi.Vdbe, t: *int.Table, i: i32, reg: i32) void {
             break :blk null;
         }) |m| aux.appendP4(v, .{ .mem = m });
     }
-    if (col.affinity == Aff.real) _ = aux.emit(v, .RealAffinity, .{Reg.from(reg)});
+    if (col.affinity == Aff.real) _ = aux.emit(v, .RealAffinity, .{reg});
 }
 
 const OP = vi.OP;

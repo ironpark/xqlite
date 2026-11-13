@@ -363,7 +363,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                             e.y = .{ .tab = tb };
                             e_new_op = TK.COLUMN;
                         } else {
-                            e.i_table = n.u_nc.upsert.?.reg_data + build.tableColumnToStorage(tb, @intCast(i_col));
+                            e.i_table = n.u_nc.upsert.?.reg_data.at(build.tableColumnToStorage(tb, @intCast(i_col))).int();
                             e_new_op = TK.REGISTER;
                         }
                     } else {

@@ -1514,7 +1514,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         var pk: ?*Index = null;
         var n_field: i32 = 0;
         const cur = p.newCursor();
-        insert_mod.openTable(p, cur.int(), i_db, t, OP.OpenWrite);
+        insert_mod.openTable(p, cur, i_db, t, OP.OpenWrite);
         const addr = aux.emit(v, .Rewind, .{cur});
         const reg = p.newReg();
         if (t.hasRowid()) {

@@ -722,13 +722,16 @@ fn getRowTrigger(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) ?*TriggerPrg 
 
 /// Port of sqlite3CodeRowTriggerDirect(): call the program of `trig`.
 /// See codeRowTrigger() for the arguments.
-pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: i32, orconf: OE, ignore_jump: i32) void {
+pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: Reg, orconf: OE, ignore_jump: ?Label) void {
     const v = build.getVdbe(p) orelse return;
     const prg = getRowTrigger(p, trig, t, orconf) orelse return;
     // Unless recursive triggers are on, a running trigger does not fire
     // again (foreign key actions always may).
     const recursive = !trig.is_fk_action and !p.db.flags.RecTriggers;
-    _ = aux.emit4(v, .Program, .{ Reg.from(reg), Jump.from(ignore_jump), p.newReg() }, .{ .subprogram = prg.program });
+    // Without `ignore_jump` (a foreign key action, which never does
+    // RAISE(IGNORE)) P2 is 0.
+    const ignore: Jump = if (ignore_jump) |l| .of(l) else .from(0);
+    _ = aux.emit4(v, .Program, .{ reg, ignore, p.newReg() }, .{ .subprogram = prg.program });
     aux.changeP5(v, @intFromBool(recursive));
 }
 
@@ -736,8 +739,8 @@ pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: i32, orco
 /// fire for `op` at time `tr_tm` (TRIGGER_BEFORE or TRIGGER_AFTER).
 /// OLD.rowid, OLD.* columns, NEW.rowid and NEW.* columns are in the
 /// registers from `reg` (the OLD ones unused for an INSERT, the NEW ones
-/// for a DELETE). RAISE(IGNORE) jumps to `ignore_jump`.
-pub fn codeRowTrigger(p: *Parse, trigger: ?*Trigger, op: u8, changes: ?*ExprList, tr_tm: u8, t: *Table, reg: i32, orconf: OE, ignore_jump: i32) void {
+/// for a DELETE). RAISE(IGNORE) jumps to `ignore_jump`, if given.
+pub fn codeRowTrigger(p: *Parse, trigger: ?*Trigger, op: u8, changes: ?*ExprList, tr_tm: u8, t: *Table, reg: Reg, orconf: OE, ignore_jump: ?Label) void {
     std.debug.assert(op == TK.UPDATE or op == TK.INSERT or op == TK.DELETE);
     std.debug.assert((op == TK.UPDATE) == (changes != null));
     var it = trigger;
@@ -878,7 +881,7 @@ fn processReturningSubqueries(list: *ExprList, t: *Table) void {
 /// Port of codeReturningTrigger(): code, in line, the computation of a
 /// row of RETURNING results from the registers at `reg_in` (as for a
 /// trigger's OLD.* and NEW.*) and its insertion into the results table.
-fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_op: u8) Oom!void {
+fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: Reg, site_op: u8) Oom!void {
     const v = p.vdbe.?;
     const db = p.db;
     const a = p.arena;
@@ -900,10 +903,10 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_
 
     const new = (try expandReturning(p, ret.return_el.?, t)) orelse return;
     if (p.n_err == 0) {
-        var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in }, .nc_flags = .{ .UBaseReg = true } };
+        var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in.int() }, .nc_flags = .{ .UBaseReg = true } };
         if (ret.n_ret_col == 0) {
             ret.n_ret_col = @intCast(new.len());
-            ret.i_ret_cur = p.newCursor().int();
+            ret.i_ret_cur = p.newCursor();
         }
         p.e_trigger_op = trig.op;
         p.trigger_tab = t;
@@ -913,9 +916,8 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_
         if (resolved and !db.malloc_failed) {
             const n_col: i32 = @intCast(new.len());
             const reg = p.newRegs(n_col + 2);
-            const ret_cur: Cursor = .from(ret.i_ret_cur);
             processReturningSubqueries(new, t);
-            ret.i_ret_reg = reg.int();
+            ret.i_ret_reg = reg;
             for (new.slice(), 0..) |*item, i| {
                 const col = item.expr.?;
                 const r = reg.at(i);
@@ -923,8 +925,8 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_
                 if (expr_mod.affinity(col) == Aff.real) _ = aux.emit(v, .RealAffinity, .{r});
             }
             _ = aux.emit(v, .MakeRecord, .{ reg, n_col, reg.at(n_col) });
-            _ = aux.emit(v, .NewRowid, .{ ret_cur, reg.at(n_col + 1) });
-            _ = aux.emit(v, .Insert, .{ ret_cur, reg.at(n_col), reg.at(n_col + 1) });
+            _ = aux.emit(v, .NewRowid, .{ ret.i_ret_cur, reg.at(n_col + 1) });
+            _ = aux.emit(v, .Insert, .{ ret.i_ret_cur, reg.at(n_col), reg.at(n_col + 1) });
         }
     }
     p.e_trigger_op = 0;

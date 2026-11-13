@@ -94,7 +94,7 @@ fn openStatTable(p: *Parse, i_db: usize, stat_cur: Cursor, where: ?[]const u8, w
             // effect of CREATE TABLE is to leave the root page of the new
             // table in register u1.cr.reg_root, for the OpenWrite below.
             build.nestedParse(p, "CREATE TABLE %Q.%s(%s)", &.{ .{ .str = pdb.name }, .{ .str = st.name }, .{ .str = st.cols } });
-            roots[i] = @bitCast(p.u1.cr.reg_root);
+            roots[i] = @bitCast(p.u1.cr.reg_root.int());
             create_tbl[i] = OPFLAG.P2ISREG;
         }
     }
@@ -282,7 +282,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
     const tab_cur = first_cur;
     const idx_cur = first_cur.at(1);
     p.n_tab = @max(p.n_tab, first_cur.int() + 2);
-    insert.openTable(p, tab_cur.int(), i_db, t, OP.OpenRead);
+    insert.openTable(p, tab_cur, i_db, t, OP.OpenRead);
     _ = aux.loadString(v, reg_tabname, t.name);
 
     var idx_opt = t.index;
@@ -672,7 +672,7 @@ pub fn optimize(p: *Parse, v: *Vdbe, i_db_arg: usize, all_dbs: bool, right: ?[]c
             // Reanalyze if the table is 10 times larger or smaller than at
             // the last analysis; unconditionally if there are unanalyzed
             // indexes.
-            insert.openTable(p, tab_cur.int(), i_db, t, OP.OpenRead);
+            insert.openTable(p, tab_cur, i_db, t, OP.OpenRead);
             const skip: i32 = @intCast(op_mask & 1);
             if (sz_threshold >= 0) {
                 const i_range: LogEst = 33; // 10x size change

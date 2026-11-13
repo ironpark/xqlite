@@ -1750,14 +1750,14 @@ pub fn aggInfoPersistWalker(p: *Parse) Walker {
 pub fn getTempReg(p: *Parse) Reg {
     if (p.n_temp_reg == 0) return p.newReg();
     p.n_temp_reg -= 1;
-    return .from(p.temp_regs[p.n_temp_reg]);
+    return p.temp_regs[p.n_temp_reg];
 }
 
 /// Port of sqlite3ReleaseTempReg(): give back a register of
 /// getTempReg() (`.none`: nothing).
 pub fn releaseTempReg(p: *Parse, reg: Reg) void {
     if (!reg.isNone() and p.n_temp_reg < p.temp_regs.len) {
-        p.temp_regs[p.n_temp_reg] = reg.int();
+        p.temp_regs[p.n_temp_reg] = reg;
         p.n_temp_reg += 1;
     }
 }
@@ -1767,8 +1767,8 @@ pub fn releaseTempReg(p: *Parse, reg: Reg) void {
 pub fn getTempRange(p: *Parse, n_reg: i32) Reg {
     if (n_reg == 1) return getTempReg(p);
     if (n_reg > p.n_range_reg) return p.newRegs(n_reg);
-    const first: Reg = .from(p.i_range_reg);
-    p.i_range_reg += n_reg;
+    const first = p.i_range_reg;
+    p.i_range_reg = first.at(n_reg);
     p.n_range_reg -= n_reg;
     return first;
 }
@@ -1778,7 +1778,7 @@ pub fn releaseTempRange(p: *Parse, reg: Reg, n_reg: i32) void {
     if (n_reg == 1) return releaseTempReg(p, reg);
     if (n_reg > p.n_range_reg) {
         p.n_range_reg = n_reg;
-        p.i_range_reg = reg.int();
+        p.i_range_reg = reg;
     }
 }
 
@@ -1825,14 +1825,14 @@ pub fn checkIN(p: *Parse, in: *Expr) bool {
 
 /// Port of sqlite3ExprToRegister(): make `e` a TK_REGISTER reading `reg`,
 /// which holds its value.
-pub fn toRegister(e_arg: *Expr, reg: i32) void {
+pub fn toRegister(e_arg: *Expr, reg: Reg) void {
     const e = skipCollateAndLikely(e_arg) orelse return;
     if (e.op == TK.REGISTER) {
-        std.debug.assert(e.i_table == reg);
+        std.debug.assert(e.i_table == reg.int());
     } else {
         e.op2 = e.op;
         e.op = TK.REGISTER;
-        e.i_table = reg;
+        e.i_table = reg.int();
         e.flags.Skip = false;
     }
 }

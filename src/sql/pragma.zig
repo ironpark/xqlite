@@ -1383,7 +1383,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
         build.codeVerifySchema(p, i_db);
         build.tableLock(p, i_db, t.tnum, false, t.name);
         expr.touchRegister(p, reg_row.at(t.nCol()));
-        insert.openTable(p, child_cur.int(), i_db, t, OP.OpenRead);
+        insert.openTable(p, child_cur, i_db, t, OP.OpenRead);
         _ = aux.loadString(v, reg_result, t.name);
 
         // Open each parent table, or the index its key uses.
@@ -1401,7 +1401,7 @@ fn foreignKeyCheck(p: *Parse, v: *Vdbe, i_db_arg: usize, zdb_arg: ?[:0]const u8,
                     _ = aux.emit(v, .OpenRead, .{ Cursor.from(i), ix.tnum, i_db });
                     aux.setP4KeyInfo(p, ix);
                 } else {
-                    insert.openTable(p, i, i_db, parent, OP.OpenRead);
+                    insert.openTable(p, .from(i), i_db, parent, OP.OpenRead);
                 }
             } else {
                 more = false;
@@ -1633,11 +1633,9 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         r2 = expr.getTempRange(p, pk.?.n_key_col);
         _ = aux.emit(v, .Null, .{ 1, r2, r2.at(@as(i32, pk.?.n_key_col) - 1) });
     }
-    var i_data_cur: i32 = undefined;
-    var i_idx_cur: i32 = undefined;
-    _ = insert.openTableAndIndices(p, t, OP.OpenRead, 0, 1, null, &i_data_cur, &i_idx_cur);
-    const data_cur: Cursor = .from(i_data_cur);
-    const idx_cur: Cursor = .from(i_idx_cur);
+    var data_cur: Cursor = undefined;
+    var idx_cur: Cursor = undefined;
+    _ = insert.openTableAndIndices(p, t, OP.OpenRead, 0, .from(1), null, &data_cur, &idx_cur);
     // Register 7 counts the rows, 8+j the entries of the j-th index.
     _ = aux.emit(v, .Integer, .{ 0, ck.rows });
     var j: i32 = 0;
@@ -1730,8 +1728,8 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 aux.changeP5(v, 0x0d); // INT, TEXT or BLOB
                 // OP_IsType takes a NaN stored as REAL for a REAL, but it
                 // reads as NULL: load the value to be sure.
-                _ = aux.emit(v, .Column, .{ Cursor.from(p1), p3, ck.msg });
-                update.columnDefault(v, t, jc, ck.msg.int());
+                _ = aux.emit(v, .Column, .{ data_cur, p3, ck.msg });
+                update.columnDefault(v, t, jc, ck.msg);
                 jmp3 = aux.emit(v, .NotNull, .{ ck.msg, label_ok });
             }
             const msg = try build.mprintf(p, "NULL value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
@@ -1802,7 +1800,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     if (!is_quick) {
         // The index entries of the row.
         var prior: ?*Index = null;
-        var r1: i32 = -1;
+        var r1: Reg = .none;
         j = 0;
         idx_opt = t.index;
         while (idx_opt) |idx| : ({
@@ -1811,11 +1809,11 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         }) {
             if (pk == idx) continue;
             const ck_uniq = aux.newLabel(p);
-            var jmp3: i32 = 0;
-            r1 = delete.generateIndexKey(p, idx, data_cur.int(), 0, false, &jmp3, prior, r1);
+            var jmp3: ?Label = null;
+            r1 = delete.generateIndexKey(p, idx, data_cur, .none, false, &jmp3, prior, r1);
             prior = idx;
             // The key of the row in this index, and the cursor of the index.
-            const key: Reg = .from(r1);
+            const key = r1;
             const cur = idx_cur.at(j);
             const n_column: i32 = idx.n_column;
             // Count the entry.

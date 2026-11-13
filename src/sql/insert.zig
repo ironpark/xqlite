@@ -62,12 +62,11 @@ const Jump = aux.operand.Jump;
 /// The operands of OP_OpenRead and OP_OpenWrite.
 const open_shape: [3]aux.operand.Kind = .{ .cursor, .int, .int };
 
-/// Port of sqlite3OpenTable(): open cursor `i_cur` on table `t` with
+/// Port of sqlite3OpenTable(): open cursor `cur` on table `t` with
 /// OP_OpenRead or OP_OpenWrite (on the PRIMARY KEY of a WITHOUT ROWID
 /// table).
-pub fn openTable(p: *Parse, i_cur: i32, i_db: usize, t: *Table, opcode: OP) void {
+pub fn openTable(p: *Parse, cur: Cursor, i_db: usize, t: *Table, opcode: OP) void {
     const v = p.vdbe.?;
-    const cur: Cursor = .from(i_cur);
     build.tableLock(p, i_db, t.tnum, opcode == OP.OpenWrite, t.name);
     if (t.hasRowid()) {
         _ = aux.emitAnyInt(v, opcode, open_shape, .{ cur, t.tnum, i_db }, t.n_nv_col);
@@ -128,11 +127,10 @@ fn tableAffinityStr(a: std.mem.Allocator, t: *const Table) Oom![:0]u8 {
 }
 
 /// Port of sqlite3TableAffinity(): apply the column affinities of `t` to
-/// the registers from `reg` (or, with `reg` 0, set them as P4 of the
+/// the registers from `first` (or, with none, set them as P4 of the
 /// OP_MakeRecord just coded). STRICT tables get an OP_TypeCheck instead.
-pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
+pub fn tableAffinity(p: *Parse, t: *Table, first: Reg) void {
     const v = p.vdbe.?;
-    const first: Reg = .from(reg);
     if (t.tab_flags.Strict) {
         if (first.isNone()) {
             // Turn the OP_MakeRecord into OP_TypeCheck and code it again.
@@ -195,7 +193,7 @@ fn exprColumnFlagUnion(w: *walker.Walker, e: *Expr) WRC {
 
 /// Port of sqlite3ComputeGeneratedColumns(): with the ordinary columns of
 /// `t` in the registers from `reg_store`, compute its generated columns.
-pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
+pub fn computeGeneratedColumns(p: *Parse, reg_store: Reg, t: *Table) void {
     const v = p.vdbe.?;
     // Affinity for the ordinary columns first; '@' (none) for the stored
     // generated columns, not computed yet.
@@ -223,7 +221,7 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
         if (c.col_flags.intersects(COLFLAG.GENERATED)) c.col_flags.NOTAVAIL = true;
     }
     var w: walker.Walker = .{ .expr_callback = exprColumnFlagUnion, .u = .{ .tab = t } };
-    p.i_self_tab = -reg_store;
+    p.i_self_tab = -reg_store.int();
     var redo: ?*Column = null;
     while (true) {
         var progress = false;
@@ -239,8 +237,7 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
                 continue;
             }
             progress = true;
-            const x = build.tableColumnToStorage(t, @intCast(i)) + reg_store;
-            ec.codeGeneratedColumn(p, t, c, .from(x));
+            ec.codeGeneratedColumn(p, t, c, reg_store.at(build.tableColumnToStorage(t, @intCast(i))));
             c.col_flags.NOTAVAIL = false;
         }
         if (redo == null or !progress) break;
@@ -265,7 +262,7 @@ fn autoIncBegin(p: *Parse, i_db: usize, t: *Table) Reg {
     if (!top.uses_ainc) top.ainc = null;
     var info = top.ainc;
     while (info) |a| : (info = a.next) {
-        if (a.tab == t) return .from(a.reg_ctr);
+        if (a.tab == t) return a.reg_ctr;
     }
     const a = top.arena.create(int.AutoincInfo) catch {
         build.oomFault(p);
@@ -273,10 +270,10 @@ fn autoIncBegin(p: *Parse, i_db: usize, t: *Table) Reg {
     };
     // Registers: the table name, the largest rowid, its rowid in
     // sqlite_sequence, and the original largest rowid.
-    a.* = .{ .next = top.ainc, .tab = t, .i_db = i_db, .reg_ctr = top.newRegs(4).at(1).int() };
+    a.* = .{ .next = top.ainc, .tab = t, .i_db = i_db, .reg_ctr = top.newRegs(4).at(1) };
     top.ainc = a;
     top.uses_ainc = true;
-    return .from(a.reg_ctr);
+    return a.reg_ctr;
 }
 
 /// Port of sqlite3AutoincrementBegin(): load the AUTOINCREMENT counters
@@ -286,9 +283,9 @@ pub fn autoincrementBegin(p: *Parse) void {
     const v = p.vdbe.?;
     var info = p.ainc;
     while (info) |a| : (info = a.next) {
-        const mem_id = a.reg_ctr;
-        openTable(p, 0, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenRead);
-        _ = aux.loadString(v, .from(mem_id - 1), a.tab.name);
+        const mem_id = a.reg_ctr.int();
+        openTable(p, .from(0), a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenRead);
+        _ = aux.loadString(v, a.reg_ctr.at(-1), a.tab.name);
         const ops = aux.addOpList(v, &.{
             .{ .opcode = OP.Null },
             .{ .opcode = OP.Rewind, .p2 = 10 },
@@ -332,10 +329,10 @@ pub fn autoincrementEnd(p: *Parse) void {
     const v = p.vdbe.?;
     var info = p.ainc;
     while (info) |a| : (info = a.next) {
-        const mem_id = a.reg_ctr;
+        const mem_id = a.reg_ctr.int();
         const i_rec = expr_mod.getTempReg(p);
-        _ = aux.emit(v, .Le, .{ Reg.from(mem_id + 2), aux.here(v).plus(7), Reg.from(mem_id) });
-        openTable(p, 0, a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenWrite);
+        _ = aux.emit(v, .Le, .{ a.reg_ctr.at(2), aux.here(v).plus(7), a.reg_ctr });
+        openTable(p, .from(0), a.i_db, db.dbs.items[a.i_db].schema.seq_tab.?, OP.OpenWrite);
         const ops = aux.addOpList(v, &.{
             .{ .opcode = OP.NotNull, .p2 = 2 },
             .{ .opcode = OP.NewRowid },
@@ -378,10 +375,9 @@ fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void 
     }
 }
 
-/// xqlite: the value in register `reg`, stored into a column, through
+/// xqlite: the value in register `val`, stored into a column, through
 /// `st` (typing.Store.pick()).
-pub fn codeStore(p: *Parse, st: typing.Conv, reg: i32) void {
-    const val: Reg = .from(reg);
+pub fn codeStore(p: *Parse, st: typing.Conv, val: Reg) void {
     const tmp: Reg = expr_mod.getTempReg(p);
     if (st.n_consts == 0) {
         _ = aux.addFunctionCall(p, 0, val, tmp, 1, st.def, 0);
@@ -689,23 +685,22 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
 
     // Open the table and its indexes; a register range for each index
     // entry, and one for the table record.
-    var i_data_cur: i32 = 0;
-    var i_idx_cur: i32 = 0;
-    var reg_idx: []i32 = &.{};
+    var data_cur: Cursor = .from(0);
+    var idx_cur: Cursor = .from(0);
+    var reg_idx: []Reg = &.{};
     if (!is_view) {
-        const n_idx = openTableAndIndices(p, t, OP.OpenWrite, 0, -1, null, &i_data_cur, &i_idx_cur);
-        reg_idx = try p.arena.alloc(i32, n_idx + 1);
+        const n_idx = openTableAndIndices(p, t, OP.OpenWrite, 0, null, null, &data_cur, &idx_cur);
+        reg_idx = try p.arena.alloc(Reg, n_idx + 1);
         // n_idx, not the index list: a virtual table may have indexes
         // (made by the module's declaration) but opens none.
         var idx = t.index;
         for (reg_idx[0..n_idx]) |*r| {
             const ix = idx.?;
             idx = ix.next;
-            r.* = p.newRegs(1 + ix.n_column).int();
+            r.* = p.newRegs(1 + ix.n_column);
         }
-        reg_idx[n_idx] = p.newReg().int();
+        reg_idx[n_idx] = p.newReg();
     }
-    const data_cur: Cursor = .from(i_data_cur);
     if (upsert) |up| {
         if (t.e_tab_type == .vtab) {
             util.errorMsg(p, "UPSERT not implemented for virtual table \"{s}\"", .{t.name});
@@ -716,13 +711,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             return;
         }
         if (build.hasExplicitNulls(p, up.target)) return;
-        tab_list.at(0).i_cursor = i_data_cur;
+        tab_list.at(0).i_cursor = data_cur.int();
         var nx: ?*Upsert = up;
         while (nx) |n| : (nx = n.next) {
             n.src = tab_list;
-            n.reg_data = data_reg.int();
-            n.i_data_cur = i_data_cur;
-            n.i_idx_cur = i_idx_cur;
+            n.reg_data = data_reg;
+            n.i_data_cur = data_cur;
+            n.i_idx_cur = idx_cur;
             if (n.target != null) upsert_mod.analyzeTarget(p, tab_list, n, up) catch |err| switch (err) {
                 error.ParseFailed => return,
                 error.OutOfMemory => |e| return e,
@@ -803,13 +798,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 if (y != store_reg) _ = aux.emitAny(v, if (x.flags.Subquery) .Copy else .SCopy, .{ .reg, .reg, .int }, .{ y, store_reg });
                 if (stores) |f| if (f[ii]) |st| if (st.pick(db, x)) |s| {
                     if (typing.readStoredLiteral(p, s, x) catch return build.oomFault(p)) return;
-                    codeStore(p, s, store_reg.int());
+                    codeStore(p, s, store_reg);
                 };
                 continue;
             }
             // A row of the SELECT (here only from one: a VALUES of one row
             // took the branch above).
-            if (stores) |f| if (f[ii]) |st| if (try st.pickColumn(p, sel.?, @intCast(k))) |s| codeStore(p, s, store_reg.int());
+            if (stores) |f| if (f[ii]) |st| if (try st.pickColumn(p, sel.?, @intCast(k))) |s| codeStore(p, s, store_reg);
         }
     }
 
@@ -839,10 +834,10 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         }
         _ = aux.emit(v, .Copy, .{ rowid.at(1), cols_reg.at(1), t.n_nv_col - 1 });
         // Generated columns may use the rowid, so they come last.
-        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, cols_reg.at(1).int(), t);
+        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, cols_reg.at(1), t);
         // A view takes the values as they are.
-        if (!is_view) tableAffinity(p, t, cols_reg.at(1).int());
-        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_BEFORE, t, cols_reg.int() - n_col - 1, on_error, end_of_loop.int());
+        if (!is_view) tableAffinity(p, t, cols_reg.at(1));
+        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_BEFORE, t, cols_reg.at(-n_col - 1), on_error, end_of_loop);
         expr_mod.releaseTempRange(p, cols_reg, n_col + 1);
     }
 
@@ -901,7 +896,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         autoIncStep(p, autoinc, rowid);
 
         // Generated columns may use the rowid, so they come last.
-        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, rowid.at(1).int(), t);
+        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, rowid.at(1), t);
 
         if (t.isVirtual()) {
             vtab.makeWritable(p, t);
@@ -910,20 +905,20 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             main_mod.mayAbort(p);
         } else {
             var is_replace = false;
-            generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, ins_reg.int(), 0, ipk_column >= 0 or ipk_default, on_error, end_of_loop.int(), &is_replace, null, upsert);
-            if (db.flags.ForeignKeys) fkey.fkCheck(p, t, 0, ins_reg.int(), null, false);
+            generateConstraintChecks(p, t, reg_idx, data_cur, idx_cur, ins_reg, .none, ipk_column >= 0 or ipk_default, on_error, end_of_loop, &is_replace, null, upsert);
+            if (db.flags.ForeignKeys) fkey.fkCheck(p, t, .none, ins_reg, null, false);
             // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
             // trigger programs (a REPLACE delete then resets the seek
             // result).
             const use_seek = !is_replace or !aux.hasSubProgram(v);
-            completeInsertion(p, t, i_data_cur, i_idx_cur, ins_reg.int(), reg_idx, 0, append_flag, use_seek);
+            completeInsertion(p, t, data_cur, idx_cur, ins_reg, reg_idx, 0, append_flag, use_seek);
         }
     }
 
     if (!row_count.isNone()) _ = aux.emit(v, .AddImm, .{ row_count, 1 });
 
     if (trig != null) {
-        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_AFTER, t, data_reg.int() - 2 - @as(i32, @intCast(t.cols.len)), on_error, end_of_loop.int());
+        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_AFTER, t, data_reg.at(-2 - @as(i32, @intCast(t.cols.len))), on_error, end_of_loop);
     }
 
     // The bottom of the loop.
@@ -938,7 +933,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     }
 
     if (p.nested == 0 and p.trigger_tab == null) autoincrementEnd(p);
-    if (!row_count.isNone()) delete_mod.codeChangeCount(v, row_count.int(), "rows inserted");
+    if (!row_count.isNone()) delete_mod.codeChangeCount(v, row_count, "rows inserted");
     _ = &ins_reg;
     _ = &data_reg;
     _ = &rowid;
@@ -1095,7 +1090,7 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
     const data: Reg = expr_mod.getTempReg(p);
     _ = aux.emit(v, .Null, .{ 0, data });
     const rowid: Reg = expr_mod.getTempReg(p);
-    openTable(p, dest_cur.int(), i_db_dest, dest, OP.OpenWrite);
+    openTable(p, dest_cur, i_db_dest, dest, OP.OpenWrite);
     std.debug.assert(dest.hasRowid() or dest_has_unique_idx);
     var empty_dest_test: ?Addr = null;
     var empty_src_test: ?Addr = null;
@@ -1112,14 +1107,14 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         aux.landHere(v, addr1);
     }
     if (src.hasRowid()) {
-        openTable(p, src_cur.int(), i_db_src, src, OP.OpenRead);
+        openTable(p, src_cur, i_db_src, src, OP.OpenRead);
         empty_src_test = aux.emit(v, .Rewind, .{ src_cur, 0 });
         var addr1: Addr = undefined;
         if (dest.i_pkey >= 0) {
             addr1 = aux.emit(v, .Rowid, .{ src_cur, rowid });
             if (!vacuum) {
                 const addr2 = aux.emit(v, .NotExists, .{ dest_cur, 0, rowid });
-                build.rowidConstraint(p, on_error, dest, rowid.int());
+                build.rowidConstraint(p, on_error, dest, rowid);
                 aux.landHere(v, addr2);
             }
             autoIncStep(p, autoinc, rowid);
@@ -1229,39 +1224,40 @@ pub fn exprReferencesUpdatedColumn(e: ?*Expr, ai_chng: []const i32, chng_rowid: 
 
 /// Port of sqlite3GenerateConstraintChecks(): check the NOT NULL, CHECK,
 /// rowid and UNIQUE constraints of a row about to be written, with the
-/// new rowid and columns in the registers from `reg_new_data` (the old
-/// ones from `reg_old_data` for an UPDATE, else 0). Index entries go to
-/// the registers of `reg_idx` (0 to skip an index), and for a rowid
-/// table the record to its last element.
+/// new rowid and columns in the registers from `new_data` (the old ones
+/// from `old_data` for an UPDATE, else none). Index entries go to the
+/// registers of `reg_idx` (none to skip an index), and for a rowid table
+/// the record to its last element. A conflict to IGNORE jumps to
+/// `ignore`.
 pub fn generateConstraintChecks(
     p: *Parse,
     t: *Table,
-    reg_idx: []const i32,
-    i_data_cur: i32,
-    i_idx_cur: i32,
-    reg_new_data: i32,
-    reg_old_data: i32,
+    reg_idx: []const Reg,
+    data_cur: Cursor,
+    idx_cur: Cursor,
+    new_data: Reg,
+    old_data: Reg,
     pk_chng: bool,
     override_error_arg: OE,
-    ignore_dest: i32,
+    ignore: Label,
     may_replace: *bool,
     ai_chng: ?[]const i32,
     upsert: ?*Upsert,
 ) void {
-    generateConstraintChecksImpl(p, t, reg_idx, i_data_cur, i_idx_cur, reg_new_data, reg_old_data, pk_chng, override_error_arg, ignore_dest, may_replace, ai_chng, upsert) catch build.oomFault(p);
+    generateConstraintChecksImpl(p, t, reg_idx, data_cur, idx_cur, new_data, old_data, pk_chng, override_error_arg, ignore, may_replace, ai_chng, upsert) catch build.oomFault(p);
 }
 
 fn generateConstraintChecksImpl(
     p: *Parse,
     t: *Table,
-    reg_idx: []const i32,
-    i_data_cur: i32,
-    i_idx_cur: i32,
-    reg_new_data: i32,
-    reg_old_data: i32,
+    reg_idx: []const Reg,
+    data_cur: Cursor,
+    idx_cur: Cursor,
+    new_data: Reg,
+    old_data: Reg,
     pk_chng: bool,
     override_error_arg: OE,
-    ignore_dest: i32,
+    ignore: Label,
     may_replace: *bool,
     ai_chng: ?[]const i32,
     upsert_arg: ?*Upsert,
@@ -1270,11 +1266,6 @@ fn generateConstraintChecksImpl(
     var upsert = upsert_arg;
     const db = p.db;
     const v = p.vdbe.?;
-    const data_cur: Cursor = .from(i_data_cur);
-    const idx_cur: Cursor = .from(i_idx_cur);
-    const new_data: Reg = .from(reg_new_data);
-    const old_data: Reg = .from(reg_old_data);
-    const ignore: Jump = .from(ignore_dest);
     const is_update = !old_data.isNone();
     var seen_replace = false;
     var b_affinity_done = false;
@@ -1322,8 +1313,8 @@ fn generateConstraintChecksImpl(
                         aux.landHere(v, addr1);
                     },
                     OE.Abort, OE.Rollback, OE.Fail => {
-                        if (dconstraint.notNull(p, t, c, is_update, reg_new_data)) |z| {
-                            build.haltDialectConstraint(p, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, z, col_reg.int());
+                        if (dconstraint.notNull(p, t, c, is_update, new_data)) |z| {
+                            build.haltDialectConstraint(p, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, z, col_reg);
                             continue;
                         }
                         if (on_error == OE.Abort) main_mod.mayAbort(p);
@@ -1339,19 +1330,19 @@ fn generateConstraintChecksImpl(
             if (n_generated == 0 and n_seen_replace == 0) break;
             if (b2nd_pass) break;
             b2nd_pass = true;
-            if (n_seen_replace > 0 and t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, reg_new_data + 1, t);
+            if (n_seen_replace > 0 and t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, new_data.at(1), t);
         }
     }
 
     // CHECK.
     if (t.check) |checks| if (!db.flags.IgnoreChecks) {
-        p.i_self_tab = -(reg_new_data + 1);
+        p.i_self_tab = -new_data.at(1).int();
         var on_error: OE = if (override_error != OE.Default) override_error else OE.Abort;
         for (checks.slice()) |item| {
             const e = item.expr;
             if (ai_chng) |ac| if (!exprReferencesUpdatedColumn(e, ac, pk_chng)) continue;
             if (!b_affinity_done) {
-                tableAffinity(p, t, reg_new_data + 1);
+                tableAffinity(p, t, new_data.at(1));
                 b_affinity_done = true;
             }
             const all_ok = aux.newLabel(p);
@@ -1361,8 +1352,8 @@ fn generateConstraintChecksImpl(
                 _ = aux.emit(v, .Goto, .{ 0, ignore });
             } else {
                 if (on_error == OE.Replace) on_error = OE.Abort;
-                if (dconstraint.check(p, t, item.e_name, is_update, reg_new_data)) |z| {
-                    build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_CHECK, on_error, z, 0);
+                if (dconstraint.check(p, t, item.e_name, is_update, new_data)) |z| {
+                    build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_CHECK, on_error, z, .none);
                 } else {
                     build.haltConstraint(p, RC.CONSTRAINT_CHECK, on_error, item.e_name, vi.P5_ConstraintCheck);
                 }
@@ -1516,24 +1507,24 @@ fn generateConstraintChecksImpl(
                 if (!trig_cnt.isNone()) {
                     // Delete the other row, running its triggers.
                     main_mod.multiWrite(p);
-                    delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_new_data, 1, false, OE.Replace, where_mod.ONEPASS.SINGLE, -1);
+                    delete_mod.generateRowDelete(p, t, trig, data_cur, idx_cur, new_data, 1, false, OE.Replace, where_mod.ONEPASS.SINGLE, null);
                     _ = aux.emit(v, .AddImm, .{ trig_cnt, 1 });
                     n_replace_trig += 1;
                 } else if (t.index != null) {
                     // The index entries of the other row go; its record is
                     // overwritten by the new one.
                     main_mod.multiWrite(p);
-                    delete_mod.generateRowIndexDelete(p, t, i_data_cur, i_idx_cur, null, -1);
+                    delete_mod.generateRowIndexDelete(p, t, data_cur, idx_cur, null, null);
                 }
                 seen_replace = true;
             },
             OE.Update => {
-                try upsert_mod.doUpdate(p, upsert.?, t, null, i_data_cur);
+                try upsert_mod.doUpdate(p, upsert.?, t, null, data_cur);
                 _ = aux.emit(v, .Goto, .{ 0, ignore });
             },
             OE.Ignore => _ = aux.emit(v, .Goto, .{ 0, ignore }),
-            OE.Rollback, OE.Fail => build.rowidConstraint(p, on_error, t, reg_new_data),
-            else => build.rowidConstraint(p, OE.Abort, t, reg_new_data),
+            OE.Rollback, OE.Fail => build.rowidConstraint(p, on_error, t, new_data),
+            else => build.rowidConstraint(p, OE.Abort, t, new_data),
         }
         aux.place(v, rowid_ok);
         if (ipk_top) |top| {
@@ -1549,15 +1540,15 @@ fn generateConstraintChecksImpl(
     for (order) |term| {
         const idx = term.idx;
         const ix = term.ix;
-        if (reg_idx[ix] == 0) continue;
-        const idx_rec: Reg = .from(reg_idx[ix]);
+        if (reg_idx[ix].isNone()) continue;
+        const idx_rec = reg_idx[ix];
         if (upsert) |up| {
             upsert_clause = upsert_mod.ofIndex(up, idx);
             if (upsert_ipk_delay) |delay| if (upsert_clause == up) aux.landHere(v, delay);
         }
         const unique_ok = aux.newLabel(p);
         if (!b_affinity_done) {
-            tableAffinity(p, t, reg_new_data + 1);
+            tableAffinity(p, t, new_data.at(1));
             b_affinity_done = true;
         }
         const this_cur = idx_cur.at(ix);
@@ -1565,7 +1556,7 @@ fn generateConstraintChecksImpl(
         // A partial index whose WHERE is false gets no entry.
         if (idx.part_idx_where) |w| {
             _ = aux.emit(v, .Null, .{ 0, idx_rec });
-            p.i_self_tab = -(reg_new_data + 1);
+            p.i_self_tab = -new_data.at(1).int();
             ec.exprIfFalseDup(p, w, .of(unique_ok), vi.SQLITE_JUMPIFNULL);
             p.i_self_tab = 0;
         }
@@ -1576,7 +1567,7 @@ fn generateConstraintChecksImpl(
             const i: i32 = @intCast(ii);
             const i_field = idx.ai_column[ii];
             if (i_field == int.XN_EXPR) {
-                p.i_self_tab = -(reg_new_data + 1);
+                p.i_self_tab = -new_data.at(1).int();
                 ec.codeCopy(p, idx.col_expr.?.at(ii).expr, key_reg.at(i));
                 p.i_self_tab = 0;
             } else if (i_field == int.XN_ROWID or i_field == t.i_pkey) {
@@ -1663,9 +1654,9 @@ fn generateConstraintChecksImpl(
 
         const n_conflict_end = aux.here(v);
         switch (on_error) {
-            OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx, key_reg.int()),
+            OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx, key_reg),
             OE.Update => {
-                try upsert_mod.doUpdate(p, upsert.?, t, idx, this_cur.int());
+                try upsert_mod.doUpdate(p, upsert.?, t, idx, this_cur);
                 _ = aux.emit(v, .Goto, .{ 0, ignore });
             },
             OE.Ignore => _ = aux.emit(v, .Goto, .{ 0, ignore }),
@@ -1676,7 +1667,7 @@ fn generateConstraintChecksImpl(
                     n_replace_trig += 1;
                 }
                 if (trig != null and is_update) _ = aux.emit(v, .CursorLock, .{data_cur});
-                delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, other_key.int(), @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS.SINGLE else where_mod.ONEPASS.OFF, this_cur.int());
+                delete_mod.generateRowDelete(p, t, trig, data_cur, idx_cur, other_key, @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS.SINGLE else where_mod.ONEPASS.OFF, this_cur);
                 if (trig != null and is_update) _ = aux.emit(v, .CursorUnlock, .{data_cur});
                 seen_replace = true;
             },
@@ -1702,7 +1693,7 @@ fn generateConstraintChecksImpl(
                     aux.changeP5(v, x.p5);
                 }
             }
-            build.uniqueConstraint(p, OE.Abort, idx, key_reg.int());
+            build.uniqueConstraint(p, OE.Abort, idx, key_reg);
             aux.landHere(v, addr_bypass);
         }
         aux.place(v, unique_ok);
@@ -1729,7 +1720,7 @@ fn generateConstraintChecksImpl(
                 aux.changeP5(v, vi.SQLITE_NOTNULL);
             }
             _ = aux.emit(v, .NotExists, .{ data_cur, addr_recheck.?, new_data });
-            build.rowidConstraint(p, OE.Abort, t, reg_new_data);
+            build.rowidConstraint(p, OE.Abort, t, new_data);
         } else {
             _ = aux.emit(v, .Goto, .{ 0, addr_recheck.? });
         }
@@ -1738,9 +1729,8 @@ fn generateConstraintChecksImpl(
 
     // The table record.
     if (t.hasRowid()) {
-        const rec: Reg = .from(reg_idx[n_idx]);
-        _ = aux.emit(v, .MakeRecord, .{ new_data.at(1), t.n_nv_col, rec });
-        if (!b_affinity_done) tableAffinity(p, t, 0);
+        _ = aux.emit(v, .MakeRecord, .{ new_data.at(1), t.n_nv_col, reg_idx[n_idx] });
+        if (!b_affinity_done) tableAffinity(p, t, .none);
     }
     may_replace.* = seen_replace;
 }
@@ -1751,18 +1741,16 @@ const IndexListTerm = struct { idx: *Index, ix: usize };
 /// Port of sqlite3CompleteInsertion(): write the index entries and the
 /// record made by generateConstraintChecks(). `update_flags` is 0 for an
 /// INSERT, else OPFLAG_ISUPDATE (and OPFLAG_SAVEPOSITION).
-pub fn completeInsertion(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: i32, reg_new_data: i32, reg_idx: []const i32, update_flags: u16, append_bias: bool, use_seek_result: bool) void {
+pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor, new_data: Reg, reg_idx: []const Reg, update_flags: u16, append_bias: bool, use_seek_result: bool) void {
     const v = p.vdbe.?;
-    const data_cur: Cursor = .from(i_data_cur);
-    const idx_cur: Cursor = .from(i_idx_cur);
     var i: usize = 0;
     var idx_opt = t.index;
     while (idx_opt) |idx| : ({
         idx_opt = idx.next;
         i += 1;
     }) {
-        if (reg_idx[i] == 0) continue;
-        const rec: Reg = .from(reg_idx[i]);
+        if (reg_idx[i].isNone()) continue;
+        const rec = reg_idx[i];
         // A NULL record: no entry (partial indexes, and UPDATE of an index
         // on expressions).
         if (idx.part_idx_where != null or (update_flags != 0 and idx.has_expr)) {
@@ -1784,33 +1772,33 @@ pub fn completeInsertion(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: i32, 
     }
     if (append_bias) pik_flags |= OPFLAG.APPEND;
     if (use_seek_result) pik_flags |= OPFLAG.USESEEKRESULT;
-    _ = aux.emit(v, .Insert, .{ data_cur, Reg.from(reg_idx[i]), Reg.from(reg_new_data) });
+    _ = aux.emit(v, .Insert, .{ data_cur, reg_idx[i], new_data });
     if (p.nested == 0) aux.appendP4(v, .{ .table = t });
     aux.changeP5(v, pik_flags);
 }
 
 /// Port of sqlite3OpenTableAndIndices(): open cursors on `t` and its
-/// indexes from `i_base` (or the next free cursor if negative), those
+/// indexes from `base_arg` (or the next free cursor if null), those
 /// with `to_open` set if given. Returns the number of indexes; the cursor
 /// of the table (the PRIMARY KEY of a WITHOUT ROWID table) goes to
 /// `data_cur` and that of the first index to `idx_cur`.
-pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, i_base_arg: i32, to_open: ?[]const bool, data_cur: *i32, idx_cur: *i32) usize {
+pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, base_arg: ?Cursor, to_open: ?[]const bool, data_cur: *Cursor, idx_cur: *Cursor) usize {
     var p5 = p5_arg;
     if (t.e_tab_type == .vtab) {
-        data_cur.* = -999;
-        idx_cur.* = -999;
+        data_cur.* = .from(-999);
+        idx_cur.* = .from(-999);
         return 0;
     }
     const i_db: usize = @intCast(prepare.schemaToIndex(p.db, t.schema));
     const v = p.vdbe.?;
-    var base: Cursor = .from(if (i_base_arg < 0) p.n_tab else i_base_arg);
+    var base: Cursor = base_arg orelse .from(p.n_tab);
     const tab_cur = base;
     base = base.at(1);
-    data_cur.* = tab_cur.int();
+    data_cur.* = tab_cur;
     if (t.hasRowid() and (to_open == null or to_open.?[0])) {
-        openTable(p, tab_cur.int(), i_db, t, op);
+        openTable(p, tab_cur, i_db, t, op);
     } else build.tableLock(p, i_db, t.tnum, op == OP.OpenWrite, t.name);
-    idx_cur.* = base.int();
+    idx_cur.* = base;
     var i: usize = 0;
     var idx_opt = t.index;
     while (idx_opt) |idx| : ({
@@ -1820,7 +1808,7 @@ pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, i_base_arg:
         const this_cur = base;
         base = base.at(1);
         if (idx.isPrimaryKey() and !t.hasRowid()) {
-            data_cur.* = this_cur.int();
+            data_cur.* = this_cur;
             p5 = 0;
         }
         if (to_open == null or to_open.?[i + 1]) {

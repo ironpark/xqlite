@@ -376,7 +376,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         loop.ws_flags.PARTIALIDX = true;
     }
     const reg_record: Reg = expr_mod.getTempReg(p);
-    const reg_base: Reg = .from(delete.generateIndexKey(p, idx, tab_cur.int(), reg_record.int(), false, null, null, 0));
+    const reg_base: Reg = delete.generateIndexKey(p, idx, tab_cur, reg_record, false, null, null, .none);
     if (level.reg_filter != 0) {
         std.debug.assert(we.loopBloomable(loop));
         _ = aux.emitInt(v, .FilterAdd, .{ Reg.from(level.reg_filter), 0, reg_base }, loop.btree.n_eq);
@@ -1661,7 +1661,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
                 op = OP.OpenWrite;
                 w.ai_cur_one_pass[0] = tab_item.i_cursor;
             }
-            insert.openTable(p, tab_item.i_cursor, @intCast(i_db), tab, op);
+            insert.openTable(p, .from(tab_item.i_cursor), @intCast(i_db), tab, op);
             std.debug.assert(tab_item.i_cursor == level.i_tab_cur);
             if (w.e_one_pass == ONEPASS.OFF and
                 tab.nCol() < BMS and

@@ -294,6 +294,7 @@ const Vdbe = vi.Vdbe;
 const Reg = aux.operand.Reg;
 const Cursor = aux.operand.Cursor;
 const Addr = aux.operand.Addr;
+const Label = aux.operand.Label;
 const OP = vi.OP;
 const OPFLAG = vi.OPFLAG;
 const RC = int.RC;
@@ -363,10 +364,10 @@ pub fn finishCoding(p: *Parse) void {
             // Return the rows the RETURNING trigger stored.
             const ret = p.u1.d.returning.?;
             if (ret.n_ret_col != 0) {
-                const ret_cur: Cursor = .from(ret.i_ret_cur);
+                const ret_cur = ret.i_ret_cur;
                 _ = aux.emit(v, .FkCheck, .{});
                 const addr_rewind = aux.emit(v, .Rewind, .{ret_cur});
-                const reg: Reg = .from(ret.i_ret_reg);
+                const reg = ret.i_ret_reg;
                 var i: i32 = 0;
                 while (i < ret.n_ret_col) : (i += 1) _ = aux.emit(v, .Column, .{ ret_cur, i, reg.at(i) });
                 _ = aux.emit(v, .ResultRow, .{ reg, ret.n_ret_col });
@@ -412,7 +413,7 @@ pub fn finishCoding(p: *Parse) void {
 
         if (p.returning) {
             const ret = p.u1.d.returning.?;
-            if (ret.n_ret_col != 0) _ = aux.emit(v, .OpenEphemeral, .{ Cursor.from(ret.i_ret_cur), ret.n_ret_col });
+            if (ret.n_ret_col != 0) _ = aux.emit(v, .OpenEphemeral, .{ ret.i_ret_cur, ret.n_ret_col });
         }
 
         _ = aux.emit(v, .Goto, .{ 0, Addr.from(1) });
@@ -1057,9 +1058,9 @@ pub fn storageColumnToTable(t: *const Table, i_col_arg: i16) i16 {
 /// xqlite: the register of column `i_col` of `t` (-1: the rowid) in a
 /// row held in the registers from `reg_base` (its rowid, then its
 /// columns as stored): the INTEGER PRIMARY KEY's is the rowid's.
-pub fn columnRegister(t: *const Table, reg_base: i32, i_col: i16) i32 {
+pub fn columnRegister(t: *const Table, reg_base: Reg, i_col: i16) Reg {
     if (i_col < 0 or i_col == t.i_pkey) return reg_base;
-    return reg_base + 1 + tableColumnToStorage(t, i_col);
+    return reg_base.at(1 + tableColumnToStorage(t, i_col));
 }
 
 /// Port of sqlite3TableColumnToStorage(): VIRTUAL columns are stored
@@ -1191,7 +1192,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         const reg1 = p.newReg();
         const reg2 = p.newReg();
         const reg3 = p.newReg();
-        p.u1 = .{ .cr = .{ .reg_rowid = reg1.int(), .reg_root = reg2.int() } };
+        p.u1 = .{ .cr = .{ .reg_rowid = reg1, .reg_root = reg2 } };
         _ = aux.emit(v, .ReadCookie, .{ i_db, reg3, @backingInt(btree.Meta.file_format) });
         aux.usesBtree(v, @intCast(i_db));
         const addr1 = aux.emit(v, .If, .{reg3});
@@ -1202,7 +1203,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         if (is_view or is_virtual) {
             _ = aux.emit(v, .Integer, .{ 0, reg2 });
         } else {
-            p.u1.cr.addr_cr_tab = aux.emit(v, .CreateBtree, .{ i_db, reg2, BTREE_INTKEY }).int();
+            p.u1.cr.addr_cr_tab = aux.emit(v, .CreateBtree, .{ i_db, reg2, BTREE_INTKEY });
         }
         openSchemaTable(p, i_db);
         // sqlite_schema is open on cursor 0.
@@ -1686,7 +1687,7 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
         t.tab_flags.HasNotNull = true;
     }
 
-    if (p.u1.cr.addr_cr_tab != 0) aux.changeP3(v.?, .from(p.u1.cr.addr_cr_tab), BTREE_BLOBKEY);
+    if (p.u1.cr.addr_cr_tab) |addr| aux.changeP3(v.?, addr, BTREE_BLOBKEY);
 
     var pk: *Index = undefined;
     if (t.i_pkey >= 0) {
@@ -1938,9 +1939,9 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: TF, sel:
             .{ .str = typ },
             .{ .str = t.name },
             .{ .str = t.name },
-            .{ .int = p.u1.cr.reg_root },
+            .{ .int = p.u1.cr.reg_root.int() },
             .{ .str = stmt },
-            .{ .int = p.u1.cr.reg_rowid },
+            .{ .int = p.u1.cr.reg_rowid.int() },
         });
         changeCookie(p, i_db);
 
@@ -2003,7 +2004,8 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     const reg_rec = p.newReg();
     const reg_rowid = p.newReg();
     main_mod.mayAbort(p);
-    _ = aux.emit(v, .OpenWrite, .{ csr, p.u1.cr.reg_root, i_db });
+    // P2 is the register of the root page (OPFLAG_P2ISREG).
+    _ = aux.emit(v, .OpenWrite, .{ csr, p.u1.cr.reg_root.int(), i_db });
     aux.changeP5(v, vi.OPFLAG.P2ISREG);
     // P3 of OP_InitCoroutine is the address the co-routine starts at.
     const addr_top = aux.here(v).plus(1);
@@ -2021,7 +2023,7 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     aux.landHere(v, addr_top.plus(-1));
     const addr_ins_loop = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
     _ = aux.emit(v, .MakeRecord, .{ Reg.from(dest.i_sdst), dest.n_sdst, reg_rec });
-    insert_mod.tableAffinity(p, t, 0);
+    insert_mod.tableAffinity(p, t, .none);
     _ = aux.emit(v, .NewRowid, .{ csr, reg_rowid });
     _ = aux.emit(v, .Insert, .{ csr, reg_rec, reg_rowid });
     // xqlite: a dialect that counts the rows (Hooks.count_create_as).
@@ -2494,7 +2496,7 @@ fn createIndexImpl(
 
             // Fill the index and reread its schema row.
             if (tbl_name != null) {
-                refillIndex(p, idx, root_reg.int());
+                refillIndex(p, idx, root_reg);
                 changeCookie(p, i_db);
                 const w = try mprintf(p, "name='%q' AND type='index'", &.{.{ .str = idx.name }});
                 aux.addParseSchemaOp(v, @intCast(i_db), w, 0);
@@ -2664,9 +2666,9 @@ fn viewResetAll(db: *Sqlite3, idx: usize) void {
 
 /// Port of sqlite3RefillIndex(): code the (re)filling of an index from
 /// its table, through a sorter. The root page is in register
-/// `mem_root_page` if not negative (a new index), else idx.tnum (cleared
+/// `mem_root_page` if given (a new index), else idx.tnum (cleared
 /// first).
-fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
+fn refillIndex(p: *Parse, idx: *Index, mem_root_page: ?Reg) void {
     const db = p.db;
     const t = idx.table;
     const tab_cur = p.newCursors(2);
@@ -2676,27 +2678,27 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     // A write lock on the table.
     tableLock(p, @intCast(i_db), t.tnum, true, t.name);
     const v = getVdbe(p) orelse return;
-    const tnum: i32 = if (mem_root_page >= 0) mem_root_page else @intCast(idx.tnum);
+    const tnum: i32 = if (mem_root_page) |r| r.int() else @intCast(idx.tnum);
     const key = keyInfoOfIndex(p, idx);
     const key_p4: vi.P4 = if (key) |k| .{ .keyinfo = k } else .notused;
 
     // The index records of all rows go to the sorter.
     const sorter = p.newCursor();
     _ = aux.emit4(v, .SorterOpen, .{ sorter, 0, idx.n_key_col }, key_p4);
-    insert_mod.openTable(p, tab_cur.int(), @intCast(i_db), t, OP.OpenRead);
+    insert_mod.openTable(p, tab_cur, @intCast(i_db), t, OP.OpenRead);
     var addr1 = aux.emit(v, .Rewind, .{tab_cur});
     const record: Reg = expr_mod.getTempReg(p);
     main_mod.multiWrite(p);
-    var part_idx_label: i32 = 0;
-    _ = delete_mod.generateIndexKey(p, idx, tab_cur.int(), record.int(), false, &part_idx_label, null, 0);
+    var part_idx_label: ?Label = null;
+    _ = delete_mod.generateIndexKey(p, idx, tab_cur, record, false, &part_idx_label, null, .none);
     _ = aux.emit(v, .SorterInsert, .{ sorter, record });
     delete_mod.resolvePartIdxLabel(p, part_idx_label);
     _ = aux.emit(v, .Next, .{ tab_cur, addr1.plus(1) });
     aux.landHere(v, addr1);
-    if (mem_root_page < 0) _ = aux.emit(v, .Clear, .{ tnum, i_db });
+    if (mem_root_page == null) _ = aux.emit(v, .Clear, .{ tnum, i_db });
     // P2 is the root page, or with OPFLAG_P2ISREG the register it is in.
     _ = aux.emit4(v, .OpenWrite, .{ idx_cur, tnum, i_db }, key_p4);
-    aux.changeP5(v, vi.OPFLAG.BULKCSR | (if (mem_root_page >= 0) vi.OPFLAG.P2ISREG else 0));
+    aux.changeP5(v, vi.OPFLAG.BULKCSR | (if (mem_root_page != null) vi.OPFLAG.P2ISREG else 0));
 
     // Then, sorted, to the index (checking uniqueness).
     addr1 = aux.emit(v, .SorterSort, .{sorter});
@@ -2707,7 +2709,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
         // P2 of OP_SorterCompare is an address (that of the jump over
         // the error), not a label.
         _ = aux.emitInt(v, .SorterCompare, .{ sorter, j2, record }, idx.n_key_col);
-        uniqueConstraint(p, OE.Abort, idx, 0);
+        uniqueConstraint(p, OE.Abort, idx, .none);
         aux.landHere(v, j2);
     } else {
         main_mod.mayAbort(p);
@@ -2824,14 +2826,14 @@ pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, 
 /// xqlite: haltConstraint() of the error of the dialect the statement is
 /// compiled in (`z`, from dialect/constraint.zig, which lists the
 /// registers of the values it shows): OP_Halt, or OP_HaltIfNull of
-/// register `reg_null` (0 for OP_Halt).
-pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: [:0]const u8, reg_null: i32) void {
-    std.debug.assert(op == OP.HaltIfNull or reg_null == 0);
+/// register `reg_null` (none for OP_Halt).
+pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: [:0]const u8, reg_null: Reg) void {
+    std.debug.assert(op == OP.HaltIfNull or reg_null.isNone());
     const v = getVdbe(p) orelse return;
     if (on_error == OE.Abort) main_mod.mayAbort(p);
     // P3 is a register of OP_HaltIfNull only.
     _ = switch (op) {
-        .HaltIfNull => aux.emitStr(v, .HaltIfNull, .{ err_code, on_error.int(), Reg.from(reg_null) }, z),
+        .HaltIfNull => aux.emitStr(v, .HaltIfNull, .{ err_code, on_error.int(), reg_null }, z),
         .Halt => aux.emitStr(v, .Halt, .{ err_code, on_error.int() }, z),
         else => unreachable,
     };
@@ -2839,16 +2841,16 @@ pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: 
 }
 
 /// Port of sqlite3UniqueConstraint(): halt for a UNIQUE or PRIMARY KEY
-/// violation of `idx`, whose key is in the registers from `reg_key` (0:
-/// not in registers).
-pub fn uniqueConstraint(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) void {
+/// violation of `idx`, whose key is in the registers from `reg_key`
+/// (none: not in registers).
+pub fn uniqueConstraint(p: *Parse, on_error: OE, idx: *Index, reg_key: Reg) void {
     uniqueConstraintImpl(p, on_error, idx, reg_key) catch oomFault(p);
 }
 
-fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) Oom!void {
+fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index, reg_key: Reg) Oom!void {
     const t = idx.table;
     if (dconstraint.unique(p, idx, reg_key)) |z| {
-        return haltDialectConstraint(p, OP.Halt, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, z, 0);
+        return haltDialectConstraint(p, OP.Halt, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, z, .none);
     }
     var msg: std.ArrayList(u8) = .empty;
     if (idx.col_expr != null) {
@@ -2865,10 +2867,10 @@ fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) Oom!
 }
 
 /// Port of sqlite3RowidConstraint(): halt for a duplicate rowid, the one
-/// in register `reg_rowid` (0: not in a register).
-pub fn rowidConstraint(p: *Parse, on_error: OE, t: *Table, reg_rowid: i32) void {
+/// in register `reg_rowid` (none: not in a register).
+pub fn rowidConstraint(p: *Parse, on_error: OE, t: *Table, reg_rowid: Reg) void {
     if (dconstraint.rowid(p, t, reg_rowid)) |z| {
-        return haltDialectConstraint(p, OP.Halt, if (t.i_pkey >= 0) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_ROWID, on_error, z, 0);
+        return haltDialectConstraint(p, OP.Halt, if (t.i_pkey >= 0) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_ROWID, on_error, z, .none);
     }
     const msg, const rc = if (t.i_pkey >= 0)
         .{ std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, t.cols[@intCast(t.i_pkey)].name() }) catch return oomFault(p), RC.CONSTRAINT_PRIMARYKEY }
@@ -3211,7 +3213,7 @@ fn reindexImpl(p: *Parse, name1_arg: ?Token, name2_arg: ?Token) Oom!void {
                     (zcoll != null and collationMatch(zcoll.?, idx)))
                 {
                     beginWriteOperation(p, false, i_db);
-                    refillIndex(p, idx, -1);
+                    refillIndex(p, idx, null);
                 }
             }
         }

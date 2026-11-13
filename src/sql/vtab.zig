@@ -593,7 +593,7 @@ pub fn finishParse(p: *Parse, end: ?Token) void {
             .{ .str = t.name },
             .{ .str = t.name },
             .{ .str = stmt },
-            .{ .int = p.u1.cr.reg_rowid },
+            .{ .int = p.u1.cr.reg_rowid.int() },
         });
         const v = build.getVdbe(p) orelse return;
         build.changeCookie(p, i_db);

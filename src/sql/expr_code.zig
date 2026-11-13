@@ -277,8 +277,10 @@ fn inRhsIsConstant(p: *Parse, in: *Expr) bool {
 /// Port of sqlite3FindInIndex(): find or build a b-tree for the right side
 /// of IN: the table itself (IN_INDEX.ROWID), an index, or an ephemeral
 /// table (IN_INDEX.EPH); IN_INDEX.NOOP means compare against each value.
-/// The cursor goes to `tab`.
-pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, ai_map: ?[]i32, tab: *i32) IN_INDEX {
+/// The cursor goes to `tab` (-1 for IN_INDEX.NOOP), and with
+/// `rhs_has_null` a register that is set if the right side may hold a
+/// NULL.
+pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*Reg, ai_map: ?[]i32, tab: *Cursor) IN_INDEX {
     var rhs_has_null = rhs_has_null_arg;
     // Null until chosen (0 in C).
     var e_type: ?IN_INDEX = null;
@@ -306,7 +308,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
         if (n_expr == 1 and e_list.at(0).expr.?.i_column < 0) {
             // "x IN (SELECT rowid FROM table)".
             const addr = aux.emit(v, .Once, .{});
-            @import("insert.zig").openTable(p, tab_cur.?.int(), i_db, t, OP.OpenRead);
+            @import("insert.zig").openTable(p, tab_cur.?, i_db, t, OP.OpenRead);
             e_type = .ROWID;
             _ = aux.explain(p, false, "USING ROWID SEARCH ON TABLE {s} FOR IN-OPERATOR", .{t.name});
             aux.landHere(v, addr);
@@ -359,8 +361,8 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
                         aux.setP4KeyInfo(p, idx);
                         e_type = if (idx.sort_order[0] == int.SortOrder.desc) .INDEX_DESC else .INDEX_ASC;
                         if (rhs_has_null) |r| {
-                            r.* = p.newReg().int();
-                            if (n_expr == 1) setHasNullFlag(v, tab_cur.?, .from(r.*), idx.sort_order[0]);
+                            r.* = p.newReg();
+                            if (n_expr == 1) setHasNullFlag(v, tab_cur.?, r.*, idx.sort_order[0]);
                         }
                         aux.landHere(v, addr);
                     }
@@ -388,7 +390,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
             p.n_query_loop = 0;
         } else if (rhs_has_null) |r| {
             r_may_have_null = p.newReg();
-            r.* = r_may_have_null.int();
+            r.* = r_may_have_null;
         }
         if (!bloom_ok and x.useXSelect() and x.x.select.?.sel_flags.ClonedRhsIn) bloom_ok = true;
         codeRhsOfIN(p, x, tab_cur.?, bloom_ok);
@@ -399,7 +401,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
     if (ai_map) |m| if (e_type.? != .INDEX_ASC and e_type.? != .INDEX_DESC) {
         for (m[0..expr_mod.vectorSize(x.left.?)], 0..) |*a, i| a.* = @intCast(i);
     };
-    tab.* = if (tab_cur) |c| c.int() else -1;
+    tab.* = tab_cur orelse .from(-1);
     return e_type.?;
 }
 
@@ -615,13 +617,13 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
         // A limit X other than 0 or 1 becomes X<>0.
         const left = lim.left.?;
         if (!left.flags.IntValue or (left.u.value != 1 and left.u.value != 0)) {
-            const zero = expr_mod.exprInt32(p.arena, 0) catch return .from(oomZero(p));
+            const zero = expr_mod.exprInt32(p.arena, 0) catch return oomZero(p);
             zero.aff_expr = Aff.numeric;
-            lim.left = expr_mod.pExpr(p, TK.NE, dup(p, left), zero) catch return .from(oomZero(p));
+            lim.left = expr_mod.pExpr(p, TK.NE, dup(p, left), zero) catch return oomZero(p);
         }
     } else {
-        const one = expr_mod.exprInt32(p.arena, 1) catch return .from(oomZero(p));
-        sel.limit = expr_mod.pExpr(p, TK.LIMIT, one, null) catch return .from(oomZero(p));
+        const one = expr_mod.exprInt32(p.arena, 1) catch return oomZero(p);
+        sel.limit = expr_mod.pExpr(p, TK.LIMIT, one, null) catch return oomZero(p);
     }
     sel.i_limit = 0;
     select_mod.select(p, sel, &dest) catch {
@@ -644,16 +646,16 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
     return r_reg;
 }
 
-fn oomZero(p: *Parse) i32 {
+fn oomZero(p: *Parse) Reg {
     oom(p);
-    return 0;
+    return .none;
 }
 
 /// Port of sqlite3ExprCodeIN(): code "x IN (...)": jump to
 /// `dest_if_false` if the left side is not in the set, to `dest_if_null`
 /// if NULLs make that unknown, and fall through if it is.
 fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
-    var r_rhs_has_null: i32 = 0;
+    var r_rhs_has_null: Reg = .none;
     const ok_const_factor = p.ok_const_factor;
     const left = e.left.?;
     if (expr_mod.checkIN(p, e)) return;
@@ -662,14 +664,14 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
     const ai_map = p.arena.alloc(i32, n_vector) catch return oom(p);
     @memset(ai_map, 0);
     const v = vdbe(p);
-    var i_tab: i32 = 0;
+    var tab_cur: Cursor = .from(0);
     const e_type = findInIndex(
         p,
         e,
         IN_INDEX_MEMBERSHIP | IN_INDEX_NOOP_OK,
         if (dest_if_false == dest_if_null) null else &r_rhs_has_null,
         ai_map,
-        &i_tab,
+        &tab_cur,
     );
 
     // The left side, in registers. It is not factored out, as
@@ -724,7 +726,6 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
         return;
     }
 
-    const tab_cur: Cursor = .from(i_tab);
     if (e_type != .ROWID) {
         // Apply affinity, then reorder the left side to the index's
         // column order.
@@ -788,8 +789,8 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
     }
 
     // Step 4: not found and no NULLs on the right means FALSE.
-    if (r_rhs_has_null != 0 and n_vector == 1) {
-        _ = aux.emit(v, .NotNull, .{ Reg.from(r_rhs_has_null), dest_if_false });
+    if (!r_rhs_has_null.isNone() and n_vector == 1) {
+        _ = aux.emit(v, .NotNull, .{ r_rhs_has_null, dest_if_false });
     }
 
     // Step 5.
@@ -926,7 +927,7 @@ pub fn codeGetColumnOfTable(v: *Vdbe, t: *Table, tab_cur: Cursor, i_col: i32, ou
         x = build.tableColumnToStorage(t, @intCast(i_col));
     }
     _ = aux.emit(v, .Column, .{ tab_cur, x, out });
-    @import("update.zig").columnDefault(v, t, i_col, out.int());
+    @import("update.zig").columnDefault(v, t, i_col, out);
 }
 
 /// Port of sqlite3ExprCodeGetColumn(): load column `i_column` of `t`
@@ -1432,7 +1433,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                 return out;
             },
             TK.BETWEEN => {
-                codeBetween(p, e, out.int(), null, 0);
+                codeBetween(p, e, .{ .reg = out }, 0);
                 return out;
             },
             TK.COLLATE => {
@@ -1526,7 +1527,7 @@ fn codeCase(p: *Parse, e: *Expr, out: Reg, reg_free1: *Reg) void {
     const x = e.left;
     if (x) |xe| {
         const del = dup(p, xe) orelse return;
-        expr_mod.toRegister(del, exprCodeVector(p, del, reg_free1).int());
+        expr_mod.toRegister(del, exprCodeVector(p, del, reg_free1));
         op_compare.left = del;
         test_expr = &op_compare;
         // The register may be copied into the result, so it must not
@@ -1771,21 +1772,29 @@ pub fn codeExprList(p: *Parse, list: *ExprList, target: Reg, src_reg: Reg, flags
 /// The jumps of exprCodeBetween(): exprIfTrue or exprIfFalse.
 const JumpFn = *const fn (p: *Parse, e: ?*Expr, dest: Jump, jump_if_null: u16) void;
 
+/// Where exprCodeBetween() puts its result: in a register, or a jump
+/// (exprIfTrue or exprIfFalse) to a place.
+const BetweenDest = union(enum) {
+    reg: Reg,
+    jump: struct { f: JumpFn, to: Jump },
+};
+
 /// Port of exprCodeBetween(): "x BETWEEN y AND z" as "x>=y AND x<=z"
 /// computing x once: store the result in `dest`, or jump to it.
-fn codeBetween(p: *Parse, e: *Expr, dest: i32, jump: ?JumpFn, jump_if_null: u16) void {
+fn codeBetween(p: *Parse, e: *Expr, dest: BetweenDest, jump_if_null: u16) void {
     var reg_free1: Reg = .none;
     const del = dup(p, e.left) orelse return;
     var comp_left: Expr = .{ .op = TK.GE, .left = del, .right = e.x.list.?.at(0).expr };
     var comp_right: Expr = .{ .op = TK.LE, .left = del, .right = e.x.list.?.at(1).expr };
     var expr_and: Expr = .{ .op = TK.AND, .left = &comp_left, .right = &comp_right };
-    expr_mod.toRegister(del, exprCodeVector(p, del, &reg_free1).int());
-    if (jump) |j| {
-        j(p, &expr_and, .from(dest), jump_if_null);
-    } else {
-        // EP_OuterON keeps the AND from being factored out as a constant.
-        del.flags.OuterON = true;
-        _ = codeTarget(p, &expr_and, .from(dest));
+    expr_mod.toRegister(del, exprCodeVector(p, del, &reg_free1));
+    switch (dest) {
+        .jump => |j| j.f(p, &expr_and, j.to, jump_if_null),
+        .reg => |r| {
+            // EP_OuterON keeps the AND from being factored out as a constant.
+            del.flags.OuterON = true;
+            _ = codeTarget(p, &expr_and, r);
+        },
     }
     releaseTempReg(p, reg_free1);
 }
@@ -1858,7 +1867,7 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) voi
             _ = aux.emitAny(v, OP.fromTk(op), .{ .reg, .jump, .int }, .{ r1, to });
             return;
         },
-        TK.BETWEEN => return codeBetween(p, e, to.int(), exprIfTrue, jump_if_null),
+        TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = exprIfTrue, .to = to } }, jump_if_null),
         TK.IN => {
             const dest_if_false = aux.newLabel(p);
             const dest_if_null = if (jump_if_null != 0) to else Jump.of(dest_if_false);
@@ -1951,7 +1960,7 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) vo
             _ = aux.emitAny(v, OP.fromTk(op), .{ .reg, .jump, .int }, .{ r1, to });
             return;
         },
-        TK.BETWEEN => return codeBetween(p, e, to.int(), exprIfFalse, jump_if_null),
+        TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = exprIfFalse, .to = to } }, jump_if_null),
         TK.IN => {
             if (jump_if_null != 0) {
                 codeIN(p, e, to, to);

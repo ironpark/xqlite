@@ -15,6 +15,7 @@ const thunk = @import("xqlite_base").thunk;
 pub const TK = @import("tk.zig").TK;
 const Reg = @import("../vdbe/operand.zig").Reg;
 const Cursor = @import("../vdbe/operand.zig").Cursor;
+const Addr = @import("../vdbe/operand.zig").Addr;
 pub const Allocator = std.mem.Allocator;
 pub const Pgno = u32;
 
@@ -577,9 +578,9 @@ pub const Upsert = struct {
     // Set while generating code.
     idx: ?*Index = null,
     src: ?*SrcList = null,
-    reg_data: i32 = 0,
-    i_data_cur: i32 = 0,
-    i_idx_cur: i32 = 0,
+    reg_data: Reg = .none,
+    i_data_cur: Cursor = .from(0),
+    i_idx_cur: Cursor = .from(0),
 };
 
 /// Materialization hint of a CTE (M10d_*).
@@ -726,11 +727,11 @@ pub const Returning = struct {
     ret_trig: Trigger,
     ret_tstep: TriggerStep,
     /// The ephemeral table of results.
-    i_ret_cur: i32 = 0,
+    i_ret_cur: Cursor = .from(0),
     /// Results per row once "*" is expanded.
     n_ret_col: i32 = 0,
     /// Registers holding a row of results.
-    i_ret_reg: i32 = 0,
+    i_ret_reg: Reg = .none,
     /// The trigger's name: "sqlite_returning_%p".
     name_buf: [40]u8 = undefined,
 };
@@ -1939,11 +1940,11 @@ pub const Limit = enum(u4) {
 /// Fields of Parse used by CREATE TABLE/INDEX/VIEW (u1.cr).
 pub const CreateState = struct {
     /// Address of OP_CreateBtree for CREATE TABLE.
-    addr_cr_tab: i32 = 0,
+    addr_cr_tab: ?Addr = null,
     /// Register with the rowid of the new sqlite_schema entry.
-    reg_rowid: i32 = 0,
+    reg_rowid: Reg = .none,
     /// Register with the root page of the new object.
-    reg_root: i32 = 0,
+    reg_root: Reg = .none,
     /// Name of the constraint being parsed.
     constraint_name: Token = .{},
 };
@@ -2046,7 +2047,7 @@ pub const Parse = struct {
     ainc: ?*AutoincInfo = null,
     /// Size and first register of the temporary register block.
     n_range_reg: i32 = 0,
-    i_range_reg: i32 = 0,
+    i_range_reg: Reg = .none,
     /// VDBE cursors allocated so far.
     n_tab: i32 = 0,
     /// Registers allocated so far.
@@ -2077,7 +2078,7 @@ pub const Parse = struct {
     /// The trigger programs coded for the statement (top-level Parse
     /// only), a list of trigger.TriggerPrg.
     trigger_prg: ?*TriggerPrg = null,
-    temp_regs: [8]i32 = @splat(0),
+    temp_regs: [8]Reg = @splat(.none),
     outer_parse: ?*Parse = null,
     name_token: Token = .{},
     oldmask: u32 = 0,
@@ -2176,7 +2177,7 @@ pub const AutoincInfo = struct {
     tab: *Table,
     i_db: usize,
     /// Register holding the largest rowid.
-    reg_ctr: i32,
+    reg_ctr: Reg,
 };
 
 /// A named variable and its number (VList entry).

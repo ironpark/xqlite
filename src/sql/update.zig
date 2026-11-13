@@ -348,7 +348,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     }
 
     var e_one_pass: ONEPASS = ONEPASS.OFF;
-    var ai_cur_one_pass: [2]i32 = .{ -1, -1 };
+    var ai_cur_one_pass: [2]?Cursor = .{ null, null };
     // Whether OP_FinishSeek must resolve an OP_DeferredSeek of the loop.
     var b_finish_seek = true;
     var w: ?*where_mod.WhereInfo = null;
@@ -372,14 +372,15 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             {
                 flags.ONEPASS_MULTIROW = true;
             }
-            w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, idx_cur.int()) orelse return;
+            w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, .{ .cursor = idx_cur }) orelse return;
             e_one_pass = where_mod.okOnePass(w.?, &ai_cur_one_pass);
             b_finish_seek = where_mod.usesDeferredSeek(w.?);
             if (e_one_pass != ONEPASS.SINGLE) {
                 main_mod.multiWrite(p);
                 if (e_one_pass == ONEPASS.MULTI) {
-                    const i_cur = ai_cur_one_pass[1];
-                    if (i_cur >= 0 and i_cur != data_cur.int() and to_open[@intCast(i_cur - i_base_cur)]) e_one_pass = ONEPASS.OFF;
+                    if (ai_cur_one_pass[1]) |c| {
+                        if (c != data_cur and to_open[@intCast(c.int() - i_base_cur)]) e_one_pass = ONEPASS.OFF;
+                    }
                 }
             }
         }
@@ -417,11 +418,12 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         if (!is_view) {
             // Open the indexes to update.
             if (e_one_pass != ONEPASS.OFF) {
-                if (ai_cur_one_pass[0] >= 0) to_open[@intCast(ai_cur_one_pass[0] - i_base_cur)] = false;
-                if (ai_cur_one_pass[1] >= 0) to_open[@intCast(ai_cur_one_pass[1] - i_base_cur)] = false;
+                for (ai_cur_one_pass) |cur| {
+                    if (cur) |c| to_open[@intCast(c.int() - i_base_cur)] = false;
+                }
             }
             var addr_once: ?Addr = null;
-            if (e_one_pass == ONEPASS.MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] >= 0) > 0) addr_once = aux.emit(v, .Once, .{});
+            if (e_one_pass == ONEPASS.MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] != null) > 0) addr_once = aux.emit(v, .Once, .{});
             var not_used1: Cursor = undefined;
             var not_used2: Cursor = undefined;
             _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, .from(i_base_cur), to_open, &not_used1, &not_used2);
@@ -430,7 +432,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
         // The top of the loop over the rows.
         if (e_one_pass != ONEPASS.OFF) {
-            if (ai_cur_one_pass[0] != data_cur.int() and ai_cur_one_pass[1] != data_cur.int()) {
+            if (ai_cur_one_pass[0] != data_cur and ai_cur_one_pass[1] != data_cur) {
                 _ = aux.emitInt(v, .NotFound, .{ data_cur, label_break, key }, n_key);
             }
             if (e_one_pass != ONEPASS.SINGLE) label_continue = aux.newLabel(p);
@@ -656,7 +658,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
         const reg_rowid = p.newReg();
 
         // Scan the virtual table.
-        w = where_mod.whereBegin(p, src, where, null, null, null, .{ .ONEPASS_DESIRED = true }, 0) orelse return;
+        w = where_mod.whereBegin(p, src, where, null, null, null, .{ .ONEPASS_DESIRED = true }, .none) orelse return;
 
         // The arguments.
         for (t.cols, 0..) |*c, ii| {
@@ -685,7 +687,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
             _ = aux.emit(v, .SCopy, .{ reg_arg.at(@as(i32, 2) + i_pk), reg_arg.at(1) });
         }
 
-        var a_dummy: [2]i32 = undefined;
+        var a_dummy: [2]?Cursor = undefined;
         e_one_pass = where_mod.okOnePass(w.?, &a_dummy);
         // No ONEPASS.MULTI on virtual tables.
         std.debug.assert(e_one_pass == ONEPASS.OFF or e_one_pass == ONEPASS.SINGLE);

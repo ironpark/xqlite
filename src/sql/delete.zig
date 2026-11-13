@@ -190,8 +190,8 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         }
 
         // The rows matching the WHERE clause.
-        const w = where_mod.whereBegin(p, tab_list, where, null, null, null, wcf, i_tab_cur + 1) orelse return;
-        var ai_cur_one_pass: [2]i32 = .{ -1, -1 };
+        const w = where_mod.whereBegin(p, tab_list, where, null, null, null, wcf, .{ .cursor = tab_cur.at(1) }) orelse return;
+        var ai_cur_one_pass: [2]?Cursor = .{ null, null };
         const e_one_pass = where_mod.okOnePass(w, &ai_cur_one_pass);
         if (e_one_pass != ONEPASS.SINGLE) main_mod.multiWrite(p);
         if (where_mod.usesDeferredSeek(w)) _ = aux.emit(v, .FinishSeek, .{tab_cur});
@@ -219,8 +219,9 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             const o = try p.arena.alloc(bool, n_idx + 2);
             @memset(o, true);
             o[n_idx + 1] = false;
-            if (ai_cur_one_pass[0] >= 0) o[@intCast(ai_cur_one_pass[0] - i_tab_cur)] = false;
-            if (ai_cur_one_pass[1] >= 0) o[@intCast(ai_cur_one_pass[1] - i_tab_cur)] = false;
+            for (ai_cur_one_pass) |cur| {
+                if (cur) |c| o[@intCast(c.int() - i_tab_cur)] = false;
+            }
             to_open = o;
             if (addr_eph_open) |a| _ = aux.changeToNoop(v, a);
             bypass = aux.newLabel(p);
@@ -274,8 +275,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             _ = aux.emit4(v, .VUpdate, .{ 0, 1, key }, build.vtabP4(db, t));
             aux.changeP5(v, OE.Abort.int());
         } else {
-            const idx_no_seek: ?Cursor = if (ai_cur_one_pass[1] >= 0) .from(ai_cur_one_pass[1]) else null;
-            generateRowDelete(p, t, trig, data_cur, idx_cur, key, n_key, p.nested == 0, OE.Default, e_one_pass, idx_no_seek);
+            generateRowDelete(p, t, trig, data_cur, idx_cur, key, n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
         }
 
         if (e_one_pass != ONEPASS.OFF) {

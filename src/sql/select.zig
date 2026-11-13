@@ -466,7 +466,7 @@ const SortCtx = struct {
     /// Jump here when done (LIMIT reached); set by pushOntoSorter().
     label_done: ?Label = null,
     /// Jump here when the sorter is full, if not to the next instruction.
-    label_ob_lopt: ?Jump = null,
+    label_ob_lopt: ?Label = null,
     sort_flags: u8 = 0,
     deferred_row_load: ?*RowLoadInfo = null,
     /// The code pushing a row onto the sorter (scan status).
@@ -4068,7 +4068,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
         const wctrl_flags: WHERE = .{ .WANT_DISTINCT = distinct.is_tnct != 0, .USE_LIMIT = s.sel_flags.FixedLimit };
         const win = s.win; // The main window object, or null.
         if (win != null) window.windowCodeInit(p, s);
-        const w = where_mod.whereBegin(p, tab_list, where, sort.order_by, s.e_list, s, wctrl_flags, s.n_select_row) orelse return error.ParseFailed;
+        const w = where_mod.whereBegin(p, tab_list, where, sort.order_by, s.e_list, s, wctrl_flags, if (wctrl_flags.USE_LIMIT) .{ .limit = s.n_select_row } else .none) orelse return error.ParseFailed;
         if (where_mod.outputRowCount(w) < s.n_select_row) {
             s.n_select_row = where_mod.outputRowCount(w);
             // A UNION CTE implies DISTINCT.
@@ -4077,8 +4077,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
         if (distinct.is_tnct != 0 and where_mod.isDistinct(w) != .NOOP) distinct.e_tnct_type = where_mod.isDistinct(w);
         if (sort.order_by) |ob| {
             sort.n_ob_sat = where_mod.isOrdered(w);
-            const ob_lopt = where_mod.orderByLimitOptLabel(w);
-            sort.label_ob_lopt = if (ob_lopt != 0) Jump.from(ob_lopt) else null;
+            sort.label_ob_lopt = where_mod.orderByLimitOptLabel(w);
             if (sort.n_ob_sat == ob.len()) sort.order_by = null;
         }
         // An unneeded sorter.
@@ -4102,7 +4101,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             aux.place(v, brk);
         } else {
             // The standard inner loop.
-            selectInnerLoop(p, s, null, &sort, &distinct, dest, .from(where_mod.continueLabel(w)), .from(where_mod.breakLabel(w)));
+            selectInnerLoop(p, s, null, &sort, &distinct, dest, .of(where_mod.continueLabel(w)), .of(where_mod.breakLabel(w)));
             where_mod.whereEnd(w);
         }
     } else {
@@ -4186,7 +4185,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 .DISTINCTBY = distinct.is_tnct == 2,
                 .GROUPBY = distinct.is_tnct != 2,
                 .SORTBYGROUP = order_by_grp,
-            }), 0) orelse return error.ParseFailed;
+            }), .none) orelse return error.ParseFailed;
             if (p.idx_epr != null) optimizeAggregateUseOfIndexedExpr(s, agg, &nc);
             assignAggregateRegisters(p, agg);
             const e_dist = where_mod.isDistinct(w);
@@ -4381,7 +4380,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 assignAggregateRegisters(p, agg);
                 resetAccumulator(p, agg);
 
-                const w = where_mod.whereBegin(p, tab_list, where, min_max_order_by, distinct_list, s, min_max_flag.with(dist_flag), 0) orelse return error.ParseFailed;
+                const w = where_mod.whereBegin(p, tab_list, where, min_max_order_by, distinct_list, s, min_max_flag.with(dist_flag), .none) orelse return error.ParseFailed;
                 const e_dist = where_mod.isDistinct(w);
                 updateAccumulator(p, reg_acc, agg, e_dist);
                 if (e_dist != int.WHERE_DISTINCT.NOOP and agg.funcs.items.len > 0) {

@@ -291,7 +291,7 @@ fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, 
 
     if (p.n_err == 0) {
         const z = if (n_incr > 0) dconstraint.foreignKey(p, .referenced, if (is_update) .update else .delete, fk, t, idx, reg_data, ai_col) else null;
-        const w = where_mod.whereBegin(p, src, where, null, null, null, .{}, 0);
+        const w = where_mod.whereBegin(p, src, where, null, null, null, .{}, .none);
         _ = aux.emitStr(v, .FkCounter, .{ deferred, n_incr, 0 }, z);
         if (w) |wi| where_mod.whereEnd(wi);
     }

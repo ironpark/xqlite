@@ -27,6 +27,11 @@ const std = @import("std");
 const int = @import("../sqlite_int.zig");
 const flags = @import("xqlite_base").flags;
 const OP = @import("../../vdbe/opcodes.zig").OP;
+const operand = @import("../../vdbe/operand.zig");
+const Reg = operand.Reg;
+const Cursor = operand.Cursor;
+const Label = operand.Label;
+const Addr = operand.Addr;
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -102,25 +107,26 @@ pub const ALLBITS: Bitmask = ~@as(Bitmask, 0);
 /// Extra information of a WhereLevel that is a RIGHT JOIN (WhereRightJoin).
 pub const WhereRightJoin = struct {
     /// Cursor used to determine prior matched rows.
-    i_match: i32 = 0,
-    /// Bloom filter for iRJMatch.
-    reg_bloom: i32 = 0,
+    i_match: Cursor,
+    /// Bloom filter for iRJMatch, if any.
+    reg_bloom: Reg = .none,
     /// Return register for the interior subroutine.
-    reg_return: i32 = 0,
+    reg_return: Reg,
     /// Starting address of the interior subroutine.
-    addr_subrtn: i32 = 0,
+    addr_subrtn: Addr = .from(0),
     /// The last opcode in the interior subroutine.
-    end_subrtn: i32 = 0,
+    end_subrtn: Addr = .from(0),
 };
 
 /// One IN operator driving a loop (struct InLoop).
 pub const InLoop = struct {
-    /// The VDBE cursor used by this IN operator.
-    i_cur: i32 = 0,
+    /// The VDBE cursor used by this IN operator (with e_end_loop_op not
+    /// OP_Noop).
+    i_cur: Cursor = .from(0),
     /// Top of the IN loop.
-    addr_in_top: i32 = 0,
-    /// Base register of multi-key index record.
-    i_base: i32 = 0,
+    addr_in_top: Addr = .from(0),
+    /// Base register of multi-key index record (with n_prefix > 0).
+    i_base: Reg = .none,
     /// Number of prior entries in the key.
     n_prefix: i32 = 0,
     /// IN loop terminator: OP_Next or OP_Prev.
@@ -130,38 +136,45 @@ pub const InLoop = struct {
 /// How one nested loop is implemented (WhereLevel). WhereInfo.a[0] is the
 /// outer loop.
 pub const WhereLevel = struct {
-    /// Memory cell used to implement LEFT OUTER JOIN.
-    i_left_join: i32 = 0,
+    /// Memory cell used to implement LEFT OUTER JOIN, if this is the
+    /// right table of one.
+    i_left_join: Reg = .none,
     /// The VDBE cursor used to access the table.
-    i_tab_cur: i32 = 0,
-    /// The VDBE cursor used to access pIdx.
-    i_idx_cur: i32 = 0,
-    /// Jump here to break out of the loop.
-    addr_brk: i32 = 0,
-    /// Abort the query due to empty table or similar.
-    addr_halt: i32 = 0,
-    /// Jump here to start the next IN combination.
-    addr_nxt: i32 = 0,
-    /// Jump here for next iteration of skip-scan.
-    addr_skip: i32 = 0,
-    /// Jump here to continue with the next loop cycle.
-    addr_cont: i32 = 0,
-    /// First instruction of interior of the loop.
-    addr_first: i32 = 0,
+    i_tab_cur: Cursor = .from(0),
+    /// The VDBE cursor used to access pIdx. 0 if none, as in C (a test
+    /// of whether there is one cannot tell it from cursor 0).
+    i_idx_cur: Cursor = .from(0),
+    /// Jump here to break out of the loop. whereBegin() gives every
+    /// level its label before any code reads it.
+    addr_brk: Label = undefined,
+    /// Abort the query due to empty table or similar: addr_brk of this
+    /// or an outer level.
+    addr_halt: Label = undefined,
+    /// Jump here to start the next IN combination: a label of its own
+    /// with IN operators, else addr_brk. Set by codeOneLoopStart().
+    addr_nxt: Label = undefined,
+    /// The seek of the next iteration of skip-scan, if any.
+    addr_skip: ?Addr = null,
+    /// Jump here to continue with the next loop cycle. Set by
+    /// codeOneLoopStart().
+    addr_cont: Label = undefined,
+    /// First instruction of interior of the loop (with i_left_join).
+    addr_first: Addr = .from(0),
     /// Beginning of the body of this loop.
-    addr_body: i32 = 0,
+    addr_body: Addr = .from(0),
     /// Address at which a row is visited (SQLITE_ENABLE_STMT_SCANSTATUS).
-    addr_visit: i32 = 0,
+    addr_visit: Addr = .from(0),
     /// big-null flag reg. True if a NULL-scan is needed.
-    reg_bignull: i32 = 0,
-    /// Jump here for next part of big-null scan.
-    addr_bignull: i32 = 0,
-    /// LIKE range processing counter register (times 2).
+    reg_bignull: Reg = .none,
+    /// Jump here for next part of big-null scan; set with reg_bignull.
+    addr_bignull: ?Label = null,
+    /// LIKE range processing counter register (times 2), plus 1 for a
+    /// descending scan.
     i_like_rep_cntr: u32 = 0,
-    /// LIKE range processing address.
-    addr_like_rep: i32 = 0,
-    /// Bloom filter.
-    reg_filter: i32 = 0,
+    /// LIKE range processing address, if any.
+    addr_like_rep: ?Addr = null,
+    /// Bloom filter, if any.
+    reg_filter: Reg = .none,
     /// Extra information for RIGHT JOIN.
     rj: ?*WhereRightJoin = null,
     /// Which entry in the FROM clause.
@@ -170,9 +183,11 @@ pub const WhereLevel = struct {
     op: OP = @fromBackingInt(0),
     p3: u8 = 0,
     p5: u8 = 0,
-    /// Operands of the opcode used to end the loop.
+    /// P1 of the opcode used to end the loop: a cursor (OP_Next, OP_Prev,
+    /// OP_VNext), a register (OP_Return) or 0 (OP_Goto), so a number.
     p1: i32 = 0,
-    p2: i32 = 0,
+    /// P2 of the opcode used to end the loop: the top of the loop.
+    p2: Addr = .from(0),
     /// u.in: the IN operators (pWLoop->wsFlags & WHERE_IN_ABLE).
     in_loops: []InLoop = &.{},
     /// u.pCoveringIdx: possible covering index for WHERE_MULTI_OR.
@@ -509,6 +524,17 @@ pub const BLDF2_2NDPASS: u8 = 0x0004;
 pub const QUERY_PLANNER_LIMIT: u32 = 20000;
 pub const QUERY_PLANNER_LIMIT_INCR: u32 = 1000;
 
+/// The last argument of whereBegin(), which its flags give a meaning.
+pub const WhereAux = union(enum) {
+    none,
+    /// With WHERE_OR_SUBCLAUSE, the cursor to open the index of the loop
+    /// on; with WHERE_ONEPASS_DESIRED, the cursor of the first index of
+    /// the table (the cursors of the others follow it).
+    cursor: Cursor,
+    /// With WHERE_USE_LIMIT, the estimated number of rows of the LIMIT.
+    limit: LogEst,
+};
+
 /// The complete state of the planner between sqlite3WhereBegin() and
 /// sqlite3WhereEnd() (WhereInfo).
 pub const WhereInfo = struct {
@@ -522,12 +548,13 @@ pub const WhereInfo = struct {
     result_set: ?*ExprList = null,
     /// The entire SELECT statement containing WHERE.
     select: ?*Select = null,
-    /// OP_OpenWrite cursors for the ONEPASS opt.
-    ai_cur_one_pass: [2]i32 = .{ -1, -1 },
+    /// OP_OpenWrite cursors for the ONEPASS opt: the table's and the
+    /// index's, if any.
+    ai_cur_one_pass: [2]?Cursor = .{ null, null },
     /// Jump here to continue with next record.
-    i_continue: i32 = 0,
+    i_continue: Label,
     /// Jump here to break out of the loop.
-    i_break: i32 = 0,
+    i_break: Label,
     /// pParse->nQueryLoop outside the WHERE loop.
     saved_n_query_loop: LogEst = 0,
     /// Flags originally passed to sqlite3WhereBegin().
@@ -557,9 +584,9 @@ pub const WhereInfo = struct {
     /// Estimated number of output rows.
     n_row_out: LogEst = 0,
     /// The very beginning of the WHERE loop.
-    i_top: i32 = 0,
+    i_top: Addr = .from(0),
     /// End of the WHERE clause itself.
-    i_end_where: i32 = 0,
+    i_end_where: Addr = .from(0),
     /// List of all WhereLoop objects.
     loops: ?*WhereLoop = null,
     /// Mask of ORDER BY terms that need reversing.

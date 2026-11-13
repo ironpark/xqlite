@@ -33,6 +33,7 @@ const EP = int.EP;
 const SF = int.SF;
 const JT = int.JT;
 const Aff = int.Aff;
+const Reg = aux.operand.Reg;
 const WhereInfo = wi.WhereInfo;
 const WhereClause = wi.WhereClause;
 const WhereTerm = wi.WhereTerm;
@@ -1037,7 +1038,7 @@ pub fn split(wc: *WhereClause, e: ?*Expr, op: u8) Oom!void {
 
 /// Port of whereAddLimitExpr(): add a WO_AUX LIMIT or OFFSET term whose
 /// value is in register `i_reg` (or a TK_INTEGER if `e` is a constant).
-fn whereAddLimitExpr(wc: *WhereClause, i_reg: i32, e: ?*Expr, i_csr: i32, e_match_op: u8) Oom!void {
+fn whereAddLimitExpr(wc: *WhereClause, i_reg: Reg, e: ?*Expr, i_csr: i32, e_match_op: u8) Oom!void {
     const p = wc.w_info.parse;
     var new: *Expr = undefined;
     const i_val = expr_mod.isInteger(e, p, false);
@@ -1046,7 +1047,7 @@ fn whereAddLimitExpr(wc: *WhereClause, i_reg: i32, e: ?*Expr, i_csr: i32, e_matc
         new = try expr_mod.pExpr(p, TK.MATCH, null, val);
     } else {
         const val = try expr_mod.exprAlloc(p.arena, TK.REGISTER, null, false);
-        val.i_table = i_reg;
+        val.i_table = i_reg.int();
         new = try expr_mod.pExpr(p, TK.MATCH, null, val);
     }
     const idx = try whereClauseInsert(wc, new, .{ .DYNAMIC = true, .VIRTUAL = true });
@@ -1120,10 +1121,10 @@ pub fn addLimit(wc: *WhereClause, sel: *Select) Oom!void {
         const limit = sel.limit.?;
         std.debug.assert(limit.op == TK.LIMIT);
         if (!sel.i_offset.isNone() and !sel.sel_flags.Compound) {
-            try whereAddLimitExpr(wc, sel.i_offset.int(), limit.right, i_csr, INDEX_CONSTRAINT.OFFSET);
+            try whereAddLimitExpr(wc, sel.i_offset, limit.right, i_csr, INDEX_CONSTRAINT.OFFSET);
         }
         if (sel.i_offset.isNone() or !sel.sel_flags.Compound) {
-            try whereAddLimitExpr(wc, sel.i_limit.int(), limit.left, i_csr, INDEX_CONSTRAINT.LIMIT);
+            try whereAddLimitExpr(wc, sel.i_limit, limit.left, i_csr, INDEX_CONSTRAINT.LIMIT);
         }
     }
 }

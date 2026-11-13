@@ -152,7 +152,7 @@ pub fn opVFilter(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
     return if (res) .jump_p2 else .next;
 }
 
-pub fn opVColumn(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow {
+pub fn opVColumn(e: *Exec, op: *vi.OpWithP5(.{ .cursor, .int, .reg }, vi.ColumnP5)) Error!Flow {
     const cur = e.csr(op.p1);
     const dest = e.reg(op.p3);
     if (cur.null_row) {
@@ -164,8 +164,8 @@ pub fn opVColumn(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow {
     const module = vtab.module;
     var null_func: int.FuncDef = .{ .n_arg = 0, .name = "", .func_flags = .{ .RESULT_SUBTYPE = true } };
     var ctx: vi.Context = .{ .out = dest, .func = &null_func, .enc = e.encoding, .argv = &.{} };
-    std.debug.assert(op.p5 == vi.OPFLAG.NOCHNG or op.p5 == 0);
-    if (op.p5 & vi.OPFLAG.NOCHNG != 0) {
+    std.debug.assert(op.p5.arg == .none);
+    if (op.p5.nochng) {
         mem.setNull(dest);
         dest.flags = .{ .Null = true, .Zero = true };
         dest.u = .{ .n_zero = 0 };
@@ -209,7 +209,7 @@ pub fn opVRename(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     const rc = vtab.module.x_rename.?(vtab, std.mem.span(z.?));
     if (!is_legacy) db.flags.LegacyAlter = false;
     vtab_mod.importErrmsg(e.v, vtab);
-    e.v.expired = 0;
+    e.v.expired = .no;
     try e.check(rc);
     return .next;
 }

@@ -175,7 +175,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
                     // A composite key may include the IPK.
                     const parent = build.columnRegister(ix.table, rowid, ix.ai_column[i]);
                     _ = aux.emit(v, .Ne, .{ child, jump, parent });
-                    aux.changeP5(v, vi.SQLITE_JUMPIFNULL);
+                    aux.changeP5(v, vi.CmpP5{ .jump_if_null = true });
                 }
                 _ = aux.emit(v, .Goto, .{ 0, ok });
             }
@@ -191,7 +191,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
             // A row inserted into its own parent table satisfies itself.
             if (t == fk.from and n_incr == 1) {
                 _ = aux.emit(v, .Eq, .{ rowid, ok, temp });
-                aux.changeP5(v, vi.SQLITE_NOTNULL);
+                aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
             }
             insert_mod.openTable(p, cur, i_db, t, OP.OpenRead);
             _ = aux.emit(v, .NotExists, .{ cur, 0, temp });
@@ -209,7 +209,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
         if (dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx, reg_data, ai_col)) |z| {
             build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, .none);
         } else {
-            build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
+            build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, .foreign_key);
         }
     } else {
         if (n_incr > 0 and !deferred) main_mod.mayAbort(p);
@@ -338,7 +338,7 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
         if (dconstraint.foreignKeyUnknown(p)) |z| {
             build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, .none);
         } else {
-            build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
+            build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, .foreign_key);
         }
     }
     if (skip) |l| aux.place(v, l);

@@ -576,7 +576,7 @@ fn shellExec(p: *Shell, mode: *const Mode, text: []const u8, err_msg: ?*?[]u8) E
         };
         spec.style = style;
         const is_explain = api.stmtIsExplain(stmt);
-        if (is_explain != 0 and mode.auto_explain) spec.style = if (is_explain == 1) .explain else .eqp;
+        if (is_explain != .none and mode.auto_explain) spec.style = if (is_explain == .explain) .explain else .eqp;
         var qerr: ?[]u8 = null;
         rc = qrf.format(p.gpa, stmt, spec, p.out, &qerr) catch |err| {
             _ = api.finalize(stmt);

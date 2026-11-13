@@ -169,7 +169,7 @@ fn explainScanText(w: *Writer, item: *const SrcItem, loop: *const WhereLoop, is_
 /// Port of sqlite3WhereAddExplainText(): set P4 of the OP_Explain at
 /// `addr` to the text describing the loop of `level`.
 pub fn addExplainText(p: *Parse, addr: Addr, tab_list: *SrcList, level: *WhereLevel, wctrl_flags: int.WHERE) Oom!void {
-    if (build.toplevel(p).explain != 2 and !aux.isStmtScanStatus(p.db)) return;
+    if (build.toplevel(p).explain != .query_plan and !aux.isStmtScanStatus(p.db)) return;
     const v = p.vdbe.?;
     if (p.db.malloc_failed) return;
     const item = tab_list.at(level.i_from);
@@ -192,7 +192,7 @@ pub fn addExplainText(p: *Parse, addr: Addr, tab_list: *SrcList, level: *WhereLe
 /// null.
 pub fn explainOneScan(p: *Parse, tab_list: *SrcList, level: *WhereLevel, wctrl_flags: int.WHERE) Oom!?Addr {
     var ret: ?Addr = null;
-    if (build.toplevel(p).explain == 2 or aux.isStmtScanStatus(p.db)) {
+    if (build.toplevel(p).explain == .query_plan or aux.isStmtScanStatus(p.db)) {
         const loop = level.w_loop.?;
         if (!loop.ws_flags.MULTI_OR and !wctrl_flags.OR_SUBCLAUSE) {
             const v = p.vdbe.?;
@@ -714,7 +714,7 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, cur: 
                 const right = try expr_mod.exprAlloc(p.arena, TK.REGISTER, null, false);
                 compare.right = right;
                 right.i_table = reg.int();
-                ec.exprIfFalse(p, compare, level.addr_cont, vi.SQLITE_JUMPIFNULL);
+                ec.exprIfFalse(p, compare, level.addr_cont, true);
                 compare.left = null;
             }
         }
@@ -963,7 +963,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
             const rowid_reg = p.newReg();
             _ = aux.emit(v, .Rowid, .{ cur, rowid_reg });
             _ = aux.emitAny(v, test_op, .{ .reg, .jump, .reg }, .{ mem_end_value, addr_brk, rowid_reg });
-            aux.changeP5(v, Aff.numeric | vi.SQLITE_JUMPIFNULL);
+            aux.changeP5(v, vi.CmpP5.init(Aff.numeric, .{ .jump_if_null = true }));
         }
     } else if (loop.ws_flags.INDEXED) {
         idx = try codeIndexLoop(p, v, w, i_level, level, not_ready, b_rev_bit);
@@ -979,7 +979,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
             level.end = .none;
         } else {
             const start = aux.emitAny(v, a_start[b_rev_bit], .{ .cursor, .jump, .int }, .{ cur, level.addr_halt });
-            level.end = .{ .step = .{ .op = a_step[b_rev_bit], .cur = cur, .top = start.plus(1), .p5 = vi.STMTSTATUS.FULLSCAN_STEP } };
+            level.end = .{ .step = .{ .op = a_step[b_rev_bit], .cur = cur, .top = start.plus(1), .p5 = .fullscan_step } };
         }
     }
 
@@ -1016,7 +1016,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
                     skip_like = aux.emitAny(v, if (x & 1 != 0) OP.IfNot else OP.If, .{ .reg, .jump, .int }, .{Reg.from(@intCast(x >> 1))});
                 }
             }
-            ec.exprIfFalse(p, e, addr_cont, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, e, addr_cont, true);
             if (skip_like) |a| aux.landHere(v, a);
             term.wt_flags.CODED = true;
         }
@@ -1044,7 +1044,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         }
         var e_alt = alt.expr.*;
         e_alt.left = e.left;
-        ec.exprIfFalse(p, &e_alt, addr_cont, vi.SQLITE_JUMPIFNULL);
+        ec.exprIfFalse(p, &e_alt, addr_cont, true);
         alt.wt_flags.CODED = true;
     }
 
@@ -1072,7 +1072,9 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         _ = aux.emitInt(v, .IdxInsert, .{ rj.i_match, r, r.at(1) }, n_pk);
         if (!rj.reg_bloom.isNone()) {
             _ = aux.emitInt(v, .FilterAdd, .{ rj.reg_bloom, 0, r.at(1) }, n_pk);
-            aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
+            // As in C, the OP_IdxInsert's flag lands on OP_FilterAdd,
+            // which does not read P5.
+            aux.changeP5(v, vi.p5.int(vi.InsertP5{ .use_seek_result = true }));
         }
         aux.landHere(v, jmp1);
         expr_mod.releaseTempRange(p, r, n_pk + 1);
@@ -1104,7 +1106,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
                 continue;
             }
             if (tab_item.fg.jointype.LTORJ) continue;
-            ec.exprIfFalse(p, term.expr, addr_cont, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, term.expr, addr_cont, true);
             term.wt_flags.CODED = true;
         }
     }
@@ -1385,7 +1387,7 @@ fn codeIndexLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *Whe
             .cur = idx_cur,
             .top = top,
             .p3 = if (loop.ws_flags.UNQ_WANTED) 1 else 0,
-            .p5 = if (!loop.ws_flags.intersects(wi.WS.CONSTRAINT)) vi.STMTSTATUS.FULLSCAN_STEP else 0,
+            .p5 = if (!loop.ws_flags.intersects(wi.WS.CONSTRAINT)) .fullscan_step else .none,
         } };
     }
     if (omit_table) idx = null;
@@ -1531,7 +1533,7 @@ fn codeMultiOrLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, level: *W
                 if (i_set >= 0) {
                     _ = aux.emit(v, .MakeRecord, .{ r, n_pk, reg_rowid });
                     _ = aux.emitInt(v, .IdxInsert, .{ seen_cur, reg_rowid, r }, n_pk);
-                    if (i_set != 0) aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
+                    if (i_set != 0) aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
                 }
                 expr_mod.releaseTempRange(p, r, n_pk);
             }
@@ -1663,7 +1665,9 @@ pub fn rightJoinLoop(w: *WhereInfo, i_level: usize, level: *WhereLevel) Oom!void
         expr_mod.releaseTempReg(p, r2);
         if (!rj.reg_bloom.isNone()) {
             _ = aux.emitInt(v, .FilterAdd, .{ rj.reg_bloom, 0, r }, n_pk);
-            aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
+            // As in C, the OP_IdxInsert's flag lands on OP_FilterAdd,
+            // which does not read P5.
+            aux.changeP5(v, vi.p5.int(vi.InsertP5{ .use_seek_result = true }));
         }
 
         // Output the row with NULLs for the tables to the left.

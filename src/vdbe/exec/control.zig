@@ -16,6 +16,8 @@ const Flow = core.Flow;
 const Error = core.Error;
 const Op = vi.Op;
 const OpOf = vi.OpOf;
+const OpWithP5 = vi.OpWithP5;
+const HaltP5 = vi.HaltP5;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const OP = vi.OP;
@@ -97,12 +99,12 @@ pub fn opYield(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
     return .goto(@intCast(dest + 1));
 }
 
-pub fn opHaltIfNull(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
+pub fn opHaltIfNull(e: *Exec, op: *OpWithP5(.{ .int, .int, .reg }, HaltP5)) Error!Flow {
     if (!e.reg(op.p3).flags.Null) return .next;
     return opHalt(e, op);
 }
 
-pub fn opHalt(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
+pub fn opHalt(e: *Exec, op: *OpWithP5(.{ .int, .int, .reg }, HaltP5)) Error!Flow {
     const v = e.v;
     const db = e.db;
     std.debug.assert(op.p1 != RC.INTERNAL);
@@ -121,24 +123,22 @@ pub fn opHalt(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
     }
     v.rc = op.p1;
     v.error_action = .fromInt(op.p2);
-    std.debug.assert(op.p5 <= 4 or op.p5 & vi.P5_ConstraintDialect != 0);
     if (v.rc != 0) {
         if (op.p3 != .none and op.p4type == .notused) {
             const z = try mem.valueText(e.reg(op.p3), ENC.UTF8);
             aux.vdbeError(v, "{s}", .{if (z) |s| std.mem.span(s) else ""});
-        } else if (op.p5 & vi.P5_ConstraintDialect != 0) {
+        } else if (op.p5.dialect) {
             try dialectConstraintError(e, op.raw());
-        } else if (op.p5 != 0) {
-            const types = [_][]const u8{ "NOT NULL", "UNIQUE", "CHECK", "FOREIGN KEY" };
+        } else if (op.p5.constraint.words()) |kind| {
             if (op.p4type == .z) {
                 const name = std.mem.span(op.p4As(.z));
-                aux.vdbeError(v, "{s} constraint failed: {s}", .{ types[op.p5 - 1], name });
-                // P5_ConstraintCheck: a dialect's type check.
-                if (op.p5 == 3) if (dialect.checkState(name)) |st| {
+                aux.vdbeError(v, "{s} constraint failed: {s}", .{ kind, name });
+                // A CHECK: maybe a dialect's type check.
+                if (op.p5.constraint == .check) if (dialect.checkState(name)) |st| {
                     v.err_state = st;
                 };
             } else {
-                aux.vdbeError(v, "{s} constraint failed", .{types[op.p5 - 1]});
+                aux.vdbeError(v, "{s} constraint failed", .{kind});
             }
         } else {
             aux.vdbeError(v, "{s}", .{if (op.p4type == .z) std.mem.span(op.p4As(.z)) else ""});
@@ -155,7 +155,7 @@ pub fn opHalt(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
 }
 
 /// The error of a constraint in the words of the dialect the statement
-/// was compiled in (P5_ConstraintDialect): P4, with the values of the
+/// was compiled in (HaltP5.dialect): P4, with the values of the
 /// key or the row at dialect.value_mark (constraint.render()).
 fn dialectConstraintError(e: *Exec, op: *const Op) Error!void {
     @branchHint(.cold);
@@ -192,7 +192,7 @@ pub fn opInit(e: *Exec, op: anytype, comptime opc: OP) Flow {
         op.p1 = 0;
     }
     op.p1 += 1;
-    e.v.counters[vi.STMTSTATUS.RUN] += 1;
+    e.v.counters.getPtr(.run).* += 1;
     return .jump_p2;
 }
 

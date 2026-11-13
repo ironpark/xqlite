@@ -5,7 +5,7 @@
 //! generator (insert.zig, build.zig, fkey.zig) codes the OP_Halt of a
 //! constraint: the dialect's Constraint.message turns a Violation (the
 //! table, the columns, the constraint's name) into its message and
-//! ErrorState, which go into P4 (encode()) with P5_ConstraintDialect. The
+//! ErrorState, which go into P4 (encode()) with HaltP5.dialect. The
 //! program then only decodes it when the constraint fails, and the
 //! values of the key or the row, in the registers the P4 lists, are
 //! written at dialect.value_mark. In SQLite's dialect (and the engine's own SQL,

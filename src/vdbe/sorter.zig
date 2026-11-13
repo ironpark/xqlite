@@ -147,6 +147,9 @@ const SortSubtask = struct {
     /// Number of PMAs in `file`.
     n_pma: u32 = 0,
     unpacked: UnpackedRecord,
+    /// A comparison met a corrupt record. As in C (errCode), the sort
+    /// goes on and fails at its end.
+    corrupt: bool = false,
     cmp: CompareFn = compareGeneral,
     /// Temp file for level-0 PMAs.
     file: SorterFile = .{},
@@ -342,7 +345,7 @@ fn pmaReaderInit(t: *SortSubtask, file: *const SorterFile, start: i64, p: *PmaRe
 
 fn unpackKey2(t: *SortSubtask, key2_cached: *bool, key2: []const u8) void {
     if (!key2_cached.*) {
-        t.unpacked.n_field = t.sorter.key_info.n_key_field;
+        t.unpacked.fields = t.unpacked.fields.ptr[0..t.sorter.key_info.n_key_field];
         serial.recordUnpack(key2, &t.unpacked);
         key2_cached.* = true;
     }
@@ -351,13 +354,20 @@ fn unpackKey2(t: *SortSubtask, key2_cached: *bool, key2: []const u8) void {
 /// Port of vdbeSorterCompare().
 fn compareGeneral(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
     unpackKey2(t, key2_cached, key2);
-    return serial.recordCompare(key1, &t.unpacked);
+    return serial.recordCompare(key1, &t.unpacked) catch corrupt(t);
 }
 
 /// Port of vdbeSorterCompareTail(): the first fields are equal.
 fn compareTail(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
     unpackKey2(t, key2_cached, key2);
-    return serial.recordCompareWithSkip(key1, &t.unpacked, true);
+    return serial.recordCompareWithSkip(key1, &t.unpacked, true) catch corrupt(t);
+}
+
+/// A comparison of a corrupt record: noted, and 0 (equal) to go on with.
+fn corrupt(t: *SortSubtask) i32 {
+    @branchHint(.cold);
+    t.corrupt = true;
+    return 0;
 }
 
 /// The end of the fast comparators: break ties on the first field with
@@ -522,7 +532,7 @@ fn sorterSort(t: *SortSubtask) Error!u32 {
     // Keys that are all the same decide nothing, unless they are exact.
     const use_norm = s.norm_on and s.norm_ok and n > 0 and (s.norm_varied or s.norms.items[0] & 1 != 0);
     const p = if (use_norm) sortWithCompare(true, t) else sortWithCompare(false, t);
-    if (t.unpacked.err) |err| return err;
+    if (t.corrupt) return error.Corrupt;
     return p;
 }
 
@@ -737,7 +747,7 @@ fn mergeEngineStep(m: *MergeEngine) Error!bool {
             r1 = m.tree[i ^ 0x0001];
         }
     }
-    if (t.unpacked.err) |err| return err;
+    if (t.corrupt) return error.Corrupt;
     return m.readers[m.tree[1]].fd == null;
 }
 
@@ -835,7 +845,7 @@ fn mergeEngineInit(t: *SortSubtask, m: *MergeEngine) Error!void {
     for (m.readers) |*r| try pmaReaderIncrInit(r);
     var i = m.n_tree - 1;
     while (i > 0) : (i -= 1) mergeEngineCompare(m, i);
-    if (t.unpacked.err) |err| return err;
+    if (t.corrupt) return error.Corrupt;
 }
 
 /// Port of vdbePmaReaderIncrMergeInit() with INCRINIT_NORMAL: initialize
@@ -973,7 +983,7 @@ pub fn init(db: *int.Sqlite3, n_field: i32, ki: *const vi.KeyInfo) Error!*Sorter
     };
     // Without worker threads, the sort may stop at n_field fields.
     if (n_field != 0) s.key_info.n_key_field = @intCast(n_field);
-    s.task.unpacked = .{ .key_info = &s.key_info, .mem = s.cells.ptr, .n_field = s.key_info.n_key_field };
+    s.task.unpacked = .{ .key_info = &s.key_info, .fields = s.cells.ptr[0..s.key_info.n_key_field] };
 
     if (main_bt != null and !tempInMemory(db)) {
         s.mn_pma_size = sorter_pmasz * pgsz;
@@ -1008,7 +1018,7 @@ fn subtaskCleanup(t: *SortSubtask) void {
     t.file = .{};
     t.file2 = .{};
     t.n_pma = 0;
-    t.unpacked.err = null;
+    t.corrupt = false;
 }
 
 /// Port of sqlite3VdbeSorterReset(): drop every record and PMA.
@@ -1222,12 +1232,15 @@ pub fn rowkey(c: *VdbeCursor, out: *Mem) Error!void {
 pub fn compare(c: *VdbeCursor, val: *const Mem, n_key_col: i32) Error!i32 {
     const s = get(c);
     const key = currentKey(s);
-    var r: UnpackedRecord = .{ .key_info = &s.key_info, .mem = s.cells.ptr, .n_field = @intCast(n_key_col) };
+    const n: usize = @intCast(n_key_col);
+    var r: UnpackedRecord = .{ .key_info = &s.key_info, .fields = s.cells.ptr[0..n] };
     serial.recordUnpack(key, &r);
-    for (s.cells[0..@min(r.n_field, @as(usize, @intCast(n_key_col)))]) |m| {
+    for (s.cells[0..@min(r.fields.len, n)]) |m| {
         if (m.flags.Null) return -1;
     }
-    return serial.recordCompare(val.bytes(), &r);
+    // C ignores the comparator's errCode here: a corrupt record compares
+    // equal.
+    return serial.recordCompare(val.bytes(), &r) catch 0;
 }
 
 // ================================================================== tests

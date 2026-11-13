@@ -95,12 +95,13 @@ pub fn allocUnpackedRecord(a: std.mem.Allocator, key_info: *KeyInfo) error{OutOf
     const r = try a.create(UnpackedRecord);
     const cells = try a.alloc(Mem, n);
     for (cells) |*c| c.* = .{ .db = key_info.db };
-    r.* = .{ .key_info = key_info, .mem = cells.ptr, .n_field = @intCast(n) };
+    r.* = .{ .key_info = key_info, .fields = cells };
     return r;
 }
 
 /// Port of sqlite3VdbeRecordUnpack(): decode `key` into `r`, up to
-/// r.n_field fields. Values point into `key`.
+/// r.fields.len fields, and leave r.fields the fields decoded. Values
+/// point into `key`.
 pub fn recordUnpack(key: []const u8, r: *UnpackedRecord) void {
     const ki = r.key_info;
     r.default_rc = 0;
@@ -109,7 +110,8 @@ pub fn recordUnpack(key: []const u8, r: *UnpackedRecord) void {
     const sz_hdr = hdr.value;
     var d: u32 = sz_hdr;
     var u: u16 = 0;
-    var m: [*]Mem = r.mem;
+    const n_field = r.fields.len;
+    var m: [*]Mem = r.fields.ptr;
     while (idx < sz_hdr and d <= key.len) {
         const st = record.getVarint32(key, idx);
         idx += st.len;
@@ -120,15 +122,16 @@ pub fn recordUnpack(key: []const u8, r: *UnpackedRecord) void {
         serialGet(key, d, st.value, &m[0]);
         d += record.serialTypeLen(st.value);
         u += 1;
-        if (u >= r.n_field) break;
+        if (u >= n_field) break;
         m += 1;
     }
     if (d > key.len and u > 0) {
         // A corrupt record: the last value may lie past the end.
-        const last = if (u < r.n_field) m - 1 else m;
+        const last = if (u < n_field) m - 1 else m;
         mem.setNull(&last[0]);
     }
-    r.n_field = u;
+    // As in C, the first field is decoded even into an empty r.fields.
+    r.fields = r.fields.ptr[0..u];
 }
 
 /// -1, 0 or 1 for an order (std.math.Order).
@@ -240,13 +243,12 @@ pub fn memCompare(m1: *const Mem, m2: *const Mem, coll: ?*const CollSeq) i32 {
 /// Port of sqlite3VdbeRecordCompareWithSkip(): compare the record `key1`
 /// with the unpacked `r`: negative, zero or positive as key1 is less,
 /// equal or greater. With `skip` the first fields are known to be equal.
-/// Corruption sets r.err and returns 0.
-pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i32 {
+pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) CompareError!i32 {
     var d1: u32 = undefined;
     var i: usize = undefined;
     var sz_hdr1: u32 = undefined;
     var idx1: u32 = undefined;
-    var rhs: [*]Mem = r.mem;
+    var rhs: [*]Mem = r.fields.ptr;
     var rc: i32 = 0;
     // Uninitialized, as in C: each use sets the fields it reads.
     var mem1: Mem = undefined;
@@ -275,10 +277,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
         d1 = sz_hdr1;
         i = 0;
     }
-    if (d1 > key1.len) {
-        r.err = error.Corrupt;
-        return 0;
-    }
+    if (d1 > key1.len) return error.Corrupt;
 
     var serial_type: u32 = 0;
     while (true) {
@@ -328,10 +327,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
             } else {
                 const n: u32 = (serial_type - 12) / 2;
                 const ki = r.key_info;
-                if (d1 + n > key1.len or ki.n_all_field <= i) {
-                    r.err = error.Corrupt;
-                    return 0;
-                }
+                if (d1 + n > key1.len or ki.n_all_field <= i) return error.Corrupt;
                 if (ki.coll[i]) |coll| {
                     mem1 = .{ .enc = ki.enc, .db = ki.db, .flags = .{ .Str = true }, .z = @constCast(key1.ptr + d1), .n = @intCast(n) };
                     rc = compareMemString(&mem1, p, coll);
@@ -347,10 +343,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                 rc = -1;
             } else {
                 const n: u32 = (serial_type - 12) / 2;
-                if (d1 + n > key1.len) {
-                    r.err = error.Corrupt;
-                    return 0;
-                }
+                if (d1 + n > key1.len) return error.Corrupt;
                 if (p.flags.Zero) {
                     rc = if (!isAllZero(key1[d1..][0..n])) 1 else @as(i32, @intCast(n)) - p.u.n_zero;
                 } else {
@@ -378,28 +371,25 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
         }
 
         i += 1;
-        if (i == r.n_field) break;
+        if (i == r.fields.len) break;
         rhs += 1;
         d1 += record.serialTypeLen(serial_type);
         if (d1 > key1.len) break;
         idx1 += varint.len(serial_type);
-        if (idx1 >= sz_hdr1) {
-            r.err = error.Corrupt;
-            return 0;
-        }
+        if (idx1 >= sz_hdr1) return error.Corrupt;
     }
     r.eq_seen = true;
     return r.default_rc;
 }
 
 /// Port of sqlite3VdbeRecordCompare().
-pub fn recordCompare(key1: []const u8, r: *UnpackedRecord) i32 {
+pub fn recordCompare(key1: []const u8, r: *UnpackedRecord) CompareError!i32 {
     return recordCompareWithSkip(key1, r, false);
 }
 
 /// Port of vdbeRecordCompareInt(): when the first field of `r` is an
 /// integer and the header size fits in one byte.
-fn recordCompareInt(key1: []const u8, r: *UnpackedRecord) i32 {
+fn recordCompareInt(key1: []const u8, r: *UnpackedRecord) CompareError!i32 {
     const serial_type: u32 = record.at(key1, 1);
     const off: usize = record.at(key1, 0) & 0x3f;
     var lhs: i64 = undefined;
@@ -413,14 +403,14 @@ fn recordCompareInt(key1: []const u8, r: *UnpackedRecord) i32 {
     const v = r.u.i;
     if (v > lhs) return r.r1;
     if (v < lhs) return r.r2;
-    if (r.n_field > 1) return recordCompareWithSkip(key1, r, true);
+    if (r.fields.len > 1) return recordCompareWithSkip(key1, r, true);
     r.eq_seen = true;
     return r.default_rc;
 }
 
 /// Port of vdbeRecordCompareString(): when the first field of `r` is text
 /// in the BINARY collation and the header size fits in one byte.
-fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
+fn recordCompareString(key1: []const u8, r: *UnpackedRecord) CompareError!i32 {
     var serial_type: i32 = @as(i8, @bitCast(record.at(key1, 1)));
     while (true) {
         if (serial_type < 12) {
@@ -434,10 +424,7 @@ fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
         if (serial_type & 1 == 0) return r.r2;
         const sz_hdr: u32 = record.at(key1, 0);
         const n_str: u32 = @intCast(@divTrunc(serial_type - 12, 2));
-        if (sz_hdr + n_str > key1.len) {
-            r.err = error.Corrupt;
-            return 0;
-        }
+        if (sz_hdr + n_str > key1.len) return error.Corrupt;
         const pn: u32 = @intCast(r.n);
         const n_cmp = @min(pn, n_str);
         var res = record.memcmp(key1[sz_hdr..][0..n_cmp], r.u.z.?[0..n_cmp]);
@@ -445,7 +432,7 @@ fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
         if (res < 0) return r.r1;
         res = @as(i32, @intCast(n_str)) - r.n;
         if (res == 0) {
-            if (r.n_field > 1) return recordCompareWithSkip(key1, r, true);
+            if (r.fields.len > 1) return recordCompareWithSkip(key1, r, true);
             r.eq_seen = true;
             return r.default_rc;
         }
@@ -453,13 +440,21 @@ fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
     }
 }
 
-pub const RecordCompare = *const fn (key1: []const u8, r: *UnpackedRecord) i32;
+/// A corrupt record (C: UnpackedRecord.errCode, here returned).
+pub const CompareError = error{Corrupt};
+
+/// A comparator: negative, zero or positive as the record `key1` is
+/// less than, equal to or greater than `r` (default_rc when the fields
+/// compared are equal).
+pub const RecordCompare = *const fn (key1: []const u8, r: *UnpackedRecord) CompareError!i32;
 
 /// Port of sqlite3VdbeFindCompare(): the fastest comparator for `r`.
 pub fn findCompare(r: *UnpackedRecord) RecordCompare {
     const ki = r.key_info;
     if (ki.n_all_field <= 13) {
-        const flags = r.mem[0].flags;
+        // As in C, field 0 is read even if there is none.
+        const first = &r.fields.ptr[0];
+        const flags = first.flags;
         if (ki.sort_flags[0] != 0) {
             if (ki.sort_flags[0] & KeyInfoOrder.bignull != 0) return recordCompare;
             r.r1 = 1;
@@ -469,12 +464,12 @@ pub fn findCompare(r: *UnpackedRecord) RecordCompare {
             r.r2 = 1;
         }
         if (flags.Int) {
-            r.u = .{ .i = r.mem[0].u.i };
+            r.u = .{ .i = first.u.i };
             return recordCompareInt;
         }
         if (!flags.intersects(.{ .Real = true, .IntReal = true, .Null = true, .Blob = true }) and isBinary(ki.coll[0])) {
-            r.u = .{ .z = r.mem[0].z };
-            r.n = r.mem[0].n;
+            r.u = .{ .z = first.z };
+            r.n = first.n;
             return recordCompareString;
         }
     }
@@ -515,7 +510,8 @@ pub fn idxRowid(db: *int.Sqlite3, cur: *btree.Cursor) (mem.Error || btree.Error)
 }
 
 /// Port of sqlite3VdbeIdxKeyCompare(): compare the index entry under the
-/// cursor (ignoring its rowid) with `r`.
+/// cursor (ignoring its rowid) with `r`. A corrupt entry compares equal:
+/// C ignores the comparator's errCode here.
 pub fn idxKeyCompare(db: *int.Sqlite3, c: *VdbeCursor, r: *UnpackedRecord) (mem.Error || btree.Error)!i32 {
     const cur = c.kind.btree.cursor;
     const n_cell_key = cur.payloadSize();
@@ -523,7 +519,7 @@ pub fn idxKeyCompare(db: *int.Sqlite3, c: *VdbeCursor, r: *UnpackedRecord) (mem.
     var m: Mem = .{ .db = db, .flags = .{} };
     try mem.fromBtreeZeroOffset(cur, n_cell_key, &m);
     defer mem.releaseMalloc(&m);
-    return recordCompareWithSkip(m.bytes(), r, false);
+    return recordCompareWithSkip(m.bytes(), r, false) catch 0;
 }
 
 /// Port of sqlite3VdbeFinishMoveto(): carry out a deferred seek.
@@ -570,7 +566,7 @@ pub const IndexKeyCtx = struct {
 
     /// Calls `cmp` through the function pointer.
     pub fn compare(self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
-        return finish(self.r, self.cmp(stored, self.r));
+        return order(try self.cmp(stored, self.r));
     }
 
     /// compare() with the comparator fixed, so that the b-tree's call
@@ -578,15 +574,14 @@ pub const IndexKeyCtx = struct {
     fn compareWith(comptime cmp: RecordCompare) fn (self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
         return struct {
             fn f(self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
-                return finish(self.r, @call(.always_inline, cmp, .{ stored, self.r }));
+                return order(try @call(.always_inline, cmp, .{ stored, self.r }));
             }
         }.f;
     }
 
-    inline fn finish(r: *UnpackedRecord, c: i32) btree.CompareError!std.math.Order {
-        if (r.err) |err| return err;
-        // The b-tree wants the order of the stored key relative to the
-        // search key.
+    /// The b-tree wants the order of the stored key relative to the
+    /// search key.
+    inline fn order(c: i32) std.math.Order {
         if (c < 0) return .lt;
         if (c > 0) return .gt;
         return .eq;
@@ -616,9 +611,9 @@ fn seekPacked(ki_const: *const KeyInfo, cur: *btree.Cursor, key: []const u8) btr
     const cells = if (n <= stack.len) stack[0..n] else try gpa.alloc(Mem, n);
     defer if (n > stack.len) gpa.free(cells);
     for (cells) |*c| c.* = .{ .db = ki.db };
-    var r: UnpackedRecord = .{ .key_info = ki, .mem = cells.ptr, .n_field = @intCast(n) };
+    var r: UnpackedRecord = .{ .key_info = ki, .fields = cells };
     recordUnpack(key, &r);
-    if (r.n_field == 0 or r.n_field > ki.n_all_field) return error.Corrupt;
+    if (r.fields.len == 0 or r.fields.len > ki.n_all_field) return error.Corrupt;
     return indexMoveto(cur, &r);
 }
 
@@ -677,8 +672,11 @@ fn isMatchingIndexKey(cur: *btree.Cursor, integrity: bool, mask: int.Bitmask, r:
         const n_serial = record.serialTypeLen(st.value);
         if (@as(u64, idx_rec) + n_serial > n_rec) return error.Corrupt;
         serialGet(rec, idx_rec, st.value, &m);
-        if (!skipField(mask, ii, &r.mem[ii], &m, integrity)) {
-            res = memCompare(&m, &r.mem[ii], ki.coll[ii]);
+        // C reads the registers past r.fields too (OP_IdxDelete's P5
+        // fields may be fewer than the index's).
+        const field = &r.fields.ptr[ii];
+        if (!skipField(mask, ii, field, &m, integrity)) {
+            res = memCompare(&m, field, ki.coll[ii]);
             if (res != 0) break;
         }
         idx_rec += n_serial;
@@ -740,18 +738,20 @@ test "serial: compare records" {
     var cells: [2]Mem = .{ .{}, .{} };
     mem.setInt64(&cells[0], 1);
     try mem.setStr(&cells[1], "abd", vi.ENC.UTF8, .static);
-    var r: UnpackedRecord = .{ .key_info = &ki, .mem = &cells, .n_field = 2 };
-    try std.testing.expect(recordCompare(&rec, &r) < 0);
+    var r: UnpackedRecord = .{ .key_info = &ki, .fields = &cells };
+    try std.testing.expect(try recordCompare(&rec, &r) < 0);
     const f = findCompare(&r);
-    try std.testing.expect(f(&rec, &r) < 0);
+    try std.testing.expect(try f(&rec, &r) < 0);
     try mem.setStr(&cells[1], "abc", vi.ENC.UTF8, .static);
     r.default_rc = 0;
-    try std.testing.expectEqual(@as(i32, 0), recordCompare(&rec, &r));
+    try std.testing.expectEqual(@as(i32, 0), try recordCompare(&rec, &r));
     try std.testing.expect(r.eq_seen);
+    // A header that says more than the record has.
+    try std.testing.expectError(error.Corrupt, recordCompare(&[_]u8{ 9, 1 }, &r));
 
-    var u: UnpackedRecord = .{ .key_info = &ki, .mem = &cells, .n_field = 2 };
+    var u: UnpackedRecord = .{ .key_info = &ki, .fields = &cells };
     recordUnpack(&rec, &u);
-    try std.testing.expectEqual(@as(u16, 2), u.n_field);
+    try std.testing.expectEqual(@as(usize, 2), u.fields.len);
     try std.testing.expectEqual(@as(i64, 1), cells[0].u.i);
     try std.testing.expectEqualStrings("abc", cells[1].bytes());
 }

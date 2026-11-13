@@ -40,6 +40,58 @@ pub const bms = 64;
 /// ynVar: variable numbers (?NNN).
 pub const YnVar = i16;
 
+/// Whether a statement is listed instead of run (Parse.explain,
+/// Vdbe.explain): C's 0, 1 for EXPLAIN and 2 for EXPLAIN QUERY PLAN,
+/// which sqlite3_stmt_isexplain() returns.
+pub const Explain = enum(u2) {
+    none = 0,
+    explain = 1,
+    query_plan = 2,
+
+    /// The names of the result columns of the listing (C:
+    /// azExplainColNames8, from 0 for EXPLAIN and 8 for EXPLAIN QUERY
+    /// PLAN, 12 - 4 * explain of them); none when the statement runs.
+    pub fn columnNames(x: Explain) []const [:0]const u8 {
+        return switch (x) {
+            .none => &.{},
+            .explain => explain_column_names[0..8],
+            .query_plan => explain_column_names[8..12],
+        };
+    }
+};
+
+/// The result columns of EXPLAIN, then of EXPLAIN QUERY PLAN.
+pub const explain_column_names = [_][:0]const u8{
+    "addr", "opcode", "p1",      "p2",     "p3", "p4", "p5", "comment",
+    "id",   "parent", "notused", "detail",
+};
+
+/// SQLITE_PREPARE_* flags, as a statement keeps them (Parse.prep_flags,
+/// Vdbe.prep_flags).
+pub const PrepFlags = packed struct(u8) {
+    /// SQLITE_PREPARE_PERSISTENT: the statement is kept a long time.
+    persistent: bool = false,
+    /// SQLITE_PREPARE_NORMALIZE (a no-op).
+    normalize: bool = false,
+    /// SQLITE_PREPARE_NO_VTAB: virtual tables are an error.
+    no_vtab: bool = false,
+    _3: u1 = 0,
+    /// SQLITE_PREPARE_DONT_LOG: syntax errors are not logged.
+    dont_log: bool = false,
+    /// SQLITE_PREPARE_FROM_DDL: the SQL comes from the schema.
+    from_ddl: bool = false,
+    _6: u1 = 0,
+    /// PREPARE_SAVESQL: the statement keeps its SQL and is compiled
+    /// again on a schema change (all but the legacy sqlite3_prepare()).
+    save_sql: bool = false,
+
+    /// The flags of sqlite3_prepare_v3()'s argument that it takes
+    /// (SQLITE_PREPARE_MASK, 0x3f).
+    pub fn fromC(bits: c_uint) PrepFlags {
+        return @bitCast(@as(u8, @truncate(bits)) & 0x3f);
+    }
+};
+
 // ================================================================= tokens
 
 /// A slice of the SQL text (Token). `z` is null for an empty, absent
@@ -2007,7 +2059,7 @@ pub const Parse = struct {
     rc: i32 = RC.OK,
     nested: u8 = 0,
     disable_lookaside: u8 = 0,
-    prep_flags: u8 = 0,
+    prep_flags: PrepFlags = .{},
     is_create: bool = false,
     /// Only check syntax: no schema is read and no code is generated
     /// (statement builders that are not ported yet do nothing instead of
@@ -2128,8 +2180,7 @@ pub const Parse = struct {
     n_var: YnVar = 0,
     /// Names of named variables and their numbers.
     vlist: std.ArrayList(VListEntry) = .empty,
-    /// 1 for EXPLAIN, 2 for EXPLAIN QUERY PLAN.
-    explain: u8 = 0,
+    explain: Explain = .none,
     /// pReprepare: the statement being compiled again, whose bound values
     /// the planner may use (aux.getBoundValue()).
     reprepare: ?*Vdbe = null,

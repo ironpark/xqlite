@@ -37,7 +37,6 @@ const Label = aux.operand.Label;
 const Addr = aux.operand.Addr;
 const Oom = int.Oom;
 const OP = vi.OP;
-const OPFLAG = vi.OPFLAG;
 const TF = int.TF;
 const TK = int.TK;
 const OE = int.OE;
@@ -60,7 +59,7 @@ pub fn codeChangeCount(v: *Vdbe, reg_counter: Reg, col_name: [:0]const u8) void 
 fn vtabIsReadOnly(p: *Parse, t: *Table) bool {
     std.debug.assert(t.isVirtual());
     if (vtab.getVTable(p.db, t).?.mod.module.x_update == null) return true;
-    if ((p.toplevel != null or p.prep_flags & aux.PREPARE_FROM_DDL != 0) and
+    if ((p.toplevel != null or p.prep_flags.from_ddl) and
         t.u.vtab.p.?.e_vtab_risk.unsafeInSchema(p.db.flags.TrustedSchema))
     {
         util.errorMsg(p, "unsafe use of virtual table \"{s}\"", .{t.name});
@@ -242,7 +241,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         if (!is_view) {
             // With several rows in one pass, the cursors are opened once.
             const once: ?Addr = if (e_one_pass == ONEPASS.MULTI) aux.emit(v, .Once, .{}) else null;
-            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, OPFLAG.FORDELETE, tab_cur, to_open, &data_cur, &idx_cur);
+            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, .{ .for_delete = true }, tab_cur, to_open, &data_cur, &idx_cur);
             if (once) |a| aux.jumpHereOrPopInst(v, a);
         }
 
@@ -362,18 +361,18 @@ pub fn generateRowDelete(
         fkey.fkCheck(p, t, old, .none, null, false);
     }
 
-    // The index entries and the row. OP_Delete with OPFLAG_NCHANGE counts
-    // the change (and calls the update hook).
+    // The index entries and the row. OP_Delete with P2 1 counts the
+    // change (and calls the update hook).
     if (!t.isView()) {
-        var p5: u16 = 0;
+        var p5: vi.DeleteP5 = .{};
         generateRowIndexDelete(p, t, data_cur, idx_cur, null, idx_no_seek);
-        _ = aux.emit(v, .Delete, .{ data_cur, if (count) OPFLAG.NCHANGE else 0 });
+        _ = aux.emit(v, .Delete, .{ data_cur, count });
         if (p.nested == 0 or std.ascii.eqlIgnoreCase(t.name, "sqlite_stat1")) aux.appendP4(v, .{ .table = t });
-        if (e_mode != ONEPASS.OFF) aux.changeP5(v, OPFLAG.AUXDELETE);
+        if (e_mode != ONEPASS.OFF) aux.changeP5(v, vi.DeleteP5{ .aux_delete = true });
         if (idx_no_seek) |c| if (c != data_cur) {
             _ = aux.emit(v, .Delete, .{c});
         };
-        if (e_mode == ONEPASS.MULTI) p5 |= OPFLAG.SAVEPOSITION;
+        if (e_mode == ONEPASS.MULTI) p5.save_position = true;
         aux.changeP5(v, p5);
     }
 
@@ -425,7 +424,7 @@ pub fn generateIndexKey(p: *Parse, idx: *Index, data_cur: Cursor, reg_out: Reg, 
             const label = aux.newLabel(p);
             lbl.* = label;
             p.i_self_tab = data_cur.int() + 1;
-            ec.exprIfFalseDup(p, w, label, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalseDup(p, w, label, true);
             p.i_self_tab = 0;
             // The WHERE clause may have clobbered the prior key.
             prior = null;

@@ -137,7 +137,7 @@ pub fn opBlob(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
 
 pub fn opVariable(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     const v = e.v;
-    std.debug.assert(op.p1 > 0 and op.p1 <= v.n_var);
+    std.debug.assert(op.p1 > 0 and op.p1 <= v.vars.len);
     const var_ = &v.vars[@intCast(op.p1 - 1)];
     if (mem.tooBig(var_)) return error.TooBig;
     const out = e.reg(op.p2);
@@ -166,14 +166,14 @@ pub fn opMove(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opCopy(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
+pub fn opCopy(e: *Exec, op: *vi.OpWithP5(.{ .reg, .reg, .int }, vi.CopyP5)) Error!Flow {
     // P3+1 registers (P3 is the number after the first).
     const n: usize = @as(usize, @intCast(op.p3)) + 1;
     std.debug.assert(op.p1 != op.p2);
     for (e.regRange(op.p2, n), e.regRange(op.p1, n)) |*out, *in| {
         mem.shallowCopy(out, in, .{ .Ephem = true });
         if (out.flags.Ephem) try mem.makeWriteable(out);
-        if (out.flags.Subtype and op.p5 & 0x0002 != 0) out.flags.Subtype = false;
+        if (out.flags.Subtype and op.p5.clear_subtype) out.flags.Subtype = false;
     }
     return .next;
 }
@@ -201,7 +201,7 @@ pub fn opResultRow(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     const v = e.v;
     std.debug.assert(v.n_res_column == op.p2);
     v.cache_ctr = (v.cache_ctr + 2) | 1;
-    v.result_row = e.regsFrom(op.p1);
+    v.result_row = e.regRange(op.p1, v.n_res_column);
     if (e.db.malloc_failed) return error.OutOfMemory;
     if (e.db.m_trace & int.TRACE.ROW != 0) _ = e.db.trace_v2.?(int.TRACE.ROW, e.db.trace_arg, v, null);
     v.pc = @intCast(e.pc + 1);

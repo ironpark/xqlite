@@ -42,7 +42,7 @@ fn expectSameCode(c: *Conn, pg: []const u8, lite: []const u8) !void {
         try testing.expectEqual(q.p2, o.p2);
         // A constraint's halt differs only in its error, PostgreSQL's
         // (P4, and P3 and P5 that say where the key's values are).
-        if (o.p5 & vi.P5_ConstraintDialect != 0 and (o.opcode == .Halt or o.opcode == .HaltIfNull)) continue;
+        if ((o.opcode == .Halt or o.opcode == .HaltIfNull) and o.p5As(vi.HaltP5).dialect) continue;
         try testing.expectEqual(q.p3, o.p3);
         // Arithmetic of an integer: P5 the width PostgreSQL checks.
         switch (o.opcode) {

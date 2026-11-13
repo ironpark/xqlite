@@ -296,7 +296,6 @@ const Cursor = aux.operand.Cursor;
 const Addr = aux.operand.Addr;
 const Label = aux.operand.Label;
 const OP = vi.OP;
-const OPFLAG = vi.OPFLAG;
 const RC = int.RC;
 const TK = int.TK;
 const OE = int.OE;
@@ -420,7 +419,7 @@ pub fn finishCoding(p: *Parse) void {
     }
 
     if (p.n_err == 0 and !db.malloc_failed) {
-        if (p.xq_no_columns and p.explain == 0) {
+        if (p.xq_no_columns and p.explain == .none) {
             const v = p.vdbe.?;
             aux.setNumCols(v, 0);
             for (v.ops.items) |*op| if (op.opcode == OP.ResultRow) {
@@ -466,7 +465,7 @@ const ParseTail = struct {
     last_token: Token,
     n_var: int.YnVar,
     vlist: std.ArrayList(int.VListEntry),
-    explain: u8,
+    explain: int.Explain,
     e_parse_mode: int.ParseMode,
     n_height: i32,
     tail: []const u8,
@@ -492,7 +491,7 @@ const ParseTail = struct {
         p.last_token = .{};
         p.n_var = 0;
         p.vlist = .empty;
-        p.explain = 0;
+        p.explain = .none;
         p.e_parse_mode = .normal;
         p.n_height = 0;
         p.tail = "";
@@ -584,7 +583,7 @@ pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u
     if (t == null) {
         // Not a table made with CREATE: perhaps an eponymous virtual
         // table.
-        if (p.prep_flags & aux.PREPARE_NO_VTAB == 0 and !db.init.busy) {
+        if (!p.prep_flags.no_vtab and !db.init.busy) {
             var m = db.modules.get(name);
             if (m == null and name.len >= 7 and ctype.eqlNoCase(name[0..7], "pragma_")) {
                 m = @import("pragma.zig").vtabRegister(db, name);
@@ -603,7 +602,7 @@ pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u
         }
         if (flags & LOCATE_NOERR != 0) return null;
         p.check_schema = true;
-    } else if (t.?.isVirtual() and p.prep_flags & aux.PREPARE_NO_VTAB != 0) {
+    } else if (t.?.isVirtual() and p.prep_flags.no_vtab) {
         t = null;
     }
     if (t == null) {
@@ -1210,7 +1209,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         _ = aux.emit(v, .NewRowid, .{ Cursor.first, reg1 });
         _ = aux.emitStr(v, .Blob, .{ 6, reg3 }, &null_row);
         _ = aux.emit(v, .Insert, .{ Cursor.first, reg3, reg1 });
-        aux.changeP5(v, OPFLAG.APPEND);
+        aux.changeP5(v, vi.InsertP5{ .append = true });
         _ = aux.emit(v, .Close, .{Cursor.first});
     } else if (db.init.imposter_table != 0) {
         t.tab_flags.Imposter = true;
@@ -2004,9 +2003,9 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     const reg_rec = p.newReg();
     const reg_rowid = p.newReg();
     main_mod.mayAbort(p);
-    // P2 is the register of the root page (OPFLAG_P2ISREG).
+    // P2 is the register of the root page.
     _ = aux.emit(v, .OpenWrite, .{ csr, p.u1.cr.reg_root.int(), i_db });
-    aux.changeP5(v, vi.OPFLAG.P2ISREG);
+    aux.changeP5(v, vi.OpenP5{ .p2_is_reg = true });
     // P3 of OP_InitCoroutine is the address the co-routine starts at.
     const addr_top = aux.here(v).plus(1);
     _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, addr_top });
@@ -2028,7 +2027,7 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     _ = aux.emit(v, .Insert, .{ csr, reg_rec, reg_rowid });
     // xqlite: a dialect that counts the rows (Hooks.count_create_as).
     if (@import("../dialect/dialect.zig").hooks(p.db).count_create_as) {
-        aux.changeP5(v, OPFLAG.NCHANGE);
+        aux.changeP5(v, vi.InsertP5{ .nchange = true });
         aux.countChanges(v);
     }
     _ = aux.emit(v, .Goto, .{ 0, addr_ins_loop });
@@ -2696,9 +2695,9 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: ?Reg) void {
     _ = aux.emit(v, .Next, .{ tab_cur, addr1.plus(1) });
     aux.landHere(v, addr1);
     if (mem_root_page == null) _ = aux.emit(v, .Clear, .{ tnum, i_db });
-    // P2 is the root page, or with OPFLAG_P2ISREG the register it is in.
+    // P2 is the root page, or with p2_is_reg the register it is in.
     _ = aux.emit4(v, .OpenWrite, .{ idx_cur, tnum, i_db }, key_p4);
-    aux.changeP5(v, vi.OPFLAG.BULKCSR | (if (mem_root_page != null) vi.OPFLAG.P2ISREG else 0));
+    aux.changeP5(v, vi.OpenP5{ .bulk_csr = true, .p2_is_reg = mem_root_page != null });
 
     // Then, sorted, to the index (checking uniqueness).
     addr1 = aux.emit(v, .SorterSort, .{sorter});
@@ -2718,7 +2717,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: ?Reg) void {
     _ = aux.emit(v, .SorterData, .{ sorter, record, idx_cur });
     if (!idx.asc_key_bug) _ = aux.emit(v, .SeekEnd, .{idx_cur});
     _ = aux.emit(v, .IdxInsert, .{ idx_cur, record });
-    aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
+    aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
     expr_mod.releaseTempReg(p, record);
     _ = aux.emit(v, .SorterNext, .{ sorter, addr2 });
     aux.landHere(v, addr1);
@@ -2770,7 +2769,7 @@ pub fn savepoint(p: *Parse, op: SAVEPOINT, name: Token) void {
 /// code of the b-tree in Parse.rc.
 pub fn openTempDatabase(p: *Parse) int.ParseError!void {
     const db = p.db;
-    if (db.dbs.items[1].bt == null and p.explain == 0) {
+    if (db.dbs.items[1].bt == null and p.explain == .none) {
         const bt = btree.Btree.open(@import("malloc.zig").allocator, db.vfs.?, null, .{
             // temp_store=MEMORY: in memory (sqlite3TempInMemory()).
             .memory = @import("../vdbe/sorter.zig").tempInMemory(db),
@@ -2816,11 +2815,11 @@ pub fn beginWriteOperation(p: *Parse, set_statement: bool, i_db: usize) void {
 
 /// Port of sqlite3HaltConstraint(): code an OP_Halt for a constraint
 /// error.
-pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, p5_errmsg: u16) void {
+pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, constraint: vi.p5.Constraint) void {
     const v = getVdbe(p) orelse return;
     if (on_error == OE.Abort) main_mod.mayAbort(p);
     _ = aux.emitStr(v, .Halt, .{ err_code, on_error.int() }, msg);
-    aux.changeP5(v, p5_errmsg);
+    aux.changeP5(v, vi.HaltP5{ .constraint = constraint });
 }
 
 /// xqlite: haltConstraint() of the error of the dialect the statement is
@@ -2837,7 +2836,7 @@ pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: 
         .Halt => aux.emitStr(v, .Halt, .{ err_code, on_error.int() }, z),
         else => unreachable,
     };
-    aux.changeP5(v, vi.P5_ConstraintDialect);
+    aux.changeP5(v, vi.HaltP5{ .dialect = true });
 }
 
 /// Port of sqlite3UniqueConstraint(): halt for a UNIQUE or PRIMARY KEY
@@ -2863,7 +2862,7 @@ fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index, reg_key: Reg) Oom!
             try msg.appendSlice(p.arena, t.cols[@intCast(idx.ai_column[j])].name());
         }
     }
-    haltConstraint(p, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, msg.items, vi.P5_ConstraintUnique);
+    haltConstraint(p, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, msg.items, .unique);
 }
 
 /// Port of sqlite3RowidConstraint(): halt for a duplicate rowid, the one
@@ -2876,7 +2875,7 @@ pub fn rowidConstraint(p: *Parse, on_error: OE, t: *Table, reg_rowid: Reg) void 
         .{ std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, t.cols[@intCast(t.i_pkey)].name() }) catch return oomFault(p), RC.CONSTRAINT_PRIMARYKEY }
     else
         .{ std.fmt.allocPrint(p.arena, "{s}.rowid", .{t.name}) catch return oomFault(p), RC.CONSTRAINT_ROWID };
-    haltConstraint(p, rc, on_error, msg, vi.P5_ConstraintUnique);
+    haltConstraint(p, rc, on_error, msg, .unique);
 }
 
 /// Port of sqlite3KeyInfoOfIndex(): the KeyInfo of an index's b-tree,

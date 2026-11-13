@@ -82,7 +82,7 @@ pub fn dfltColl(db: *Sqlite3) *const CollSeq {
 pub fn setTextEncoding(db: *Sqlite3, enc: u8) void {
     std.debug.assert(enc == ENC.UTF8 or enc == ENC.UTF16LE or enc == ENC.UTF16BE);
     db.enc = enc;
-    @import("../vdbe/aux.zig").expirePreparedStatements(db, 1);
+    @import("../vdbe/aux.zig").expirePreparedStatements(db, .when_convenient);
 }
 
 /// xqlite: the default collation of the connection's dialect, null if it
@@ -226,7 +226,7 @@ pub fn createCollationEnc(db: *Sqlite3, name: []const u8, enc: u8, user: ?*anyop
             @import("main.zig").errorWithMsg(db, RC.BUSY, "unable to delete/modify collation sequence due to active statements", .{});
             return RC.BUSY;
         }
-        @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
+        @import("../vdbe/aux.zig").expirePreparedStatements(db, .now);
     }
     // Built-in collations are not replaced but shadowed.
     if (user_coll) |c| {

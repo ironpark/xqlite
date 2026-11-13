@@ -237,7 +237,7 @@ fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
     d.schema = schema;
     // The eponymous virtual tables hold pointers into the old schema.
     if (i_db == 0) @import("vtab.zig").epoTableClearAll(db);
-    aux.expirePreparedStatements(db, 1);
+    aux.expirePreparedStatements(db, .when_convenient);
     // The pager settings of main.
     if (db.dbs.items[0].bt) |main_bt| {
         if (main_bt != bt) _ = bt.secureDelete(main_bt.secureDelete(null));

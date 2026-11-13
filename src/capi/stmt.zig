@@ -18,15 +18,16 @@ const TK = @import("../sql/tk.zig").TK;
 
 /// The interfaces' SQLITE_PREPARE_* flags: those of sqlite3_prepare_v3(),
 /// or `legacy` for sqlite3_prepare(), which keeps no SQL (no
-/// PREPARE_SAVESQL): its statement fails on a schema change instead of
+/// PrepFlags.save_sql): its statement fails on a schema change instead of
 /// being compiled again.
 const Flags = struct {
     v3: c_uint = 0,
     legacy: bool = false,
 
-    fn stored(f: Flags) u8 {
-        const save: u8 = if (f.legacy) 0 else aux.PREPARE_SAVESQL;
-        return save | @as(u8, @truncate(f.v3 & aux.PREPARE_MASK));
+    fn stored(f: Flags) c.int.PrepFlags {
+        var flags: c.int.PrepFlags = .fromC(f.v3);
+        flags.save_sql = !f.legacy;
+        return flags;
     }
 };
 
@@ -64,7 +65,7 @@ pub fn prepareZ(db: *Handle, text: [:0]const u8, out: *?*Vdbe, tail: *[:0]const 
     const lk = c.lock(db);
     defer lk.unlock();
     out.* = null;
-    return prepare_mod.prepareV3Z(db, text, 0, out, tail);
+    return prepare_mod.prepareV3Z(db, text, .{}, out, tail);
 }
 
 pub export fn sqlite3_prepare(db: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) callconv(.c) c_int {
@@ -318,8 +319,8 @@ pub export fn sqlite3_transfer_bindings(from_arg: ?*Vdbe, to_arg: ?*Vdbe) callco
     defer lk.unlock();
     const from = from_arg orelse return RC.MISUSE;
     const to = to_arg orelse return RC.MISUSE;
-    if (from.n_var != to.n_var) return RC.ERROR;
-    for (0..@intCast(from.n_var)) |i| {
+    if (from.vars.len != to.vars.len) return RC.ERROR;
+    for (0..from.vars.len) |i| {
         const rc = c.api.bindValue(to, i + 1, &from.vars[i]);
         if (rc != RC.OK) return rc;
     }
@@ -534,7 +535,7 @@ fn expand(v: *Vdbe, raw: [:0]const u8, out: *std.ArrayList(u8)) !void {
         }
         return;
     }
-    if (v.n_var == 0) return out.appendSlice(a, raw);
+    if (v.vars.len == 0) return out.appendSlice(a, raw);
     var next_index: usize = 1;
     var i: usize = 0;
     while (i < raw.len) {
@@ -559,7 +560,7 @@ fn expand(v: *Vdbe, raw: [:0]const u8, out: *std.ArrayList(u8)) !void {
         } else {
             index = c.api.bindParameterIndex(v, tok);
         }
-        if (index < 1 or index > @as(usize, @intCast(v.n_var))) continue;
+        if (index < 1 or index > v.vars.len) continue;
         next_index = @max(index + 1, next_index);
         try appendValue(out, &v.vars[index - 1]);
     }
@@ -608,14 +609,16 @@ pub export fn sqlite3_stmt_readonly(v: ?*Vdbe) callconv(.c) c_int {
 }
 
 pub export fn sqlite3_stmt_isexplain(v: ?*Vdbe) callconv(.c) c_int {
-    return c.api.stmtIsExplain(v orelse return 0);
+    return @backingInt(c.api.stmtIsExplain(v orelse return 0));
 }
 
 pub export fn sqlite3_stmt_explain(v_arg: ?*Vdbe, mode: c_int) callconv(.c) c_int {
     const lk = c.lockStmt(v_arg);
     defer lk.unlock();
     const v = v_arg orelse return RC.MISUSE;
-    return prepare_mod.stmtExplain(v, mode);
+    // 0, 1 or 2 (none, EXPLAIN, EXPLAIN QUERY PLAN).
+    const x = std.enums.fromInt(c.int.Explain, mode) orelse return RC.ERROR;
+    return prepare_mod.stmtExplain(v, x);
 }
 
 pub export fn sqlite3_stmt_busy(v: ?*Vdbe) callconv(.c) c_int {
@@ -624,10 +627,11 @@ pub export fn sqlite3_stmt_busy(v: ?*Vdbe) callconv(.c) c_int {
 
 pub export fn sqlite3_stmt_status(v_arg: ?*Vdbe, op: c_int, reset: c_int) callconv(.c) c_int {
     const v = v_arg orelse return 0;
-    if (op < 1 or op >= v.counters.len) return 0;
-    const i: usize = @intCast(op);
-    const n = v.counters[i];
-    if (reset != 0) v.counters[i] = 0;
+    // SQLITE_STMTSTATUS_* are the numbers of the counters.
+    const counter = std.enums.fromInt(c.vi.StmtStatus, op) orelse return 0;
+    if (counter == .none) return 0;
+    const n = v.counters.get(counter);
+    if (reset != 0) v.counters.set(counter, 0);
     return @bitCast(n);
 }
 
@@ -643,7 +647,7 @@ pub export fn sqlite3_next_stmt(db: ?*Handle, prev: ?*Vdbe) callconv(.c) ?*Vdbe 
 }
 
 pub export fn sqlite3_expired(v: ?*Vdbe) callconv(.c) c_int {
-    return (v orelse return 1).expired;
+    return @backingInt((v orelse return 1).expired);
 }
 
 // SQLITE_ENABLE_STMT_SCANSTATUS: statements compiled while

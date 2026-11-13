@@ -125,7 +125,7 @@ pub fn prepare(h: *Handle, sql: []const u8, tail: *[]const u8) Error!?*Vm {
 /// whose rest `tail` points into the same text.
 pub fn prepareZ(h: *Handle, sql: [:0]const u8, tail: *[:0]const u8) Error!?*Vm {
     var vm: ?*Vm = null;
-    try int.check(prepare_mod.prepareV3Z(h, sql, 0, &vm, tail));
+    try int.check(prepare_mod.prepareV3Z(h, sql, .{}, &vm, tail));
     return vm;
 }
 
@@ -577,7 +577,7 @@ pub fn interrupt(h: *Handle) void {
 /// change (sqlite3_stmt_status(SQLITE_STMTSTATUS_REPREPARE)): its result
 /// columns may have changed when this does.
 pub fn reprepareCount(v: *const Vm) u32 {
-    return v.counters[vi.STMTSTATUS.REPREPARE];
+    return v.counters.get(.reprepare);
 }
 
 pub fn bindNull(v: *Vm, i: usize) Error!void {

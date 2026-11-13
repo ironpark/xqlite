@@ -194,7 +194,7 @@ pub fn useFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
     const db = api.contextDbHandle(ctx);
     const name: ?[]const u8 = if (api.valueType(argv[0]) == vi.SQLITE_NULL) null else api.valueText(argv[0]) orelse "";
     db.xq.mariadb.setDatabase(db.gpa, name) catch return api.resultErrorNomem(ctx);
-    @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    @import("../../vdbe/aux.zig").expirePreparedStatements(db, .now);
     api.resultNull(ctx);
 }
 

@@ -70,7 +70,7 @@ pub fn expectWord(ps: *Parser, w: []const u8) Error!void {
 /// Prepare `text` on `db` and finalize it at once: the return code.
 pub fn tryPrepare(db: *int.Sqlite3, text: []const u8) i32 {
     var v: ?*vi.Vdbe = null;
-    const rc = prepare.prepareLang(db, text, .of(.postgres), 0, &v, null);
+    const rc = prepare.prepareLang(db, text, .of(.postgres), .{}, &v, null);
     if (v) |x| _ = api.finalize(x);
     return rc;
 }
@@ -345,7 +345,7 @@ fn dropTemp(ps: *Parser) Error!void {
     const db = p.db;
     var v: ?*vi.Vdbe = null;
     const q = "SELECT type, name FROM temp.sqlite_schema WHERE type IN ('view', 'table') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE 'xq\\_%' ESCAPE '\\' ORDER BY type = 'table', name";
-    const rc = prepare.prepareLang(db, q, .of(.sqlite), 0, &v, null);
+    const rc = prepare.prepareLang(db, q, .of(.sqlite), .{}, &v, null);
     const stmt = v orelse {
         if (rc == RC.NOMEM) return error.OutOfMemory;
         return;
@@ -575,7 +575,7 @@ fn discardFunc(ctx: *Context, argv: []*Mem) void {
         if (db.xq.last_sequence) |z| db.gpa.free(z);
         db.xq.last_sequence = null;
     }
-    if (all or eql(what, "plans")) @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    if (all or eql(what, "plans")) @import("../../vdbe/aux.zig").expirePreparedStatements(db, .now);
     api.resultInt64(ctx, 0);
 }
 

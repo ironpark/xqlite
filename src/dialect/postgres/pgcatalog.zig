@@ -1795,7 +1795,7 @@ const Builder = struct {
             try doubled(a, r.sqlite_name),
         });
         var stmt: ?*vi.Vdbe = null;
-        const rc = prepare.prepareLang(b.db, sql, .of(.postgres), 0, &stmt, null);
+        const rc = prepare.prepareLang(b.db, sql, .of(.postgres), .{}, &stmt, null);
         const v = stmt orelse {
             if (rc == int.RC.NOMEM) return error.OutOfMemory;
             return;

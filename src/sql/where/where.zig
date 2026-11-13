@@ -167,7 +167,7 @@ fn translateColumnToCopy(p: *Parse, i_start: Addr, i_tab_cur: Cursor, i_register
             op.p2 = op.p3;
             op.p3 = 0;
             // Clear the MEM_Subtype flag.
-            op.p5 = 2;
+            op.setP5(vi.CopyP5{ .clear_subtype = true });
         } else if (op.opcode == OP.Rowid) {
             // SQLITE_ALLOW_ROWID_IN_VIEW is off.
             op.opcode = OP.Sequence;
@@ -187,7 +187,7 @@ fn translateColumnRange(p: *Parse, i_start: Addr, i_end: Addr, i_tab_cur: Cursor
         op.p1 = i_register.at(op.p2).int();
         op.p2 = op.p3;
         op.p3 = 0;
-        op.p5 = 2;
+        op.setP5(vi.CopyP5{ .clear_subtype = true });
     }
 }
 
@@ -195,7 +195,7 @@ fn translateColumnRange(p: *Parse, i_start: Addr, i_end: Addr, i_tab_cur: Cursor
 /// not in EXPLAIN QUERY PLAN, whose output stays as it was), an
 /// OP_Explain "CREATE AUTOMATIC INDEX ON t(cols)"; its address, or null.
 fn explainAutomaticIndex(p: *Parse, idx: *Index, partial: bool) ?Addr {
-    if (!aux.isStmtScanStatus(p.db) or p.explain == 2) return null;
+    if (!aux.isStmtScanStatus(p.db) or p.explain == .query_plan) return null;
     const t = idx.table;
     var cols: std.ArrayList(u8) = .empty;
     defer cols.deinit(p.db.gpa);
@@ -364,7 +364,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     if (partial) |pe| {
         const l = aux.newLabel(p);
         skip_row = l;
-        ec.exprIfFalse(p, pe, l, vi.SQLITE_JUMPIFNULL);
+        ec.exprIfFalse(p, pe, l, true);
         loop.ws_flags.PARTIALIDX = true;
     }
     const reg_record = expr_mod.getTempReg(p);
@@ -375,7 +375,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     }
     aux.scanStatusCounters(v, addr_exp, addr_exp, aux.here(v));
     _ = aux.emit(v, .IdxInsert, .{ idx_cur, reg_record });
-    aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
+    aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
     if (skip_row) |l| aux.place(v, l);
     if (src.fg.via_coroutine) {
         std.debug.assert(src.fg.is_subquery and src.u4.subq != null);
@@ -387,7 +387,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         aux.landHere(v, addr_top);
     } else {
         _ = aux.emit(v, .Next, .{ tab_cur, addr_top.plus(1) });
-        aux.changeP5(v, vi.STMTSTATUS.AUTOINDEX);
+        aux.changeP5(v, vi.StmtStatus.autoindex);
         if (src.fg.jointype.LEFT) aux.landHere(v, addr_top);
     }
     expr_mod.releaseTempReg(p, reg_record);
@@ -444,7 +444,7 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
             if (!term.wt_flags.VIRTUAL and
                 expr_mod.isSingleTableConstraint(e, tab_list, i_src, false))
             {
-                ec.exprIfFalse(p, term.expr, addr_cont, vi.SQLITE_JUMPIFNULL);
+                ec.exprIfFalse(p, term.expr, addr_cont, true);
             }
         }
         if (loop.ws_flags.IPK) {
@@ -1424,7 +1424,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
     var order_by = order_by_arg;
     var wctrl_flags = wctrl_flags_arg;
     const db = p.db;
-    var b_fordelete: u16 = 0;
+    var b_fordelete: vi.OpenP5 = .{};
 
     std.debug.assert(!wctrl_flags.ONEPASS_MULTIROW or
         (wctrl_flags.ONEPASS_DESIRED and !wctrl_flags.OR_SUBCLAUSE));
@@ -1531,7 +1531,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             (n_tab_list == 0 or exprIsDeterministic(x)) and
             !(x.flags.InnerON and tab_list.at(0).fg.jointype.LTORJ))
         {
-            ec.exprIfFalse(p, x, w.i_break, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, x, w.i_break, true);
             t.wt_flags.CODED = true;
         }
     }
@@ -1618,7 +1618,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             w.e_one_pass = if (b_onerow) ONEPASS.SINGLE else ONEPASS.MULTI;
             if (tab_list.at(0).s_tab.?.hasRowid() and ws_flags.IDX_ONLY) {
                 if (wctrl_flags.ONEPASS_MULTIROW) {
-                    b_fordelete = vi.OPFLAG.FORDELETE;
+                    b_fordelete = .{ .for_delete = true };
                 }
                 w.a[0].w_loop.?.ws_flags = ws_flags.without(.{ .IDX_ONLY = true });
             }
@@ -1733,7 +1733,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
                     !w.wctrl_flags.ORDERBY_MIN and
                     w.e_distinct != int.WHERE_DISTINCT.ORDERED)
                 {
-                    aux.changeP5(v, vi.OPFLAG.SEEKEQ);
+                    aux.changeP5(v, vi.OpenP5{ .seek_eq = true });
                 }
             }
         }
@@ -1878,7 +1878,8 @@ pub fn whereEnd(w: *WhereInfo) void {
             .none => {},
             .step => |step| {
                 _ = aux.emitAny(v, step.op, .{ .cursor, .jump, .int }, .{ step.cur, step.top, step.p3 });
-                aux.changeP5(v, step.p5);
+                // P5 of OP_VNext is not a counter; it stays 0.
+                if (step.p5 != .none) aux.changeP5(v, step.p5);
                 if (addr_seek) |a| aux.landHere(v, a);
                 if (level.addr_bignull) |l| {
                     aux.place(v, l);

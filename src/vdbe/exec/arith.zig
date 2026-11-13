@@ -16,6 +16,7 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const OpOf = vi.OpOf;
+const OpWithP5 = vi.OpWithP5;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const OP = vi.OP;
@@ -330,7 +331,7 @@ const cmp_eq = [6]bool{ false, true, false, true, false, true };
 const cmp_gt = [6]bool{ true, false, true, false, false, true };
 
 /// OP_Eq, OP_Ne, OP_Lt, OP_Le, OP_Gt and OP_Ge.
-pub fn opCompareJump(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg }), comptime opc: OP) Error!Flow {
+pub fn opCompareJump(e: *Exec, op: *OpWithP5(.{ .reg, .jump, .reg }, vi.CmpP5), comptime opc: OP) Error!Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
     var flags1 = in1.flags;
@@ -352,7 +353,7 @@ pub fn opCompareJump(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg }), comptime opc: 
     }
     var res: i32 = undefined;
     if (flags1.with(flags3).Null) {
-        if (op.p5 & vi.SQLITE_NULLEQ != 0) {
+        if (op.p5.null_eq) {
             // Only for OP_Eq and OP_Ne: equal if both are NULL.
             if (flags1.only(flags3).Null and !flags3.Cleared) {
                 res = 0;
@@ -360,13 +361,13 @@ pub fn opCompareJump(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg }), comptime opc: 
                 res = if (flags3.Null) -1 else 1;
             }
         } else {
-            // The result is NULL; jump if SQLITE_JUMPIFNULL.
-            if (op.p5 & vi.SQLITE_JUMPIFNULL != 0) return .jump_p2;
+            // The result is NULL; jump if P5 says so.
+            if (op.p5.jump_if_null) return .jump_p2;
             e.i_compare = 1;
             return .next;
         }
     } else {
-        const affinity: u8 = @intCast(op.p5 & Aff.mask);
+        const affinity = op.p5.affinity();
         if (affinity >= Aff.numeric) {
             if (flags1.with(flags3).Str) {
                 if (flags1.only(.{ .Int = true, .IntReal = true, .Real = true, .Str = true }) == MEM{ .Str = true }) {
@@ -408,9 +409,9 @@ pub fn opElseEq(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
     return if (e.i_compare == 0) .jump_p2 else .next;
 }
 
-pub fn opCompare(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opCompare(e: *Exec, op: *OpWithP5(.{ .reg, .reg, .int }, vi.CompareP5)) Flow {
     // The OP_Permutation before, if P5 says so, orders the fields.
-    const permute: ?[]u32 = if (op.p5 & vi.OPFLAG.PERMUTE != 0) e.ops[e.pc - 1].p4IntArray() else null;
+    const permute: ?[]u32 = if (op.p5.permute) e.ops[e.pc - 1].p4IntArray() else null;
     const n: usize = @intCast(op.p3);
     const ki = op.p4As(.keyinfo);
     for (0..n) |i| {

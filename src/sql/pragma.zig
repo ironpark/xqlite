@@ -978,7 +978,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     } else break;
                     const sql = try build.mprintf(p, "SELECT*FROM\"%w\"", &.{.{ .str = t.name }});
                     var dummy: ?*Vdbe = null;
-                    _ = prepare.prepareLang(db, sql, .sqlite, aux.PREPARE_DONT_LOG, &dummy, null);
+                    _ = prepare.prepareLang(db, sql, .sqlite, .{ .dont_log = true }, &dummy, null);
                     if (dummy) |d| _ = api.finalize(d);
                     if (db.malloc_failed) return error.OutOfMemory;
                 }
@@ -1513,7 +1513,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
         // The b-tree checks, which leave the entry count of each b-tree
         // in registers 8 and up.
         _ = aux.emit4(v, .IntegrityCk, .{ ck.errs_left, n_root, ck.counts }, .{ .intarray = roots });
-        aux.changeP5(v, @intCast(i));
+        aux.changeP5(v, @as(u16, @intCast(i)));
         var addr = aux.emit(v, .IsNull, .{ck.text});
         const in_db = try build.mprintf(p, "*** in database %s ***\n", &.{.{ .str = db.dbs.items[i].name }});
         _ = aux.loadString(v, ck.msg, in_db);
@@ -1611,7 +1611,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     }
     var data_cur: Cursor = undefined;
     var idx_cur: Cursor = undefined;
-    _ = insert.openTableAndIndices(p, t, OP.OpenRead, 0, .from(1), null, &data_cur, &idx_cur);
+    _ = insert.openTableAndIndices(p, t, OP.OpenRead, .{}, .from(1), null, &data_cur, &idx_cur);
     // Register 7 counts the rows, 8+j the entries of the j-th index.
     _ = aux.emit(v, .Integer, .{ 0, ck.rows });
     var j: i32 = 0;
@@ -1763,8 +1763,8 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         const ck_ok = aux.newLabel(p);
         p.i_self_tab = data_cur.int() + 1;
         var kk = check.len() - 1;
-        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, ck_fault, 0);
-        ec.exprIfTrue(p, check.at(0).expr, ck_ok, vi.SQLITE_JUMPIFNULL);
+        while (kk > 0) : (kk -= 1) ec.exprIfFalse(p, check.at(kk).expr, ck_fault, false);
+        ec.exprIfTrue(p, check.at(0).expr, ck_ok, true);
         aux.place(v, ck_fault);
         p.i_self_tab = 0;
         const msg = try build.mprintf(p, "CHECK constraint failed in %s", &.{.{ .str = t.name }});
@@ -2042,7 +2042,7 @@ fn pragmaVtabFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, argv: []*vi
     const sql = acc.finish() orelse return int.RC.NOMEM;
     defer db.gpa.free(sql);
     // xqlite: the PRAGMA is SQLite text, whatever the dialect.
-    const rc = prepare.prepareLang(db, sql, .sqlite, 0, &c.pragma, null);
+    const rc = prepare.prepareLang(db, sql, .sqlite, .{}, &c.pragma, null);
     if (rc != int.RC.OK) {
         vtab.setErrMsg(db, &t.base, "{s}", .{main_mod.errmsg(db)});
         return rc;

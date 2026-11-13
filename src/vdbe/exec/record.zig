@@ -19,6 +19,7 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const OpOf = vi.OpOf;
+const OpWithP5 = vi.OpWithP5;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const ENC = vi.ENC;
@@ -69,7 +70,7 @@ fn columnCorrupt(e: *Exec) Error!Flow {
 }
 
 /// Port of OP_Column.
-pub fn opColumn(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow {
+pub fn opColumn(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .reg }, vi.ColumnP5)) Error!Flow {
     const v = e.v;
     var c = e.csr(op.p1);
     var p2: u32 = @intCast(op.p2);
@@ -247,10 +248,16 @@ pub fn opColumn(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow {
         }
     } else {
         dest.enc = e.encoding;
-        const p5 = op.p5 & vi.OPFLAG.BYTELENARG;
-        if ((p5 != 0 and (p5 == vi.OPFLAG.TYPEOFARG or (t >= 12 and (t & 1 == 0 or p5 == vi.OPFLAG.BYTELENARG)))) or
-            record_fmt.serialTypeLen(t) == 0)
-        {
+        // What the function the column is the argument of reads of it:
+        // typeof() only the type, length() of a BLOB and octet_length()
+        // of a string or a BLOB only the size.
+        const size_only = switch (op.p5.arg) {
+            .none => false,
+            .typeof => true,
+            .length => t >= 12 and t & 1 == 0,
+            .octet_length => t >= 12,
+        };
+        if (size_only or record_fmt.serialTypeLen(t) == 0) {
             // The content does not matter; use zeros.
             const zeros: [16]u8 = @splat(0);
             serial.serialGet(&zeros, 0, t, dest);

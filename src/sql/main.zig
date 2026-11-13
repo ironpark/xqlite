@@ -43,7 +43,7 @@ pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
     }
     vtab.rollback(db);
     if (schema_change) {
-        @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
+        @import("../vdbe/aux.zig").expirePreparedStatements(db, .now);
         @import("build.zig").resetAllSchemasOfConnection(db);
     }
     btreeLeaveAll(db);
@@ -453,7 +453,7 @@ pub fn dbConfig(db: *Sqlite3, op: DbConfig, onoff: i32) bool {
     } else if (onoff == 0) {
         db.flags.clear(m);
     }
-    if (old_flags != db.flags) @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    if (old_flags != db.flags) @import("../vdbe/aux.zig").expirePreparedStatements(db, .now);
     return db.flags.intersects(m);
 }
 

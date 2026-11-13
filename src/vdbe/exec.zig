@@ -23,15 +23,17 @@
 //! each arm gets its own copy without the test.
 //!
 //! A handler takes its instruction as a vi.OpOf(): P1, P2 and P3 with the
-//! types operand.kinds() gives them (operand.Reg, operand.Cursor, a jump
+//! types OP.kinds() gives them (operand.Reg, operand.Cursor, a jump
 //! or an address, or a number), checked at compile time against the
 //! opcodes it runs (see `modules`). Registers and cursors are reached
 //! through them, `e.reg(op.p3)`, `e.csr(op.p1)`, `e.regsFrom(op.p2)`,
 //! so that a handler that reads a cursor where the opcode has a register
 //! does not compile, as aux.emit() does not let the code generator pass
 //! one for the other. A number that is a register only under a flag of
-//! P5 (OP_OpenWrite's P2 with OPFLAG_P2ISREG) is `.int` in the table and
-//! converted with `.from()` where the handler tests the flag.
+//! P5 (OP_OpenWrite's P2 with OpenP5.p2_is_reg) is `.int` in the table and
+//! converted with `.from()` where the handler tests the flag. P5 is a
+//! number, or for the opcodes whose P5 is a set of flags the packed
+//! struct of their family (vi.OpWithP5(), p5.zig).
 //!
 //! Each handler returns a `Flow`, which stands in for the gotos of the C
 //! code: `.next` continues, `.jump_p2` goes to P2, `.goto` to the address
@@ -138,13 +140,16 @@ pub const Flow = packed struct(u64) {
 ///
 /// The second parameter is the instruction with its operands typed (see
 /// vi.OpOf()). `shape` is what the handler takes P1, P2 and P3 to be,
-/// `.{ .reg, .jump, .int }` and the like, and must be operand.kinds() of
+/// `.{ .reg, .jump, .int }` and the like, and must be OP.kinds() of
 /// every opcode it runs: the handler of OP_Gosub cannot read its P1 as a
 /// cursor, and an entry of the kinds table that does not say what the
 /// handler reads does not compile. A handler of opcodes whose operands
 /// differ (OP_Last and OP_SeekEnd) takes `op: anytype` with the opcode,
 /// and gets the shape of each opcode in its copy for that opcode; one
-/// that reads no operand takes `*OpOf(null)`.
+/// that reads no operand takes `*OpOf(null)`. An opcode whose P5 is a set
+/// of flags (OP.P5(), p5.zig) has a handler that takes
+/// `*OpWithP5(shape, ItsP5)`, so that it cannot read another family's
+/// flags.
 ///
 /// Inlined are the handlers of the opcodes of inner loops (stepping and
 /// seeking cursors, OP_Column, register copies, arithmetic, comparisons,
@@ -195,14 +200,15 @@ fn handler(comptime opc: OP) type {
                 else => @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpOf(shape)"),
             };
             const V = pointer.child;
-            if (!@hasDecl(V, "kinds") or V != vi.OpOf(V.kinds)) @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpOf(shape)");
-            if (V.kinds) |k| if (!std.meta.eql(k, operand.kinds(opc))) {
-                @compileError(name ++ " takes its operands to be " ++ shapeName(k) ++ ", operand.kinds() says " ++ shapeName(operand.kinds(opc)));
+            if (!@hasDecl(V, "kinds") or !@hasDecl(V, "P5Type") or V != vi.OpWithP5(V.kinds, V.P5Type)) @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpOf(shape)");
+            if (V.kinds) |k| if (!std.meta.eql(k, opc.kinds())) {
+                @compileError(name ++ " takes its operands to be " ++ shapeName(k) ++ ", OP.kinds() says " ++ shapeName(opc.kinds()));
             };
+            if (V.P5Type != opc.P5()) @compileError(name ++ " takes P5 as " ++ @typeName(V.P5Type) ++ ", OP.P5() says " ++ @typeName(opc.P5()));
             break :blk P;
         } else blk: {
             if (!takes_opc) @compileError(name ++ " takes `op: anytype` without the opcode");
-            break :blk *vi.OpOf(operand.kinds(opc));
+            break :blk *vi.OpFor(opc);
         };
     };
 }
@@ -280,7 +286,7 @@ pub const Exec = struct {
     // (`e.reg(op.p2.at(i))`). A number that is a register only in some
     // uses of the opcode (`.int` in the table) is converted where the
     // handler knows it is one, with `Reg.from()` (OP_OpenWrite's P2 under
-    // OPFLAG_P2ISREG), as is an operand of another instruction than the
+    // OpenP5.p2_is_reg), as is an operand of another instruction than the
     // handler's own if it is not read through opAt().
 
     pub fn reg(e: *Exec, r: Reg) *Mem {
@@ -321,7 +327,7 @@ pub const Exec = struct {
     /// The instruction at `addr` of the current program, which is an
     /// `opc` (a handler that reads the instruction before or after its
     /// own), with its operands typed as that opcode's.
-    pub fn opAt(e: *Exec, comptime opc: OP, addr: usize) *vi.OpOf(operand.kinds(opc)) {
+    pub fn opAt(e: *Exec, comptime opc: OP, addr: usize) *vi.OpFor(opc) {
         return vi.opAs(&e.ops[addr], opc);
     }
 
@@ -370,7 +376,7 @@ pub const Exec = struct {
         // counted across the calls of sqlite3_step() (nProgressLimit).
         var progress_limit: u64 = std.math.maxInt(u64);
         if (db.progress != null and db.n_progress_ops > 0) {
-            const prior: u64 = v.counters[vi.STMTSTATUS.VM_STEP];
+            const prior: u64 = v.counters.get(.vm_step);
             progress_limit = db.n_progress_ops - (prior % db.n_progress_ops);
             e.progress_limit = progress_limit;
         }
@@ -530,7 +536,7 @@ pub const Exec = struct {
         while (n_vm_step >= e.progress_limit and e.db.progress != null) {
             if (e.progressInterrupts(&e.progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
         }
-        e.v.counters[vi.STMTSTATUS.VM_STEP] +%= @truncate(n_vm_step);
+        e.v.counters.getPtr(.vm_step).* +%= @truncate(n_vm_step);
         return e.rc;
     }
 };

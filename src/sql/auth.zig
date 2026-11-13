@@ -70,7 +70,7 @@ pub const Callback = *const fn (arg: ?*anyopaque, code: i32, a1: ?[*:0]const u8,
 pub fn setAuthorizer(db: *int.Sqlite3, f: ?Callback, arg: ?*anyopaque) void {
     db.auth = f;
     db.auth_arg = arg;
-    @import("../vdbe/aux.zig").expirePreparedStatements(db, 1);
+    @import("../vdbe/aux.zig").expirePreparedStatements(db, .when_convenient);
 }
 
 /// A NUL-terminated copy of `s` in the statement's memory, for the

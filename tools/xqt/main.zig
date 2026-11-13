@@ -31,7 +31,7 @@ const usage =
     \\  wire-diff pg [CASES...]  psql against PostgreSQL and `xqlite serve --pg` (podman)
     \\  bench [WORKLOAD...]       xqlite against sqlite3 on timed workloads
     \\  wasi [--wasm PATH]       the wasm32-wasi build under wasmtime, against sqlite3
-    \\  gen NAME [ARGS]          regenerate test data, opcodes.zig (xqt help gen)
+    \\  gen NAME [ARGS]          regenerate test data (xqt help gen)
     \\  fetch sqlite|slt|tcl [--dest DIR]  download ref/sqlite, ref/sqllogictest, ref/tcl
     \\  list                     the interop modules and planner case files
     \\  help [COMMAND]           this text, or the options of a command

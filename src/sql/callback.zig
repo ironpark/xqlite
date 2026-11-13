@@ -84,9 +84,9 @@ pub const FUNC = packed struct(u32) {
     comptime {
         // length(), typeof() and octet_length() pass these bits on as the
         // P5 of OP_Column.
-        std.debug.assert(FUNC.int(.{ .LENGTH = true }) == vi.OPFLAG.LENGTHARG);
-        std.debug.assert(FUNC.int(.{ .TYPEOF = true }) == vi.OPFLAG.TYPEOFARG);
-        std.debug.assert(BYTELEN.int() == vi.OPFLAG.BYTELENARG);
+        std.debug.assert(FUNC.int(.{ .LENGTH = true }) == vi.p5.int(vi.ColumnP5{ .arg = .length }));
+        std.debug.assert(FUNC.int(.{ .TYPEOF = true }) == vi.p5.int(vi.ColumnP5{ .arg = .typeof }));
+        std.debug.assert(BYTELEN.int() == vi.p5.int(vi.ColumnP5{ .arg = .octet_length }));
         flags.checkBits(FUNC, .{
             .enc = 0x00000003,
             .LIKE = 0x00000004,
@@ -485,7 +485,7 @@ pub fn createFunc(
             @import("main.zig").errorWithMsg(db, RC.BUSY, "unable to delete/modify user-function due to active statements", .{});
             return RC.BUSY;
         }
-        @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
+        @import("../vdbe/aux.zig").expirePreparedStatements(db, .now);
     } else if (x_sfunc == null and x_final == null) {
         // Deleting a function that does not exist is a no-op.
         return RC.OK;

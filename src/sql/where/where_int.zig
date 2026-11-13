@@ -27,6 +27,7 @@ const std = @import("std");
 const int = @import("../sqlite_int.zig");
 const flags = @import("xqlite_base").flags;
 const OP = @import("../../vdbe/opcodes.zig").OP;
+const StmtStatus = @import("../../vdbe/p5.zig").StmtStatus;
 const operand = @import("../../vdbe/operand.zig");
 const Reg = operand.Reg;
 const Cursor = operand.Cursor;
@@ -146,8 +147,8 @@ pub const LoopEnd = union(enum) {
         /// P3: 1 if the loop wants a unique index entry (WHERE_UNQ_WANTED).
         p3: u8 = 0,
         /// P5: the counter of sqlite3_stmt_status() it counts in
-        /// (STMTSTATUS.FULLSCAN_STEP), if any.
-        p5: u8 = 0,
+        /// (.fullscan_step), if any.
+        p5: StmtStatus = .none,
     },
     /// OP_Goto to the OP_Yield of a co-routine.
     goto: Addr,

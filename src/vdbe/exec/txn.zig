@@ -192,7 +192,7 @@ pub fn opSavepoint(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
                 try bt.savepoint(if (p1 == .RELEASE) .release else .rollback, i_savepoint);
             }
             if (is_schema_change) {
-                aux.expirePreparedStatements(db, 0);
+                aux.expirePreparedStatements(db, .now);
                 @import("../../sql/build.zig").resetAllSchemasOfConnection(db);
                 db.m_db_flags.SchemaChange = true;
             }
@@ -274,7 +274,7 @@ pub fn opTransaction(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
         if (pdb.schema.schema_cookie != @as(i32, @bitCast(i_meta))) {
             @import("../../sql/build.zig").resetOneSchema(db, @intCast(op.p1));
         }
-        v.expired = 1;
+        v.expired = .now;
         v.change_cnt_on = false;
         return error.Schema;
     }
@@ -299,8 +299,8 @@ pub fn opSetCookie(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
         pdb.schema.file_format = @intCast(op.p3);
     }
     if (op.p1 == 1) {
-        aux.expirePreparedStatements(db, 0);
-        e.v.expired = 0;
+        aux.expirePreparedStatements(db, .now);
+        e.v.expired = .no;
     }
     try rc_err;
     return .next;
@@ -432,7 +432,7 @@ pub fn opParseSchema(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
         db.m_db_flags.SchemaKnownOk = false;
         rc = prepare.initOne(db, i_db, &err_msg, op.p5);
         db.m_db_flags.SchemaChange = true;
-        v.expired = 0;
+        v.expired = .no;
     } else {
         db.init.busy = true;
         rc = prepare.parseSchemaWhere(db, i_db, std.mem.span(op.p4As(.z)), &err_msg);
@@ -592,10 +592,12 @@ pub fn opTableLock(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
 }
 
 pub fn opExpire(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
+    // P2 0 expires now, 1 when convenient.
+    const how: vi.Expired = if (op.p2 == 0) .now else .when_convenient;
     if (op.p1 == 0) {
-        aux.expirePreparedStatements(e.db, @intCast(op.p2));
+        aux.expirePreparedStatements(e.db, how);
     } else {
-        e.v.expired = cast.intCast(@TypeOf(e.v.expired), op.p2 + 1);
+        e.v.expired = how;
     }
     return .next;
 }

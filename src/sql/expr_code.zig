@@ -32,7 +32,6 @@ const Label = aux.operand.Label;
 const Addr = aux.operand.Addr;
 const Jump = aux.operand.Jump;
 const OP = vi.OP;
-const OPFLAG = vi.OPFLAG;
 const TK = int.TK;
 const EP = int.EP;
 const SF = int.SF;
@@ -75,9 +74,6 @@ pub const IN_INDEX_NOOP_OK: u32 = 0x0001;
 pub const IN_INDEX_MEMBERSHIP: u32 = 0x0002;
 pub const IN_INDEX_LOOP: u32 = 0x0004;
 
-const JUMPIFNULL = vi.SQLITE_JUMPIFNULL;
-const NULLEQ = vi.SQLITE_NULLEQ;
-
 /// ConstFactorOk(): constants may be moved to the initialization code.
 fn constFactorOk(p: *const Parse) bool {
     return p.ok_const_factor;
@@ -104,14 +100,14 @@ fn dup(p: *Parse, e: ?*const Expr) ?*Expr {
 /// Port of codeCompare(): code comparison `opcode` of registers `in1`
 /// and `in2`, jumping to `dest` (a Label, an Addr or a Jump) if true. As
 /// in C, `opcode` is the TK_ code of the comparison, which numbers its
-/// opcode (OP.fromTk()).
-fn codeCompare(p: *Parse, left: *Expr, right: *Expr, opcode: u8, in1: Reg, in2: Reg, dest: anytype, jump_if_null: u16, is_commuted: bool) void {
+/// opcode (OP.fromTk()). `nulls` is what NULL operands do (P5's flags).
+fn codeCompare(p: *Parse, left: *Expr, right: *Expr, opcode: u8, in1: Reg, in2: Reg, dest: anytype, nulls: vi.CmpP5, is_commuted: bool) void {
     if (p.n_err != 0) return;
     const p4 = if (is_commuted)
         expr_mod.binaryCompareCollSeq(p, right, left)
     else
         expr_mod.binaryCompareCollSeq(p, left, right);
-    const p5 = expr_mod.binaryCompareP5(left, right, jump_if_null);
+    const p5 = expr_mod.binaryCompareP5(left, right, nulls);
     _ = aux.emitAny4(vdbe(p), OP.fromTk(opcode), .{ .reg, .jump, .reg }, .{ in2, dest, in1 }, if (p4) |c| .{ .collseq = c } else .notused);
     aux.changeP5(vdbe(p), p5);
 }
@@ -147,7 +143,7 @@ fn exprVectorRegister(p: *Parse, v: *Expr, field: usize, reg_select: Reg, tmp: *
 
 /// Port of codeVectorCompare(): compare two vectors, leaving 1, 0 or NULL
 /// in `dest`.
-fn codeVectorCompare(p: *Parse, e: *Expr, dest: Reg, op: u8, p5: u16) void {
+fn codeVectorCompare(p: *Parse, e: *Expr, dest: Reg, op: u8, p5: vi.CmpP5) void {
     const v = vdbe(p);
     const left = e.left.?;
     const right = e.right.?;
@@ -188,7 +184,7 @@ fn codeVectorCompare(p: *Parse, e: *Expr, dest: Reg, op: u8, p5: u16) void {
         if ((opx == TK.LT or opx == TK.GT) and i < n_left - 1) {
             addr_cmp = aux.emit(v, .ElseEq, .{});
         }
-        if (p5 == NULLEQ) {
+        if (p5.null_eq) {
             _ = aux.emit(v, .Integer, .{ 0, dest });
         } else {
             _ = aux.emit(v, .ZeroOrNull, .{ r1, dest, r2 });
@@ -260,7 +256,7 @@ fn setHasNullFlag(v: *Vdbe, cur: Cursor, reg: Reg, sort_order: u8) void {
     _ = aux.emit(v, .Integer, .{ 0, reg });
     const addr1 = aux.emitAny(v, if (sort_order == 0) OP.Rewind else OP.Last, .{ .cursor, .jump, .int }, .{cur});
     _ = aux.emit(v, .Column, .{ cur, 0, reg });
-    aux.changeP5(v, OPFLAG.TYPEOFARG);
+    aux.changeP5(v, vi.ColumnP5{ .arg = .typeof });
     aux.landHere(v, addr1);
 }
 
@@ -709,18 +705,26 @@ fn codeINJump(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void
             // A value that is the left side itself is in if it is not
             // NULL. OP_NotNull and OP_IsNull do not read P3; it is left
             // as the comparison would have it.
+            // OP_NotNull and OP_IsNull have the comparison's P5 too, as
+            // a number.
             if (ii < list.len() - 1 or dest_if_null != dest_if_false) {
-                _ = if (r_lhs != r2)
-                    aux.emit4(v, .Eq, .{ r_lhs, label_ok, r2 }, p4)
-                else
-                    aux.emit4(v, .NotNull, .{ r_lhs, label_ok, r2.int() }, p4);
-                aux.changeP5(v, zaff[0]);
+                const cmp = vi.CmpP5.init(zaff[0], .{});
+                if (r_lhs != r2) {
+                    _ = aux.emit4(v, .Eq, .{ r_lhs, label_ok, r2 }, p4);
+                    aux.changeP5(v, cmp);
+                } else {
+                    _ = aux.emit4(v, .NotNull, .{ r_lhs, label_ok, r2.int() }, p4);
+                    aux.changeP5(v, vi.p5.int(cmp));
+                }
             } else {
-                _ = if (r_lhs != r2)
-                    aux.emit4(v, .Ne, .{ r_lhs, dest_if_false, r2 }, p4)
-                else
-                    aux.emit4(v, .IsNull, .{ r_lhs, dest_if_false, r2.int() }, p4);
-                aux.changeP5(v, @as(u16, zaff[0]) | JUMPIFNULL);
+                const cmp = vi.CmpP5.init(zaff[0], .{ .jump_if_null = true });
+                if (r_lhs != r2) {
+                    _ = aux.emit4(v, .Ne, .{ r_lhs, dest_if_false, r2 }, p4);
+                    aux.changeP5(v, cmp);
+                } else {
+                    _ = aux.emit4(v, .IsNull, .{ r_lhs, dest_if_false, r2.int() }, p4);
+                    aux.changeP5(v, vi.p5.int(cmp));
+                }
             }
         }
         if (!reg_ck_null.isNone()) {
@@ -939,14 +943,15 @@ pub fn codeGetColumnOfTable(v: *Vdbe, t: *Table, tab_cur: Cursor, i_col: i32, ou
 }
 
 /// Port of sqlite3ExprCodeGetColumn(): load column `i_column` of `t`
-/// (cursor `i_table`) into `i_reg`, with P5 flags of OP_Column.
-pub fn codeGetColumn(p: *Parse, t: *Table, i_column: i32, table: Cursor, reg: Reg, p5: u8) Reg {
+/// (cursor `i_table`) into `i_reg`, with P5 flags of OP_Column (of
+/// OP_VColumn, only `nochng`).
+pub fn codeGetColumn(p: *Parse, t: *Table, i_column: i32, table: Cursor, reg: Reg, p5: vi.ColumnP5) Reg {
     const v = vdbe(p);
     codeGetColumnOfTable(v, t, table, i_column, reg);
-    if (p5 != 0) {
+    if (p5 != vi.ColumnP5{}) {
         const op = aux.getLastOp(v);
-        if (op.opcode == OP.Column) op.p5 = p5;
-        if (op.opcode == OP.VColumn) op.p5 = p5 & @as(u8, @intCast(OPFLAG.NOCHNG));
+        if (op.opcode == OP.Column) op.setP5(p5);
+        if (op.opcode == OP.VColumn) op.setP5(vi.ColumnP5{ .nochng = p5.nochng });
     }
     return reg;
 }
@@ -970,7 +975,7 @@ fn exprCodeVector(p: *Parse, e: *Expr, freeable: *Reg) Reg {
 
 /// Port of setDoNotMergeFlagOnCopy().
 fn setDoNotMergeFlagOnCopy(v: *Vdbe) void {
-    if (aux.getLastOp(v).opcode == OP.Copy) aux.changeP5(v, 1);
+    if (aux.getLastOp(v).opcode == OP.Copy) aux.changeP5(v, vi.CopyP5{ .no_merge = true });
 }
 
 /// Port of exprCodeInlineFunction(): coalesce(), iif() and friends,
@@ -1165,7 +1170,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
     var reg_free2: Reg = .none;
     var r1: Reg = undefined;
     var r2: Reg = undefined;
-    var p5: u16 = 0;
+    var p5: vi.CmpP5 = .{};
     var e_opt = e_arg;
     std.debug.assert(out.int() > 0 and out.int() <= p.n_mem);
 
@@ -1247,7 +1252,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                     const r = exprPartidxExprLookup(p, e, out);
                     if (!r.isNone()) return r;
                 }
-                return codeGetColumn(p, e.y.tab.?, e.i_column, .from(i_tab), out, e.op2);
+                return codeGetColumn(p, e.y.tab.?, e.i_column, .from(i_tab), out, .fromByte(e.op2));
             },
             TK.INTEGER => {
                 codeInteger(p, e, false, out);
@@ -1292,14 +1297,14 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
             TK.IS, TK.ISNOT, TK.LT, TK.LE, TK.GT, TK.GE, TK.NE, TK.EQ => {
                 if (op == TK.IS or op == TK.ISNOT) {
                     op = if (op == TK.IS) TK.EQ else TK.NE;
-                    p5 = NULLEQ;
+                    p5 = .{ .null_eq = true };
                 }
                 const left = e.left.?;
                 var addr_is_null: ?Addr = null;
                 if (expr_mod.isVector(left)) {
                     codeVectorCompare(p, e, out, op, p5);
                 } else {
-                    if (e.flags.Subquery and p5 != NULLEQ) {
+                    if (e.flags.Subquery and !p5.null_eq) {
                         addr_is_null = computeOperands(p, e, &r1, &r2, &reg_free1, &reg_free2);
                     } else {
                         r1 = codeTemp(p, e.left, &reg_free1);
@@ -1307,7 +1312,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                     }
                     _ = aux.emit(v, .Integer, .{ 1, in_reg });
                     codeCompare(p, left, e.right.?, op, r1, r2, aux.here(v).plus(2), p5, e.flags.Commuted);
-                    if (p5 == NULLEQ) {
+                    if (p5.null_eq) {
                         _ = aux.emit(v, .Integer, .{ 0, in_reg });
                     } else {
                         _ = aux.emit(v, .ZeroOrNull, .{ r1, in_reg, r2 });
@@ -1441,7 +1446,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                 return out;
             },
             TK.BETWEEN => {
-                codeBetween(p, e, .{ .reg = out }, 0);
+                codeBetween(p, e, .{ .reg = out }, false);
                 return out;
             },
             TK.COLLATE => {
@@ -1549,7 +1554,7 @@ fn codeCase(p: *Parse, e: *Expr, out: Reg, reg_free1: *Reg) void {
             test_expr = items[i].expr;
         }
         const next_case = aux.newLabel(p);
-        exprIfFalse(p, test_expr, next_case, JUMPIFNULL);
+        exprIfFalse(p, test_expr, next_case, true);
         exprCode(p, items[i + 1].expr, out);
         _ = aux.emit(v, .Goto, .{ 0, end_label });
         aux.place(v, next_case);
@@ -1608,7 +1613,7 @@ fn codeFunction(p: *Parse, e: *Expr, out: Reg) Reg {
         if (def.func_flags.intersects(.{ .LENGTH = true, .TYPEOF = true })) {
             const a0 = f.at(0).expr.?;
             if (a0.op == TK.COLUMN or a0.op == TK.AGG_COLUMN) {
-                // The P5 of the OP_Column (OPFLAG_LENGTHARG etc.: the same bits).
+                // The P5 of the OP_Column (ColumnP5.arg: the same bits).
                 a0.op2 = @intCast(def.func_flags.only(FUNC.BYTELEN).int());
             }
         }
@@ -1776,7 +1781,7 @@ pub fn codeExprList(p: *Parse, list: *ExprList, target: Reg, src_reg: Reg, flags
 }
 
 /// The jumps of exprCodeBetween(): ifTrue or ifFalse.
-const JumpFn = *const fn (p: *Parse, e: ?*Expr, dest: Jump, jump_if_null: u16) void;
+const JumpFn = *const fn (p: *Parse, e: ?*Expr, dest: Jump, jump_if_null: bool) void;
 
 /// Where exprCodeBetween() puts its result: in a register, or a jump
 /// (ifTrue or ifFalse) to a place.
@@ -1787,7 +1792,7 @@ const BetweenDest = union(enum) {
 
 /// Port of exprCodeBetween(): "x BETWEEN y AND z" as "x>=y AND x<=z"
 /// computing x once: store the result in `dest`, or jump to it.
-fn codeBetween(p: *Parse, e: *Expr, dest: BetweenDest, jump_if_null: u16) void {
+fn codeBetween(p: *Parse, e: *Expr, dest: BetweenDest, jump_if_null: bool) void {
     var reg_free1: Reg = .none;
     const del = dup(p, e.left) orelse return;
     var comp_left: Expr = .{ .op = TK.GE, .left = del, .right = e.x.list.?.at(0).expr };
@@ -1806,17 +1811,18 @@ fn codeBetween(p: *Parse, e: *Expr, dest: BetweenDest, jump_if_null: u16) void {
 }
 
 /// Port of sqlite3ExprIfTrue(): jump to `to` (a Label, an Addr or a
-/// Jump) if `e` is true; also if it is NULL and `jump_if_null` is
-/// SQLITE_JUMPIFNULL.
-pub inline fn exprIfTrue(p: *Parse, e: ?*Expr, to: anytype, jump_if_null: u16) void {
+/// Jump) if `e` is true; also if it is NULL and `jump_if_null`
+/// (SQLITE_JUMPIFNULL).
+pub inline fn exprIfTrue(p: *Parse, e: ?*Expr, to: anytype, jump_if_null: bool) void {
     ifTrue(p, e, Jump.of(to), jump_if_null);
 }
 
 /// exprIfTrue() on a Jump: the one body, also the JumpFn of codeBetween().
-fn ifTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
+fn ifTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null: bool) void {
     const v = p.vdbe orelse return;
     const e = e_arg orelse return;
-    var jump_if_null = jump_if_null_arg;
+    // IS and IS NOT: NULL equals NULL (C sets jumpIfNull to SQLITE_NULLEQ).
+    var null_eq = false;
     var op: u8 = e.op;
     var reg_free1: Reg = .none;
     var reg_free2: Reg = .none;
@@ -1831,7 +1837,7 @@ fn ifTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
             const first, const second = if (evalRhsFirst(e)) .{ e.right, e.left } else .{ e.left, e.right };
             if (op == TK.AND) {
                 const d2 = aux.newLabel(p);
-                exprIfFalse(p, first, d2, jump_if_null ^ JUMPIFNULL);
+                exprIfFalse(p, first, d2, !jump_if_null);
                 exprIfTrue(p, second, to, jump_if_null);
                 aux.place(v, d2);
             } else {
@@ -1845,30 +1851,31 @@ fn ifTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
             const is_not = e.op2 == TK.ISNOT;
             const is_true = expr_mod.truthValue(e.right.?);
             if (is_true != is_not) {
-                exprIfTrue(p, e.left, to, if (is_not) JUMPIFNULL else 0);
+                exprIfTrue(p, e.left, to, is_not);
             } else {
-                exprIfFalse(p, e.left, to, if (is_not) JUMPIFNULL else 0);
+                exprIfFalse(p, e.left, to, is_not);
             }
             return;
         },
         TK.IS, TK.ISNOT, TK.LT, TK.LE, TK.GT, TK.GE, TK.NE, TK.EQ => {
             if (op == TK.IS or op == TK.ISNOT) {
                 op = if (op == TK.IS) TK.EQ else TK.NE;
-                jump_if_null = NULLEQ;
+                null_eq = true;
             }
             if (!expr_mod.isVector(e.left.?)) {
                 var r1: Reg = undefined;
                 var r2: Reg = undefined;
                 var addr_is_null: ?Addr = null;
-                if (e.flags.Subquery and jump_if_null != NULLEQ) {
+                if (e.flags.Subquery and !null_eq) {
                     addr_is_null = computeOperands(p, e, &r1, &r2, &reg_free1, &reg_free2);
                 } else {
                     r1 = codeTemp(p, e.left, &reg_free1);
                     r2 = codeTemp(p, e.right, &reg_free2);
                 }
-                codeCompare(p, e.left.?, e.right.?, op, r1, r2, to, jump_if_null, e.flags.Commuted);
+                const nulls: vi.CmpP5 = if (null_eq) .{ .null_eq = true } else .{ .jump_if_null = jump_if_null };
+                codeCompare(p, e.left.?, e.right.?, op, r1, r2, to, nulls, e.flags.Commuted);
                 if (addr_is_null) |a| {
-                    if (jump_if_null != 0) aux.setJump(v, a, to) else aux.landHere(v, a);
+                    if (jump_if_null) aux.setJump(v, a, to) else aux.landHere(v, a);
                 }
                 return;
             }
@@ -1882,7 +1889,7 @@ fn ifTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
         TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = ifTrue, .to = to } }, jump_if_null),
         TK.IN => {
             const dest_if_false = aux.newLabel(p);
-            const dest_if_null = if (jump_if_null != 0) to else Jump.of(dest_if_false);
+            const dest_if_null = if (jump_if_null) to else Jump.of(dest_if_false);
             codeIN(p, e, dest_if_false, dest_if_null);
             _ = aux.emit(v, .Goto, .{ 0, to });
             aux.place(v, dest_if_false);
@@ -1896,22 +1903,23 @@ fn ifTrue(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
         // No-op.
     } else {
         const r1: Reg = codeTemp(p, e, &reg_free1);
-        _ = aux.emit(v, .If, .{ r1, to, @intFromBool(jump_if_null != 0) });
+        _ = aux.emit(v, .If, .{ r1, to, @intFromBool(jump_if_null or null_eq) });
     }
 }
 
 /// Port of sqlite3ExprIfFalse(): jump to `to` (a Label, an Addr or a
-/// Jump) if `e` is false; also if it is NULL and `jump_if_null` is
-/// SQLITE_JUMPIFNULL.
-pub inline fn exprIfFalse(p: *Parse, e: ?*Expr, to: anytype, jump_if_null: u16) void {
+/// Jump) if `e` is false; also if it is NULL and `jump_if_null`
+/// (SQLITE_JUMPIFNULL).
+pub inline fn exprIfFalse(p: *Parse, e: ?*Expr, to: anytype, jump_if_null: bool) void {
     ifFalse(p, e, Jump.of(to), jump_if_null);
 }
 
 /// exprIfFalse() on a Jump: the one body, also the JumpFn of codeBetween().
-fn ifFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
+fn ifFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null: bool) void {
     const v = p.vdbe orelse return;
     const e = e_arg orelse return;
-    var jump_if_null = jump_if_null_arg;
+    // IS and IS NOT: NULL equals NULL (C sets jumpIfNull to SQLITE_NULLEQ).
+    var null_eq = false;
     var reg_free1: Reg = .none;
     var reg_free2: Reg = .none;
     defer {
@@ -1931,7 +1939,7 @@ fn ifFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
                 exprIfFalse(p, second, to, jump_if_null);
             } else {
                 const d2 = aux.newLabel(p);
-                exprIfTrue(p, first, d2, jump_if_null ^ JUMPIFNULL);
+                exprIfTrue(p, first, d2, !jump_if_null);
                 exprIfFalse(p, second, to, jump_if_null);
                 aux.place(v, d2);
             }
@@ -1943,31 +1951,32 @@ fn ifFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
             const is_true = expr_mod.truthValue(e.right.?);
             if (is_true != is_not) {
                 // IS TRUE and IS NOT FALSE.
-                exprIfFalse(p, e.left, to, if (is_not) 0 else JUMPIFNULL);
+                exprIfFalse(p, e.left, to, !is_not);
             } else {
                 // IS FALSE and IS NOT TRUE.
-                exprIfTrue(p, e.left, to, if (is_not) 0 else JUMPIFNULL);
+                exprIfTrue(p, e.left, to, !is_not);
             }
             return;
         },
         TK.IS, TK.ISNOT, TK.LT, TK.LE, TK.GT, TK.GE, TK.NE, TK.EQ => {
             if (e.op == TK.IS or e.op == TK.ISNOT) {
                 op = if (e.op == TK.IS) TK.NE else TK.EQ;
-                jump_if_null = NULLEQ;
+                null_eq = true;
             }
             if (!expr_mod.isVector(e.left.?)) {
                 var r1: Reg = undefined;
                 var r2: Reg = undefined;
                 var addr_is_null: ?Addr = null;
-                if (e.flags.Subquery and jump_if_null != NULLEQ) {
+                if (e.flags.Subquery and !null_eq) {
                     addr_is_null = computeOperands(p, e, &r1, &r2, &reg_free1, &reg_free2);
                 } else {
                     r1 = codeTemp(p, e.left, &reg_free1);
                     r2 = codeTemp(p, e.right, &reg_free2);
                 }
-                codeCompare(p, e.left.?, e.right.?, op, r1, r2, to, jump_if_null, e.flags.Commuted);
+                const nulls: vi.CmpP5 = if (null_eq) .{ .null_eq = true } else .{ .jump_if_null = jump_if_null };
+                codeCompare(p, e.left.?, e.right.?, op, r1, r2, to, nulls, e.flags.Commuted);
                 if (addr_is_null) |a| {
-                    if (jump_if_null != 0) aux.setJump(v, a, to) else aux.landHere(v, a);
+                    if (jump_if_null) aux.setJump(v, a, to) else aux.landHere(v, a);
                 }
                 return;
             }
@@ -1980,7 +1989,7 @@ fn ifFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
         },
         TK.BETWEEN => return codeBetween(p, e, .{ .jump = .{ .f = ifFalse, .to = to } }, jump_if_null),
         TK.IN => {
-            if (jump_if_null != 0) {
+            if (jump_if_null) {
                 codeIN(p, e, to, to);
             } else {
                 const dest_if_null = aux.newLabel(p);
@@ -1997,12 +2006,12 @@ fn ifFalse(p: *Parse, e_arg: ?*Expr, to: Jump, jump_if_null_arg: u16) void {
         // No-op.
     } else {
         const r1: Reg = codeTemp(p, e, &reg_free1);
-        _ = aux.emit(v, .IfNot, .{ r1, to, @intFromBool(jump_if_null != 0) });
+        _ = aux.emit(v, .IfNot, .{ r1, to, @intFromBool(jump_if_null or null_eq) });
     }
 }
 
 /// Port of sqlite3ExprIfFalseDup(): exprIfFalse() on a copy of `e`.
-pub fn exprIfFalseDup(p: *Parse, e: ?*Expr, dest: anytype, jump_if_null: u16) void {
+pub fn exprIfFalseDup(p: *Parse, e: ?*Expr, dest: anytype, jump_if_null: bool) void {
     const c = dup(p, e);
     if (!p.db.malloc_failed) exprIfFalse(p, c, dest, jump_if_null);
 }

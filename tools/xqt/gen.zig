@@ -4,17 +4,9 @@
 //! - fixtures: the databases of src/testdata and pkg/storage/src/testdata,
 //!   made by the sqlite3 shell
 //!   (was tools/gen-fixtures.sh).
-//! - opcodes: src/vdbe/opcodes.zig: mkopcodeh.tcl and mkopcodec.tcl over
-//!   parse.h and vdbe.c, converted by tools/vdbe/opcodes2zig.zig (was
-//!   tools/gen-opcodes.sh). Needs tclsh.
 //! - superjournal: src/testdata/superjournal, what sqlite3 leaves when it
 //!   dies in a multi-database commit (gen/superjournal.zig; it takes its
 //!   own arguments, so it runs alone).
-//!
-//! The C helper (lemon, for parse.h's token codes) is built
-//! with `zig cc`, the converters run with `zig run`, and the output is
-//! formatted as `zig fmt` does, in-process. $ZIG names the zig binary
-//! (default: zig on PATH).
 
 const std = @import("std");
 const Io = std.Io;
@@ -28,14 +20,11 @@ pub const usage =
     \\  fixtures   pkg/storage/src/testdata/{btree,autovacuum}.db, src/testdata/sql.db with the sqlite3 on
     \\             PATH, or --fixtures-sqlite3 PATH (the committed ones are
     \\             from 3.44.4, whose version they carry in their header)
-    \\  opcodes    src/vdbe/opcodes.zig from ref/sqlite (lemon, tclsh)
-    \\
-    \\The C helpers are built with $ZIG cc (default zig on PATH).
     \\
     \\
 ++ superjournal.usage;
 
-const Name = enum { fixtures, opcodes };
+const Name = enum { fixtures };
 
 const Job = struct {
     name: Name,
@@ -49,7 +38,6 @@ const Ctx = struct {
     gpa: Allocator,
     io: Io,
     cfg: *const xqt.Config,
-    zig: []const u8,
     fixtures_sqlite3: []const u8,
 };
 
@@ -63,7 +51,6 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         .gpa = gpa,
         .io = io,
         .cfg = cfg,
-        .zig = cfg.environ.get("ZIG") orelse "zig",
         .fixtures_sqlite3 = "sqlite3",
     };
     var jobs: std.ArrayList(Job) = .empty;
@@ -104,10 +91,9 @@ fn runJob(jobs: []Job, i: usize) void {
     const j = &jobs[i];
     var arena_state: std.heap.ArenaAllocator = .init(j.ctx.gpa);
     defer arena_state.deinit();
-    var g: Gen = .{ .ctx = j.ctx, .arena = arena_state.allocator(), .tmp = "" };
+    var g: Gen = .{ .ctx = j.ctx, .arena = arena_state.allocator() };
     const result = switch (j.name) {
         .fixtures => g.fixtures(),
-        .opcodes => g.opcodes(),
     };
     // The message outlives the job's arena.
     const keep = std.heap.page_allocator;
@@ -117,27 +103,16 @@ fn runJob(jobs: []Job, i: usize) void {
     } else |err| {
         j.message = keep.dupe(u8, if (err == error.StepFailed) g.failure else @errorName(err)) catch "";
     }
-    if (g.tmp.len > 0) Io.Dir.cwd().deleteTree(j.ctx.io, g.tmp) catch {};
-    Io.Dir.cwd().deleteDir(j.ctx.io, j.ctx.cfg.tmp) catch {};
 }
 
 const Gen = struct {
     ctx: *const Ctx,
     arena: Allocator,
-    /// The temporary directory, if one was made.
-    tmp: []const u8,
     /// Why a step failed.
     failure: []const u8 = "",
 
     fn root(g: *Gen, rel: []const u8) ![]const u8 {
         return std.fs.path.join(g.arena, &.{ g.ctx.cfg.root, rel });
-    }
-
-    fn makeTmp(g: *Gen, name: []const u8) ![]const u8 {
-        g.tmp = try std.fmt.allocPrint(g.arena, "{s}/gen-{s}", .{ g.ctx.cfg.tmp, name });
-        Io.Dir.cwd().deleteTree(g.ctx.io, g.tmp) catch {};
-        try Io.Dir.cwd().createDirPath(g.ctx.io, g.tmp);
-        return g.tmp;
     }
 
     /// Runs `argv` in `cwd`, which must succeed (set -e); returns its
@@ -150,60 +125,6 @@ const Gen = struct {
         try w.writer.print(": {f}\n{s}", .{ r, r.stderr });
         g.failure = w.written();
         return error.StepFailed;
-    }
-
-    fn cc(g: *Gen, args: []const []const u8) !void {
-        _ = try g.step(try std.mem.concat(g.arena, []const u8, &.{ &.{ g.ctx.zig, "cc" }, args }), .{});
-    }
-
-    fn write(g: *Gen, path: []const u8, data: []const u8) !void {
-        try Io.Dir.cwd().writeFile(g.ctx.io, .{ .sub_path = path, .data = data });
-    }
-
-    fn read(g: *Gen, path: []const u8) ![]u8 {
-        return Io.Dir.cwd().readFileAlloc(g.ctx.io, path, g.arena, .unlimited);
-    }
-
-    fn copy(g: *Gen, from: []const u8, to: []const u8) !void {
-        try Io.Dir.cwd().copyFile(from, .cwd(), to, g.ctx.io, .{});
-    }
-
-    /// The version of ref/sqlite, as $(cat VERSION).
-    fn version(g: *Gen, ref: []const u8) ![]const u8 {
-        return std.mem.trimEnd(u8, try g.read(try std.fs.path.join(g.arena, &.{ ref, "VERSION" })), "\n");
-    }
-
-    /// Runs a converter under tools/ with `zig run` and writes what it
-    /// prints, formatted as `zig fmt` would, to `out`.
-    fn convert(g: *Gen, converter: []const u8, args: []const []const u8, out: []const u8) !void {
-        const argv = try std.mem.concat(g.arena, []const u8, &.{ &.{ g.ctx.zig, "run", try g.root(converter), "--" }, args });
-        const zig_src = try g.step(argv, .{});
-        try g.write(out, try zigFmt(g.arena, zig_src));
-    }
-
-    /// lemon from ref/sqlite, run on parse.y in the temporary directory
-    /// (parse.c, parse.h).
-    fn lemon(g: *Gen, ref: []const u8, tmp: []const u8) !void {
-        try g.copy(try std.fs.path.join(g.arena, &.{ ref, "tool", "lempar.c" }), try std.fs.path.join(g.arena, &.{ tmp, "lempar.c" }));
-        try g.copy(try std.fs.path.join(g.arena, &.{ ref, "src", "parse.y" }), try std.fs.path.join(g.arena, &.{ tmp, "parse.y" }));
-        const exe = try std.fs.path.join(g.arena, &.{ tmp, "lemon" });
-        try g.cc(&.{ "-O2", "-o", exe, try std.fs.path.join(g.arena, &.{ ref, "tool", "lemon.c" }) });
-        _ = try g.step(&.{ exe, "-S", "parse.y" }, .{ .cwd = tmp });
-    }
-
-    fn opcodes(g: *Gen) ![]const u8 {
-        const ref = try g.root("ref/sqlite");
-        const tmp = try g.makeTmp("opcodes");
-        try g.lemon(ref, tmp);
-        const vdbe_c = try std.fs.path.join(g.arena, &.{ ref, "src", "vdbe.c" });
-        const input = try std.mem.concat(g.arena, u8, &.{ try g.read(try std.fs.path.join(g.arena, &.{ tmp, "parse.h" })), try g.read(vdbe_c) });
-        const opcodes_h = try std.fs.path.join(g.arena, &.{ tmp, "opcodes.h" });
-        const opcodes_c = try std.fs.path.join(g.arena, &.{ tmp, "opcodes.c" });
-        try g.write(opcodes_h, try g.step(&.{ "tclsh", try std.fs.path.join(g.arena, &.{ ref, "tool", "mkopcodeh.tcl" }) }, .{ .stdin = input }));
-        try g.write(opcodes_c, try g.step(&.{ "tclsh", try std.fs.path.join(g.arena, &.{ ref, "tool", "mkopcodec.tcl" }), opcodes_h }, .{}));
-        try Io.Dir.cwd().createDirPath(g.ctx.io, try g.root("src/vdbe"));
-        try g.convert("tools/vdbe/opcodes2zig.zig", &.{ opcodes_h, opcodes_c, vdbe_c, try g.version(ref) }, try g.root("src/vdbe/opcodes.zig"));
-        return "wrote src/vdbe/opcodes.zig";
     }
 
     /// The databases in pkg/storage/src/testdata (for the b-tree tests) and
@@ -264,18 +185,3 @@ const sql_fixture =
     \\INSERT INTO wr VALUES('b',2),('a',1),('c',3);
     \\
 ;
-
-/// `source` as `zig fmt` prints it.
-fn zigFmt(arena: Allocator, source: []const u8) ![]u8 {
-    const src = try arena.dupeSentinel(u8, source, 0);
-    var tree = try std.zig.Ast.parse(arena, src, .{ .mode = .zig });
-    defer tree.deinit(arena);
-    if (tree.errors.len > 0) return error.ParseError;
-    return tree.renderAlloc(arena);
-}
-
-test zigFmt {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectEqualStrings("const a = .{ 1, 2 };\n", try zigFmt(arena.allocator(), "const a = .{1,2};"));
-}

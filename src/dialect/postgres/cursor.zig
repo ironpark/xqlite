@@ -871,7 +871,7 @@ fn declareFunc(ctx: *Context, argv: []*Mem) void {
 fn materialize(ctx: *Context, db: *int.Sqlite3, query: []const u8, params: []*Mem, rowid: bool) ?*Cursor {
     const gpa = db.gpa;
     var v: ?*vi.Vdbe = null;
-    const rc = prepare.prepareLang(db, query, .of(.postgres), 0, &v, null);
+    const rc = prepare.prepareLang(db, query, .of(.postgres), .{}, &v, null);
     const stmt = v orelse {
         if (rc == RC.NOMEM or rc == RC.OK) return failNomem(ctx);
         api.resultErrorState(ctx, db.err_state orelse .of("XX000"), main_mod.errmsg(db));

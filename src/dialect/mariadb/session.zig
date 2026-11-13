@@ -191,7 +191,7 @@ pub fn setSysvarFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
         const on = is_default or truthy(argv[1]);
         if (db.auto_commit and db.flags.ForeignKeys != on) {
             db.flags.ForeignKeys = on;
-            @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
+            @import("../../vdbe/aux.zig").expirePreparedStatements(db, .now);
         }
         return api.resultNull(ctx);
     }

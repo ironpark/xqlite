@@ -116,10 +116,10 @@ pub fn opFilter(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Flow {
     var h = filterHash(e, op);
     h %= @as(u64, @intCast(in1.n)) * 8;
     if (in1.z.?[@intCast(h / 8)] & (@as(u8, 1) << @intCast(h & 7)) == 0) {
-        e.v.counters[vi.STMTSTATUS.FILTER_HIT] += 1;
+        e.v.counters.getPtr(.filter_hit).* += 1;
         return .jump_p2;
     }
-    e.v.counters[vi.STMTSTATUS.FILTER_MISS] += 1;
+    e.v.counters.getPtr(.filter_miss).* += 1;
     return .next;
 }
 

@@ -46,7 +46,7 @@ pub fn exec(db: *Sqlite3, sql_arg: []const u8, callback: ?Callback, ctx: ?*anyop
     outer: while (rc == RC.OK and sql.len > 0) {
         var stmt_opt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;
         var leftover: [:0]const u8 = "";
-        rc = prepare.prepareV3Z(db, sql, 0, &stmt_opt, &leftover);
+        rc = prepare.prepareV3Z(db, sql, .{}, &stmt_opt, &leftover);
         if (rc != RC.OK) continue;
         const stmt = stmt_opt orelse {
             // A comment or white space.

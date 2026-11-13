@@ -16,6 +16,8 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const OpOf = vi.OpOf;
+const OpWithP5 = vi.OpWithP5;
+const InsertP5 = vi.InsertP5;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
@@ -41,11 +43,11 @@ pub const handlers = .{
 const max_rowid: i64 = std.math.maxInt(i64);
 
 /// The b-tree cursor's seek result for Cursor.insert, if
-/// OPFLAG_USESEEKRESULT says to use it. C passes seekResult, where 0 is
+/// `use_seek_result` says to use it. C passes seekResult, where 0 is
 /// both "no seek" and "on the entry": the b-tree then seeks itself, so
 /// .eq is passed as null.
-fn insertSeekResult(p5: u16, b: *const vi.OnBtree) ?std.math.Order {
-    if (p5 & vi.OPFLAG.USESEEKRESULT == 0) return null;
+fn insertSeekResult(p5: InsertP5, b: *const vi.OnBtree) ?std.math.Order {
+    if (!p5.use_seek_result) return null;
     const order = b.seek_result orelse return null;
     return if (order == .eq) null else order;
 }
@@ -105,16 +107,16 @@ pub fn opNewRowid(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     return .next;
 }
 
-pub fn opInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
+pub fn opInsert(e: *Exec, op: *OpWithP5(.{ .cursor, .reg, .reg }, InsertP5)) Error!Flow {
     const v = e.v;
     const data = e.reg(op.p2);
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
     const key = e.reg(op.p3);
     const rowid = key.u.i;
-    if (op.p5 & vi.OPFLAG.NCHANGE != 0) {
+    if (op.p5.nchange) {
         v.n_change += 1;
-        if (op.p5 & vi.OPFLAG.LASTROWID != 0) e.db.last_rowid = rowid;
+        if (op.p5.last_rowid) e.db.last_rowid = rowid;
     }
     const x: btree.Payload = .{
         .rowid = rowid,
@@ -126,13 +128,13 @@ pub fn opInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     b.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
     try b.cursor.insert(x, .{
-        .append = op.p5 & vi.OPFLAG.APPEND != 0,
-        .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
+        .append = op.p5.append,
+        .save_position = op.p5.save_position,
         .seek_result = seek_result,
-        .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
+        .preformat = op.p5.preformat,
     });
     if (e.db.update_hook) |f| if (op.p4type == .table) {
-        const op_code: i32 = if (op.p5 & vi.OPFLAG.ISUPDATE != 0) update_op else insert_op;
+        const op_code: i32 = if (op.p5.is_update) update_op else insert_op;
         f(e.db.update_arg, op_code, e.db.dbs.items[@intCast(c.i_db)].name, op.p4As(.table).name, rowid);
     };
     return .next;
@@ -146,12 +148,12 @@ const delete_op = 9;
 
 /// OP_RowCell: build the cell for the entry of cursor P2 in cursor P1,
 /// with the rowid in register P3 for tables, for the OP_Insert or
-/// OP_IdxInsert with OPFLAG_PREFORMAT that follows.
+/// OP_IdxInsert with InsertP5.preformat that follows.
 pub fn opRowCell(e: *Exec, op: *OpOf(.{ .cursor, .cursor, .reg })) Error!Flow {
     if (std.debug.runtime_safety) {
         const next = e.ops[e.pc + 1];
         std.debug.assert(next.opcode == .Insert or next.opcode == .IdxInsert);
-        std.debug.assert(next.p5 & vi.OPFLAG.PREFORMAT != 0);
+        std.debug.assert(next.p5As(InsertP5).preformat);
     }
     const dest = e.csr(op.p1).kind.btree.cursor;
     const src = e.csr(op.p2).kind.btree.cursor;
@@ -160,7 +162,7 @@ pub fn opRowCell(e: *Exec, op: *OpOf(.{ .cursor, .cursor, .reg })) Error!Flow {
     return .next;
 }
 
-pub fn opDelete(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+pub fn opDelete(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, vi.DeleteP5)) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
@@ -171,8 +173,10 @@ pub fn opDelete(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     c.cache_status = vi.cache_stale;
     // C: seekResult = 0.
     b.seek_result = null;
-    try b.cursor.delete(.{ .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0 });
-    if (op.p2 & vi.OPFLAG.NCHANGE != 0) {
+    try b.cursor.delete(.{ .save_position = op.p5.save_position });
+    // P2 is 1 to count the row in sqlite3_changes() (C: OPFLAG_NCHANGE
+    // in P2).
+    if (op.p2 != 0) {
         v.n_change += 1;
         if (hook_tab) |t| if (t.hasRowid()) {
             e.db.update_hook.?(e.db.update_arg, delete_op, e.db.dbs.items[@intCast(c.i_db)].name, t.name, rowid);
@@ -199,12 +203,12 @@ pub fn opRowData(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opIdxInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
+pub fn opIdxInsert(e: *Exec, op: *OpWithP5(.{ .cursor, .reg, .reg }, InsertP5)) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
     const in2 = e.reg(op.p2);
-    if (op.p5 & vi.OPFLAG.NCHANGE != 0) v.n_change += 1;
+    if (op.p5.nchange) v.n_change += 1;
     if (in2.flags.Zero) try mem.expandBlob(in2);
     // Seek by the first P4 fields, unpacked in P3.. (BtreePayload.aMem).
     var r: vi.UnpackedRecord = undefined;
@@ -213,8 +217,7 @@ pub fn opIdxInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     if (op.p4type == .int32 and op.p4As(.int32) > 0) {
         r = .{
             .key_info = c.key_info.?,
-            .mem = e.regsFrom(op.p3),
-            .n_field = @intCast(op.p4As(.int32)),
+            .fields = e.regRange(op.p3, @intCast(op.p4As(.int32))),
             .default_rc = 0,
         };
         kc = .{ .r = &r, .cmp = serial.findCompare(&r) };
@@ -223,10 +226,10 @@ pub fn opIdxInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     // Whether the insert fails or not (the b-tree does not read it).
     c.cache_status = vi.cache_stale;
     try b.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
-        .append = op.p5 & vi.OPFLAG.APPEND != 0,
-        .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
+        .append = op.p5.append,
+        .save_position = op.p5.save_position,
         .seek_result = insertSeekResult(op.p5, b),
-        .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
+        .preformat = op.p5.preformat,
     });
     return .next;
 }
@@ -237,8 +240,7 @@ pub fn opIdxDelete(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     const cur = b.cursor;
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
-        .mem = e.regsFrom(op.p2),
-        .n_field = op.p5,
+        .fields = e.regRange(op.p2, op.p5),
         .default_rc = 0,
     };
     const order = try serial.indexMoveto(cur, &r);

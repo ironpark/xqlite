@@ -643,7 +643,7 @@ fn apply(db: *int.Sqlite3, prm: *const Param, value: ?[]const u8, startup: bool)
 }
 
 fn expire(db: *int.Sqlite3) void {
-    @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    @import("../../vdbe/aux.zig").expirePreparedStatements(db, .now);
 }
 
 /// The value of `prm` in `db`'s session, as SHOW prints it.

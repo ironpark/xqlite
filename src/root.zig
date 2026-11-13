@@ -186,7 +186,8 @@ test {
         @import("vdbe/exec/misc.zig"),           @import("sql/sqlite_int.zig"),       @import("dialect/dialect.zig"),
         @import("ir/ir.zig"),                    @import("catalog/catalog.zig"),      @import("catalog/sequence.zig"),
         @import("sql/analyze.zig"),              @import("sql/analyze_test.zig"),     @import("vdbe/utf.zig"),
-        @import("dialect/sqlite/normalize.zig"), @import("sql/typing.zig"),
+        @import("dialect/sqlite/normalize.zig"), @import("sql/typing.zig"),           @import("vdbe/p5.zig"),
+        @import("vdbe/opcodes.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

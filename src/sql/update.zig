@@ -30,7 +30,6 @@ const SF = int.SF;
 const TF = int.TF;
 const COLFLAG = int.COLFLAG;
 const WHERE = int.WHERE;
-const OPFLAG = vi.OPFLAG;
 const Reg = aux.operand.Reg;
 const Cursor = aux.operand.Cursor;
 const Addr = aux.operand.Addr;
@@ -360,7 +359,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // The INSERT left the data cursor on the row to update: no
             // search, only the WHERE of the DO UPDATE.
             e_one_pass = ONEPASS.SINGLE;
-            ec.exprIfFalse(p, where, label_break, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, where, label_break, true);
             b_finish_seek = false;
         } else {
             // The rows to update. A one-pass update of several rows is not
@@ -425,7 +424,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             if (e_one_pass == ONEPASS.MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] != null) > 0) addr_once = aux.emit(v, .Once, .{});
             var not_used1: Cursor = undefined;
             var not_used2: Cursor = undefined;
-            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, base_cur, to_open, &not_used1, &not_used2);
+            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, .{}, base_cur, to_open, &not_used1, &not_used2);
             if (addr_once) |a| aux.jumpHereOrPopInst(v, a);
         }
 
@@ -584,7 +583,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         if (b_finish_seek) _ = aux.emit(v, .FinishSeek, .{data_cur});
         if (has_fk > 1 or chng_key) _ = aux.emit(v, .Delete, .{data_cur});
         if (has_fk != 0) fkey.fkCheck(p, t, .none, new_rowid, ax_ref, chng_key);
-        insert.completeInsertion(p, t, data_cur, idx_cur, new_rowid, reg_idx, OPFLAG.ISUPDATE | (if (e_one_pass == ONEPASS.MULTI) OPFLAG.SAVEPOSITION else 0), false, false);
+        insert.completeInsertion(p, t, data_cur, idx_cur, new_rowid, reg_idx, .{ .is_update = true, .save_position = e_one_pass == ONEPASS.MULTI }, false, false);
         if (has_fk != 0) fkey.fkActions(p, t, changes, old_rowid, ax_ref, chng_key);
     }
 
@@ -646,7 +645,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
                 list = try expr_mod.listAppend(p, list, try expr_mod.exprDup(p.arena, changes.at(@intCast(ax_ref[i])).expr));
             } else {
                 const row_expr = try exprRowColumn(p, @intCast(i));
-                row_expr.op2 = @intCast(vi.OPFLAG.NOCHNG);
+                row_expr.op2 = vi.ColumnP5.byte(.{ .nochng = true });
                 list = try expr_mod.listAppend(p, list, row_expr);
             }
         }
@@ -668,7 +667,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
             } else {
                 _ = aux.emit(v, .VColumn, .{ csr, i, reg_arg.at(2 + i) });
                 // For sqlite3_vtab_nochange().
-                aux.changeP5(v, vi.OPFLAG.NOCHNG);
+                aux.changeP5(v, vi.ColumnP5{ .nochng = true });
             }
         }
         if (t.hasRowid()) {

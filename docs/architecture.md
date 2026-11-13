@@ -330,7 +330,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 
 실행 중 제약 위반은 문장을 컴파일한 방언의 문구와 `ErrorState`입니다(`Hooks.constraint`, `src/dialect/constraint.zig`).
 
-- 코드 생성기(`insert.zig`, `build.zig`, `fkey.zig`)가 제약의 `OP_Halt`/`OP_HaltIfNull`을 만들 때 방언의 `Constraint.message`가 메시지와 `ErrorState`를 정합니다. 그것을 P4에 넣고(SQLSTATE, 번호, 메시지) P5에 `P5_ConstraintDialect`를 켭니다. 실행은 위반했을 때만 P4를 풀어 오류로 남깁니다.
+- 코드 생성기(`insert.zig`, `build.zig`, `fkey.zig`)가 제약의 `OP_Halt`/`OP_HaltIfNull`을 만들 때 방언의 `Constraint.message`가 메시지와 `ErrorState`를 정합니다. 그것을 P4에 넣고(SQLSTATE, 번호, 메시지) P5에 `HaltP5.dialect`를 켭니다. 실행은 위반했을 때만 P4를 풀어 오류로 남깁니다.
 - 메시지가 보이는 값(MariaDB `Duplicate entry '1'`, SQL Server `The duplicate key value is (1).`, PostgreSQL의 키와 행)은 P4가 적어 둔 레지스터에 있고, 메시지의 `dialect.value_mark` 자리에 `Constraint.value_separator`로 이어 씁니다. 방언이 값을 스스로 쓰지 않으면(`Constraint.value_text`가 없음) SQLite의 텍스트입니다.
 - 외래 키는 대개 문장이 끝날 때 카운터(`OP_FkCounter`)로 찾습니다. 위반을 세는 `OP_FkCounter`의 P4에 그 제약의 오류를 넣고, 카운터를 0에서 올린 것(`Vdbe.xq_fk_error`)을 문장의 오류로 씁니다. PostgreSQL처럼 처음 실패한 행이고, 메시지는 그때 한 번만 씁니다. 다른 문장(COMMIT)이 찾은 지연 제약은 `Constraint.foreign_key`입니다.
 - SQLite가 남기지 않는 제약 이름(UNIQUE, PRIMARY KEY, FOREIGN KEY에 사용자가 준 이름)은 CREATE TABLE이 `xq_catalog`의 `constraint:<종류>:<열>` 키에 적고(`lower.zig`), DML을 컴파일할 때 한 곳(`constraint.tableEntries()`)에서 읽습니다. 유일 인덱스는 인덱스 이름, CHECK는 SQLite가 남긴 이름을 씁니다. 이름이 없으면 방언이 짓습니다(PostgreSQL `t_a_key`, MariaDB `t_ibfk_1` ...).
@@ -517,10 +517,16 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 | `Addr` | 명령의 주소. `addr.plus(n)`, 다음 명령의 주소는 `aux.here()` |
 | `Jump` | `Label`이거나 `Addr`인 점프 대상. 둘 중 하나를 담아 두는 변수와 필드에 씀(`Jump.of()`). `.none`(0)은 점프 없음 |
 
-- **피연산자 표**: `operand.kinds(op)`가 opcode마다 P1·P2·P3가 무엇인지(`int`, `reg`, `cursor`, `jump`, `addr`) 정합니다. 컴파일 시점에 opcode 속성(`OPFLG_JUMP`, `IN1`~`OUT3`)과 맞춰 봅니다. `addr`은 P2가 아닌 자리의 주소(`OP_Jump`의 P1·P3, `OP_InitCoroutine`의 P3, `OP_Return`의 P2 ...)로, 라벨을 넣으면 풀리지 않으므로 `Addr`만 받습니다. 어떤 쓰임에서만 레지스터인 피연산자(`OP_Clear`의 P3, `P2ISREG`의 P2, `OP_IsType`의 P3)는 `int`입니다.
+- **opcode 표**: `src/vdbe/opcodes.zig`는 손으로 고치는 소스입니다(C 소스에서 다시 만들지 않습니다). opcode 하나는 `OP`의 값 하나와 `table`의 한 줄이고, 거기에 그 opcode에 대해 아는 것이 모두 있습니다.
+  - `op.kinds()`: P1·P2·P3가 무엇인지(`int`, `reg`, `cursor`, `jump`, `addr`).
+  - `op.props()`: C의 `OPFLG_*`를 같은 비트에 둔 `packed struct(u8)`(`jump`, `in1`~`in3`, `out2`, `out3`, `ncycle`, `jump0`). `jump`는 따로 적지 않고 P2가 `jump`인 것에서 정해집니다. 속성이 말하는 레지스터(`in1`~`out3`)가 `reg`인지 컴파일 시점에 맞춰 봅니다.
+  - `opens_table`(`bytecode()`의 tables_used에 나오는 opcode)과 `access`(문장을 읽는 문장·쓰는 문장으로 만드는 opcode, `resolveP2Values()`).
+  - `p5`: P5가 무엇인지(`p5.Family`). 대부분은 수(인자 개수, 데이터베이스 번호, 정수의 폭 ...)이고, 플래그인 opcode는 그 묶음의 `packed struct(u16)`입니다(`src/vdbe/p5.zig`). C의 `OPFLAG_*`·`SQLITE_JUMPIFNULL` 같은 상수와 비트 위치가 같아서 EXPLAIN에 나오는 P5 숫자는 그대로입니다. `InsertP5`(`OP_Insert`, `OP_IdxInsert`), `DeleteP5`, `OpenP5`(`OP_OpenRead`, `OP_OpenWrite`, `OP_ReopenIdx`), `ColumnP5`(`OP_Column`의 `arg`: `length`/`typeof`/`octet_length`, `OP_VColumn`의 `nochng`), `CmpP5`(`OP_Eq`~`OP_Ge`: 친화성과 `jump_if_null`, `null_eq`), `CompareP5`(`OP_Compare`), `CopyP5`(`OP_Copy`), `HaltP5`(제약의 종류와 `dialect`), `StmtStatus`(`OP_Next`·`OP_Prev`·`OP_SorterNext`가 세는 `sqlite3_stmt_status()` 카운터)입니다. 처리기는 그 opcode의 P5 타입으로 명령을 받고(`OpWithP5(shape, InsertP5)`, 다르면 컴파일되지 않음), 코드 생성기는 `aux.changeP5(v, vi.InsertP5{ .append = true })`처럼 넘깁니다. `changeP5`는 값의 타입이 마지막 명령의 opcode의 것인지 단언합니다. 수인 P5는 정수로 넘깁니다.
+  - 이름은 `@tagName`입니다(`op.name()`). 번호는 SQLite 3.54.1의 것 그대로 두고, 코드가 기대는 것만 컴파일 시점에 확인합니다. TK_와 같은 번호인 opcode(`OP.fromTk()`), 그 순서로 이어진 `OP_Ne`~`OP_Ge`(`compareIndex()`)와 `OP_SeekLT`~`OP_SeekGT`(`seekIsGeOrGt()`)입니다. 새 opcode는 다음 빈 번호를 받고, `table`과 `exec.zig`의 처리기 표에 넣지 않으면 컴파일되지 않습니다.
+- **피연산자 표**: `op.kinds()`의 `addr`은 P2가 아닌 자리의 주소(`OP_Jump`의 P1·P3, `OP_InitCoroutine`의 P3, `OP_Return`의 P2 ...)로, 라벨을 넣으면 풀리지 않으므로 `Addr`만 받습니다. 어떤 쓰임에서만 레지스터인 피연산자(`OP_Clear`의 P3, `OpenP5.p2_is_reg`일 때의 P2, `OP_IsType`의 P3)는 `int`입니다.
 - **명령 내기**: `aux.emit(v, .Column, .{ cur, col, reg })`가 인자의 타입을 표와 대조합니다. 레지스터 자리에 커서를 넘기면 컴파일 오류입니다. 뒤의 피연산자는 생략하면 0이고, 리터럴 0은 "쓰지 않음"으로 받습니다. 커서 자리만은 예외입니다. 커서 0도 쓰이는 커서라서 0을 쓰거나 생략할 수 없고 `Cursor.first`를 넘깁니다(`sqlite_schema`를 여는 `openSchemaTable()`, AUTOINCREMENT의 `sqlite_sequence`, `PRAGMA foreign_key_check`의 검사할 테이블, `sqlite3_blob_open()`처럼 커서를 할당하지 않고 0에 여는 곳).
   - P4가 있으면 `emit4`(P4 값), `emitInt`(정수), `emitStr`(복사한 문자열)입니다. 문자열을 레지스터에 넣는 `OP_String8`은 `aux.loadString()`입니다.
-  - 컴파일할 때 고르는 opcode(`OP_NotExists`냐 `OP_NotFound`냐)는 `emitAny(v, op, shape, .{...})`와 `emitAny4`·`emitAnyInt`입니다. `shape`는 후보 opcode들이 함께 가지는 피연산자 종류이고, 실행 때 `kinds(op)`와 같은지 단언합니다. 후보마다 종류가 다르면 opcode로 `switch`해 따로 냅니다(`where_code.zig`의 `emitRangeStart()`).
+  - 컴파일할 때 고르는 opcode(`OP_NotExists`냐 `OP_NotFound`냐)는 `emitAny(v, op, shape, .{...})`와 `emitAny4`·`emitAnyInt`입니다. `shape`는 후보 opcode들이 함께 가지는 피연산자 종류이고, 실행 때 `op.kinds()`와 같은지 단언합니다. 후보마다 종류가 다르면 opcode로 `switch`해 따로 냅니다(`where_code.zig`의 `emitRangeStart()`).
   - SQLite의 `sqlite3VdbeAddOpList()`로 짠 작은 고정 프로그램(`PRAGMA default_cache_size`·`auto_vacuum`·헤더 값·`integrity_check`의 끝, AUTOINCREMENT, `sqlite3_blob_open()`)도 `emit`과 라벨로 냅니다.
 - **타입 없는 층**: `aux.emitRaw(v, op, p1, p2, p3)`는 피연산자가 모두 `i32`이고 opcode를 실행 때 받습니다. 이미 낸 명령을 복사하는 곳에만 씁니다.
   - `insert.zig`의 재검사: 이미 낸 충돌 검사 명령을 opcode와 상관없이 복사합니다(P4는 `changeP4`로).
@@ -549,10 +555,10 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
   - `OP_Explain`의 P1·P2로 쓰는 `Parse.addr_explain`과 `aux.explainParent()`, `sqlite3_stmt_scanstatus()`의 기록(`vi.ScanStatus`).
   - 이미 낸 명령의 피연산자(`aux.getOp()`과 `opsBetween()`의 `p1`~`p3`)를 읽거나 바꾸는 곳, 텍스트에 넣는 레지스터 번호(nested parse의 `#%d`, 방언 제약 오류의 레지스터 목록), `Index.tnum`에 잠깐 넣어 두는 주소.
 - 새 코드는 `emit` 계열을 씁니다. 이 변경들은 바이트코드를 바꾸지 않았습니다(`xqt planner`의 기록과 일치).
-- **실행기**: 명령 처리기(`src/vdbe/exec/*.zig`)도 같은 표를 씁니다. 처리기는 명령을 `vi.OpOf(shape)`로 받고, 그 P1·P2·P3는 `shape`에 따라 `Reg`·`Cursor`·`Jump`·`Addr`·`i32`입니다(`opGosub(e, op: *OpOf(.{ .reg, .jump, .int }))`). `exec.zig`가 처리기마다 그것이 맡은 opcode들의 `kinds(op)`와 `shape`가 같은지 컴파일 시점에 맞춰 보므로, 레지스터 자리를 커서로 읽는 처리기도, 처리기가 읽는 것과 다른 표도 컴파일되지 않습니다.
+- **실행기**: 명령 처리기(`src/vdbe/exec/*.zig`)도 같은 표를 씁니다. 처리기는 명령을 `vi.OpOf(shape)`로 받고, 그 P1·P2·P3는 `shape`에 따라 `Reg`·`Cursor`·`Jump`·`Addr`·`i32`입니다(`opGosub(e, op: *OpOf(.{ .reg, .jump, .int }))`). `exec.zig`가 처리기마다 그것이 맡은 opcode들의 `op.kinds()`와 `shape`가 같은지 컴파일 시점에 맞춰 보므로, 레지스터 자리를 커서로 읽는 처리기도, 처리기가 읽는 것과 다른 표도 컴파일되지 않습니다.
   - 레지스터와 커서는 `e.reg(op.p3)`, `e.regsFrom(op.p2)`, `e.regRange(op.p2, n)`, `e.csr(op.p1)`, `e.csrIfOpen(op.p1)`로 꺼냅니다. 앞뒤 명령의 피연산자는 `e.opAt(.SeekGE, e.pc + 1)`처럼 그 opcode의 타입으로 읽습니다.
   - 피연산자 종류가 다른 opcode를 함께 맡는 처리기(`OP_Last`와 `OP_SeekEnd`, `OP_IdxRowid`와 `OP_DeferredSeek`)는 `op: anytype`과 opcode를 받아 opcode마다 그 종류로 받고, 피연산자를 읽지 않는 처리기(`OP_Noop` ...)는 `OpOf(null)`을 받습니다.
-  - 어떤 쓰임에서만 레지스터인 `int` 피연산자는 처리기가 그 쓰임을 가리는 자리(`P2ISREG`를 본 뒤)에서 `Reg.from()`으로 바꿉니다.
+  - 어떤 쓰임에서만 레지스터인 `int` 피연산자는 처리기가 그 쓰임을 가리는 자리(`p2_is_reg`를 본 뒤)에서 `Reg.from()`으로 바꿉니다.
 
 ## VFS
 

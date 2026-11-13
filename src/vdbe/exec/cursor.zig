@@ -19,6 +19,9 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const OpOf = vi.OpOf;
+const OpWithP5 = vi.OpWithP5;
+const OpenP5 = vi.OpenP5;
+const StmtStatus = vi.StmtStatus;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const OP = vi.OP;
@@ -136,13 +139,13 @@ fn newBox(cache: []u32, kind: VdbeCursor.Kind) vi.CursorBox {
 
 // ================================================================ opening
 
-pub fn opReopenIdx(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+pub fn opReopenIdx(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, OpenP5)) Error!Flow {
     if (e.csrIfOpen(op.p1)) |c| switch (c.kind) {
         .btree => |*b| if (b.pgno_root == @as(u32, @intCast(op.p2))) {
             // Already open on this index: the position is forgotten
             // (sqlite3BtreeClearCursor()), so that OP_SeekScan seeks.
             b.cursor.clear();
-            b.seek_eq = op.p5 & vi.OPFLAG.SEEKEQ != 0;
+            b.seek_eq = op.p5.seek_eq;
             return .next;
         },
         else => {},
@@ -151,10 +154,10 @@ pub fn opReopenIdx(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
 }
 
 /// OP_OpenRead and OP_OpenWrite.
-pub fn opOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int }), comptime opc: OP) Error!Flow {
+pub fn opOpen(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, OpenP5), comptime opc: OP) Error!Flow {
     const v = e.v;
     const db = e.db;
-    if (v.expired == 1) return e.abort(RC.ABORT_ROLLBACK);
+    if (v.expired == .now) return e.abort(RC.ABORT_ROLLBACK);
     var p2: u32 = @intCast(op.p2);
     const i_db = op.p3;
     const pdb = &db.dbs.items[@intCast(i_db)];
@@ -163,8 +166,8 @@ pub fn opOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int }), comptime opc: OP) E
     if (opc == .OpenWrite) {
         write = true;
         if (pdb.schema.file_format < v.min_write_file_format) v.min_write_file_format = pdb.schema.file_format;
-        if (op.p5 & vi.OPFLAG.P2ISREG != 0) {
-            // OPFLAG_P2ISREG: P2 is the register of the root page.
+        if (op.p5.p2_is_reg) {
+            // P2 is the register of the root page.
             const in2 = e.reg(.from(op.p2));
             mem.integerify(in2);
             p2 = @intCast(in2.u.i);
@@ -186,8 +189,8 @@ pub fn opOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int }), comptime opc: OP) E
     c.null_row = true;
     c.is_ordered = true;
     const b = &c.kind.btree;
-    b.seek_eq = op.p5 & vi.OPFLAG.SEEKEQ != 0;
-    if (op.p5 & vi.OPFLAG.BULKCSR != 0) b.cursor.setBulkLoad(true);
+    b.seek_eq = op.p5.seek_eq;
+    if (op.p5.bulk_csr) b.cursor.setBulkLoad(true);
     return .next;
 }
 
@@ -348,8 +351,7 @@ pub fn opSeek(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc: OP) 
             if (b.seek_eq) eq_only = true;
             var r: vi.UnpackedRecord = .{
                 .key_info = c.key_info.?,
-                .mem = e.regsFrom(op.p3),
-                .n_field = @intCast(op.p4As(.int32)),
+                .fields = e.regRange(op.p3, @intCast(op.p4As(.int32))),
                 .default_rc = if (oc == .SeekLE or oc == .SeekGT) -1 else 1,
             };
             const o = try serial.indexMoveto(cur, &r);
@@ -382,8 +384,7 @@ pub fn opSeekScan(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     var n_step = op.p1;
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
-        .mem = e.regsFrom(next_op.p3),
-        .n_field = @intCast(next_op.p4As(.int32)),
+        .fields = e.regRange(next_op.p3, @intCast(next_op.p4As(.int32))),
         .default_rc = 0,
     };
     while (true) {
@@ -426,7 +427,7 @@ pub fn opFound(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc: OP)
     const n_field: u16 = @intCast(op.p4As(.int32));
     const order = if (n_field > 0) order: {
         // The key is n_field unpacked registers.
-        var r: vi.UnpackedRecord = .{ .key_info = c.key_info.?, .mem = regs, .n_field = n_field, .default_rc = 0 };
+        var r: vi.UnpackedRecord = .{ .key_info = c.key_info.?, .fields = regs[0..n_field], .default_rc = 0 };
         break :order try serial.indexMoveto(cur, &r);
     } else order: {
         // The key is a record in one register.
@@ -600,7 +601,7 @@ pub fn opIfSizeBetween(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flo
 
 /// OP_Sort and OP_SorterSort.
 pub fn opSort(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
-    e.v.counters[vi.STMTSTATUS.SORT] += 1;
+    e.v.counters.getPtr(.sort).* += 1;
     return opRewind(e, op);
 }
 
@@ -626,19 +627,19 @@ pub fn opIfEmpty(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
     return if (empty) .jump_p2 else .next;
 }
 
-pub fn opSorterNext(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opSorterNext(e: *Exec, op: *OpWithP5(.{ .cursor, .jump, .int }, StmtStatus)) Error!Flow {
     const c = e.csr(op.p1);
     const more = try sorter.next(e.db, c);
     return nextTail(e, op.p5, c, more);
 }
 
-pub fn opPrev(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opPrev(e: *Exec, op: *OpWithP5(.{ .cursor, .jump, .int }, StmtStatus)) Error!Flow {
     const c = e.csr(op.p1);
     const more = try c.kind.btree.cursor.previous();
     return nextTail(e, op.p5, c, more);
 }
 
-pub fn opNext(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opNext(e: *Exec, op: *OpWithP5(.{ .cursor, .jump, .int }, StmtStatus)) Error!Flow {
     const c = e.csr(op.p1);
     const more = try c.kind.btree.cursor.next();
     return nextTail(e, op.p5, c, more);
@@ -646,11 +647,11 @@ pub fn opNext(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
 
 /// The next_tail of OP_Next, OP_Prev and OP_SorterNext, whose P5 is the
 /// counter of sqlite3_stmt_status() a step adds to.
-fn nextTail(e: *Exec, p5: u16, c: *VdbeCursor, more: bool) Flow {
+fn nextTail(e: *Exec, counter: StmtStatus, c: *VdbeCursor, more: bool) Flow {
     c.cache_status = vi.cache_stale;
     if (more) {
         c.null_row = false;
-        e.v.counters[p5] +%= 1;
+        e.v.counters.getPtr(counter).* +%= 1;
         return .jump_p2_check;
     }
     c.null_row = true;
@@ -696,8 +697,7 @@ pub fn opIdxCompare(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc
     const c = e.csr(op.p1);
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
-        .mem = e.regsFrom(op.p3),
-        .n_field = @intCast(op.p4As(.int32)),
+        .fields = e.regRange(op.p3, @intCast(op.p4As(.int32))),
         .default_rc = if (opc == .IdxLE or opc == .IdxGT) -1 else 0,
     };
     var res = try serial.idxKeyCompare(e.db, c, &r);
@@ -719,8 +719,7 @@ pub fn opIFindKey(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Flow {
     const idx = op.p4As(.index);
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
-        .mem = e.regsFrom(op.p3),
-        .n_field = idx.n_column,
+        .fields = e.regRange(op.p3, idx.n_column),
     };
     const res = serial.findIndexKey(c.kind.btree.cursor, idx, &r, true) catch return .jump_p2;
     if (res != 0) return .jump_p2;

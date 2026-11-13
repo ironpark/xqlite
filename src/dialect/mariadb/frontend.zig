@@ -133,7 +133,7 @@ pub fn statement(s: *Parser) Error!void {
             try s.c.expectOp("=");
             _ = try s.anyName();
         }
-        ir.stmt.setExplain(s.p, 2);
+        ir.stmt.setExplain(s.p, .query_plan);
         return statement(s);
     }
     if (t.isKw("LOCK") or t.isKw("UNLOCK")) return session.lockTables(s);

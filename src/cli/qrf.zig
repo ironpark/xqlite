@@ -1637,16 +1637,16 @@ fn initialize(p: *Qrf) void {
     p.mx_height = if (s.line_limit <= 0) std.math.maxInt(i32) else s.line_limit;
     if (s.style == .auto) {
         s.style = switch (api.stmtIsExplain(p.stmt)) {
-            0 => .box,
-            1 => .explain,
-            else => .eqp,
+            .none => .box,
+            .explain => .explain,
+            .query_plan => .eqp,
         };
     }
     // sqlite3_stmt_explain() is not ported, so a statement can only be
     // rendered in the EXPLAIN style it was prepared with; the statistics
     // styles need scan status, which is not ported either.
-    if ((s.style == .eqp and api.stmtIsExplain(p.stmt) != 2) or
-        (s.style == .explain and api.stmtIsExplain(p.stmt) != 1) or
+    if ((s.style == .eqp and api.stmtIsExplain(p.stmt) != .query_plan) or
+        (s.style == .explain and api.stmtIsExplain(p.stmt) != .explain) or
         s.style == .stats or s.style == .stats_est or s.style == .stats_vm)
     {
         s.style = .box;

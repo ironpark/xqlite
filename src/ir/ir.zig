@@ -117,9 +117,9 @@ pub const stmt = struct {
         util.errorMsgState(p, t.z, .of("42601"), "near \"{s}\": syntax error", .{t.slice()});
     }
 
-    /// EXPLAIN (1) or EXPLAIN QUERY PLAN (2) of the statement: set before
-    /// the statement builder runs (parse.y's `explain` rule).
-    pub fn setExplain(p: *Parse, mode: u8) void {
+    /// EXPLAIN or EXPLAIN QUERY PLAN of the statement: set before the
+    /// statement builder runs (parse.y's `explain` rule).
+    pub fn setExplain(p: *Parse, mode: int.Explain) void {
         p.explain = mode;
     }
 

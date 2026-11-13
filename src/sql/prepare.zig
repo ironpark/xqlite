@@ -126,7 +126,7 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
         db.init.az_init = .{ argv[0] orelse "", argv[1] orelse "", argv[2] orelse "" };
         var stmt: ?*Vdbe = null;
         var tail: [:0]const u8 = "";
-        prepareInternal(db, argv[4].?, 0, null, &stmt, &tail) catch {};
+        prepareInternal(db, argv[4].?, .{}, null, &stmt, &tail) catch {};
         const rc = db.err_code;
         db.init.i_db = saved_i_db;
         if (rc != RC.OK) {
@@ -399,7 +399,7 @@ pub fn parseObjectResetLookaside(p: *Parse) void {
 /// statement (null for blank input) goes to `stmt` and the text after it
 /// to `tail`. The result is also left in the connection, as the error
 /// code (db.err_code, possibly an extended code) and message.
-fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, stmt: *?*Vdbe, tail: *[:0]const u8) int.Error!void {
+fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: int.PrepFlags, old: ?*Vdbe, stmt: *?*Vdbe, tail: *[:0]const u8) int.Error!void {
     stmt.* = null;
     var arena_state = std.heap.ArenaAllocator.init(db.gpa);
     defer arena_state.deinit();
@@ -419,7 +419,7 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
         return error.OutOfMemory;
     }
     // A long-lived statement keeps out of lookaside.
-    if (prep_flags & aux.PREPARE_PERSISTENT != 0) {
+    if (prep_flags.persistent) {
         p.disable_lookaside += 1;
         @import("malloc.zig").disableLookaside(db);
     }
@@ -481,7 +481,7 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
 
 /// Port of sqlite3LockAndPrepare(): prepare, retrying after a schema
 /// change was detected.
-fn lockAndPrepare(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, stmt: *?*Vdbe, tail: *[:0]const u8) i32 {
+fn lockAndPrepare(db: *Sqlite3, sql: [:0]const u8, prep_flags: int.PrepFlags, old: ?*Vdbe, stmt: *?*Vdbe, tail: *[:0]const u8) i32 {
     var rc: i32 = RC.OK;
     var cnt: u32 = 0;
     stmt.* = null;
@@ -511,20 +511,22 @@ fn lockAndPrepare(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, 
 /// first statement of `sql`, keeping its text so a schema change
 /// reprepares it. `stmt` is null for blank input; `tail` (if given)
 /// receives the rest of `sql`.
-pub fn prepareV3(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
+pub fn prepareV3(db: *Sqlite3, sql: []const u8, prep_flags: int.PrepFlags, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
     return prepareFlags(db, sql, v3Flags(prep_flags), stmt, tail);
 }
 
-/// The flags stored for sqlite3_prepare_v2() and _v3(): PREPARE_SAVESQL
-/// and those of `prep_flags` the caller may give.
-fn v3Flags(prep_flags: u8) u8 {
-    return aux.PREPARE_SAVESQL | (prep_flags & aux.PREPARE_MASK);
+/// The flags stored for sqlite3_prepare_v2() and _v3(): `prep_flags`
+/// with save_sql.
+fn v3Flags(prep_flags: int.PrepFlags) int.PrepFlags {
+    var flags = prep_flags;
+    flags.save_sql = true;
+    return flags;
 }
 
 /// prepareV3() with the flags as stored in the statement: without
-/// PREPARE_SAVESQL, the legacy sqlite3_prepare(), whose statement is not
+/// save_sql, the legacy sqlite3_prepare(), whose statement is not
 /// compiled again on a schema change but fails.
-pub fn prepareFlags(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
+pub fn prepareFlags(db: *Sqlite3, sql: []const u8, prep_flags: int.PrepFlags, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
     stmt.* = null;
     // The parser needs a NUL-terminated copy.
     if (sql.len > @as(usize, @intCast(db.limit(.sql_length)))) {
@@ -544,12 +546,12 @@ pub fn prepareFlags(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe
 
 /// prepareV3() for NUL-terminated text, which is parsed in place (as
 /// sqlite3_prepare_v3() with nByte < 0).
-pub fn prepareV3Z(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[:0]const u8) i32 {
+pub fn prepareV3Z(db: *Sqlite3, sql: [:0]const u8, prep_flags: int.PrepFlags, stmt: *?*Vdbe, tail: ?*[:0]const u8) i32 {
     return prepareFlagsZ(db, sql, v3Flags(prep_flags), stmt, tail);
 }
 
 /// prepareFlags() for NUL-terminated text.
-pub fn prepareFlagsZ(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[:0]const u8) i32 {
+pub fn prepareFlagsZ(db: *Sqlite3, sql: [:0]const u8, prep_flags: int.PrepFlags, stmt: *?*Vdbe, tail: ?*[:0]const u8) i32 {
     var t: [:0]const u8 = "";
     const rc = lockAndPrepare(db, sql, prep_flags, null, stmt, &t);
     if (tail) |out| out.* = t;
@@ -557,40 +559,38 @@ pub fn prepareFlagsZ(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, stmt: *?*V
 }
 
 pub fn prepareV2(db: *Sqlite3, sql: []const u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
-    return prepareV3(db, sql, 0, stmt, tail);
+    return prepareV3(db, sql, .{}, stmt, tail);
 }
 
 /// prepareV3() in the language `lang` whatever the connection's (and the
 /// statement keeps it when recompiled): Lang.sqlite for SQL that the
 /// engine or the catalog generates (xqlite; no C counterpart).
-pub fn prepareLang(db: *Sqlite3, sql: []const u8, lang: dialect.Lang, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
+pub fn prepareLang(db: *Sqlite3, sql: []const u8, lang: dialect.Lang, prep_flags: int.PrepFlags, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
     const saved = dialect.swapLang(db, lang);
     defer _ = dialect.swapLang(db, saved);
     return prepareV3(db, sql, prep_flags, stmt, tail);
 }
 
-/// Port of sqlite3_stmt_explain(): switch `v` between running normally
-/// (0), as EXPLAIN (1) and as EXPLAIN QUERY PLAN (2), recompiling it when
-/// its program cannot be listed that way as it is.
-pub fn stmtExplain(v: *Vdbe, mode: i32) i32 {
+/// Port of sqlite3_stmt_explain(): switch `v` between running normally,
+/// as EXPLAIN and as EXPLAIN QUERY PLAN, recompiling it when its program
+/// cannot be listed that way as it is.
+pub fn stmtExplain(v: *Vdbe, mode: int.Explain) i32 {
     var rc: i32 = RC.OK;
     if (v.explain == mode) {
         rc = RC.OK;
-    } else if (mode < 0 or mode > 2) {
-        rc = RC.ERROR;
-    } else if (v.prep_flags & aux.PREPARE_SAVESQL == 0) {
+    } else if (!v.prep_flags.save_sql) {
         rc = RC.ERROR;
     } else if (v.e_vdbe_state != .ready) {
         rc = RC.BUSY;
-    } else if (v.mem.len >= 10 and (mode != 2 or v.have_eqp_ops)) {
+    } else if (v.mem.len >= 10 and (mode != .query_plan or v.have_eqp_ops)) {
         // No recompile needed.
-        v.explain = @intCast(mode);
+        v.explain = mode;
     } else {
-        v.explain = @intCast(mode);
+        v.explain = mode;
         rc = reprepare(v);
-        v.have_eqp_ops = mode == 2;
+        v.have_eqp_ops = mode == .query_plan;
     }
-    v.n_res_column = if (v.explain != 0) 12 - 4 * @as(u16, v.explain) else v.n_res_alloc;
+    v.n_res_column = if (v.explain != .none) @intCast(v.explain.columnNames().len) else @intCast(v.nColNames());
     return rc;
 }
 
@@ -603,7 +603,7 @@ pub fn stmtExplain(v: *Vdbe, mode: i32) i32 {
 /// has them.
 pub fn columnMetadata(v: *Vdbe) bool {
     if (v.col_meta.len > 0) return true;
-    if (v.n_res_column == 0 or v.explain != 0) return false;
+    if (v.n_res_column == 0 or v.explain != .none) return false;
     const db = v.db;
     const sql = v.sql orelse return false;
     const saved_meta = db.col_metadata;
@@ -627,7 +627,7 @@ pub fn columnMetadata(v: *Vdbe) bool {
     if (lockAndPrepare(db, sql, v.prep_flags, v, &new, &tail) != RC.OK) return false;
     const n = new orelse return false;
     defer _ = aux.finalize(n);
-    if (n.col_meta.len == 0 or n.n_res_alloc != v.n_res_alloc) return false;
+    if (n.col_meta.len == 0 or n.nColNames() != v.nColNames()) return false;
     const meta = v.alloc().alloc(vi.Mem, n.col_meta.len) catch return false;
     // The names are in buffers of their own (aux.setColName()).
     for (meta, n.col_meta) |*to, *from| {

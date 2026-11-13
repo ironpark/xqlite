@@ -43,7 +43,6 @@ const Reg = aux.operand.Reg;
 const Cursor = aux.operand.Cursor;
 const Addr = aux.operand.Addr;
 const OP = vi.OP;
-const OPFLAG = vi.OPFLAG;
 
 /// SQLITE_Stat4 of SQLITE_TESTCTRL_OPTIMIZATIONS: OP_Count estimates the
 /// rows when it is off.
@@ -71,7 +70,7 @@ fn openStatTable(p: *Parse, i_db: usize, stat_cur: Cursor, where: ?[]const u8, w
     const v = build.getVdbe(p) orelse return;
     const pdb = &db.dbs.items[i_db];
     var roots: [tables.len]u32 = @splat(0);
-    var create_tbl: [tables.len]u16 = @splat(0);
+    var create_tbl: [tables.len]vi.OpenP5 = @splat(.{});
 
     // Create new statistic tables if they do not exist, or clear them if
     // they do already exist.
@@ -95,7 +94,7 @@ fn openStatTable(p: *Parse, i_db: usize, stat_cur: Cursor, where: ?[]const u8, w
             // table in register u1.cr.reg_root, for the OpenWrite below.
             build.nestedParse(p, "CREATE TABLE %Q.%s(%s)", &.{ .{ .str = pdb.name }, .{ .str = st.name }, .{ .str = st.cols } });
             roots[i] = @bitCast(p.u1.cr.reg_root.int());
-            create_tbl[i] = OPFLAG.P2ISREG;
+            create_tbl[i] = .{ .p2_is_reg = true };
         }
     }
 
@@ -389,7 +388,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
                 _ = aux.emit(v, .Integer, .{ i, reg_chng });
                 _ = aux.emit(v, .Column, .{ idx_cur, i, reg_temp });
                 g.* = aux.emit4(v, .Ne, .{ reg_temp, 0, reg_prev.at(i) }, if (cs) |c| .{ .collseq = c } else .notused);
-                aux.changeP5(v, vi.SQLITE_NULLEQ);
+                aux.changeP5(v, vi.CmpP5{ .null_eq = true });
             }
             _ = aux.emit(v, .Integer, .{ n_col_test, reg_chng });
             _ = aux.emit(v, .Goto, .{ 0, end_distinct_test });
@@ -437,7 +436,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         _ = aux.emitStr(v, .MakeRecord, .{ reg_tabname, 3, reg_temp }, "BBB");
         _ = aux.emit(v, .NewRowid, .{ stat_cur, reg_new_rowid });
         _ = aux.emit(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid });
-        aux.changeP5(v, OPFLAG.APPEND);
+        aux.changeP5(v, vi.InsertP5{ .append = true });
 
         // End of analysis.
         if (addr_goto_end) |a| aux.landHere(v, a);
@@ -452,7 +451,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         _ = aux.emitStr(v, .MakeRecord, .{ reg_tabname, 3, reg_temp }, "BBB");
         _ = aux.emit(v, .NewRowid, .{ stat_cur, reg_new_rowid });
         _ = aux.emit(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid });
-        aux.changeP5(v, OPFLAG.APPEND);
+        aux.changeP5(v, vi.InsertP5{ .append = true });
         aux.landHere(v, j_zero_rows);
     }
 }

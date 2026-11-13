@@ -234,7 +234,7 @@ pub fn rowToDbEnc(v: *Vdbe) void {
     const e = extOf(v.db) orelse return;
     if (!e.utf16 or v.db.enc != vi.ENC.UTF8) return;
     const row = v.result_row orelse return;
-    for (row[0..v.n_res_column]) |*m| mem.toDbEnc(m);
+    for (row) |*m| mem.toDbEnc(m);
 }
 
 pub fn extOf(db: ?*Handle) ?*Ext {

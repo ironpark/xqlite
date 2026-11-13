@@ -108,7 +108,7 @@ pub fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.Comp
         const q = try dml.merge(ps, m, &plan);
         if (parsed == .explain) {
             // EXPLAIN MERGE: the plans of the steps, then the query's.
-            ir.stmt.setExplain(p, 2);
+            ir.stmt.setExplain(p, .query_plan);
             try plan.explain(ps);
             if (q) |x| {
                 try jtype.statement(ps, x);
@@ -152,7 +152,7 @@ pub fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.Comp
     const explaining = stmt == .explain;
     if (plan.active()) {
         if (explaining) {
-            ir.stmt.setExplain(p, 2);
+            ir.stmt.setExplain(p, .query_plan);
             try plan.explain(ps);
         } else try plan.begin(p);
     }

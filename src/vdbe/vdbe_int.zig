@@ -5,6 +5,16 @@ const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
 const btree = @import("xqlite_storage").btree;
 pub const opcodes = @import("opcodes.zig");
+pub const p5 = @import("p5.zig");
+pub const InsertP5 = p5.InsertP5;
+pub const DeleteP5 = p5.DeleteP5;
+pub const OpenP5 = p5.OpenP5;
+pub const ColumnP5 = p5.ColumnP5;
+pub const CmpP5 = p5.CmpP5;
+pub const CompareP5 = p5.CompareP5;
+pub const CopyP5 = p5.CopyP5;
+pub const HaltP5 = p5.HaltP5;
+pub const StmtStatus = p5.StmtStatus;
 const operand = @import("operand.zig");
 const flags = @import("xqlite_base").flags;
 
@@ -213,15 +223,14 @@ pub const KeyInfo = struct {
 /// A record parsed into fields, for comparisons (UnpackedRecord).
 pub const UnpackedRecord = struct {
     key_info: *KeyInfo,
-    mem: [*]Mem,
-    /// Cache of mem[0] for the specialized comparators.
+    /// The fields compared (C: aMem, nField). serial.recordUnpack()
+    /// decodes up to fields.len of them and leaves it the number decoded.
+    fields: []Mem,
+    /// Cache of fields[0] for the specialized comparators.
     u: extern union { z: ?[*]u8, i: i64 } = .{ .i = 0 },
     n: i32 = 0,
-    n_field: u16,
     /// Result when the keys are equal.
     default_rc: i8 = 0,
-    /// Corruption (or OOM) detected while comparing (C: errCode).
-    err: ?error{ Corrupt, OutOfMemory } = null,
     /// Results for lhs < rhs and lhs > rhs (inverted for DESC b-trees).
     r1: i8 = -1,
     r2: i8 = 1,
@@ -283,6 +292,18 @@ pub const Op = extern struct {
         const a = op.p4As(.intarray);
         return a[1..][0..a[0]];
     }
+
+    /// P5 as a `T`, which must be the type of the opcode's (OP.P5()).
+    pub inline fn p5As(op: *const Op, comptime T: type) T {
+        std.debug.assert(op.opcode.info().p5 == comptime p5.Family.of(T));
+        return p5.from(T, op.p5);
+    }
+
+    /// Set P5 to `x`, a value of the type of the opcode's (OP.P5()).
+    pub inline fn setP5(op: *Op, x: anytype) void {
+        std.debug.assert(op.opcode.info().p5 == comptime p5.Family.of(@TypeOf(x)));
+        op.p5 = p5.int(x);
+    }
 };
 
 comptime {
@@ -290,16 +311,25 @@ comptime {
 }
 
 /// An instruction as the handler of its opcode sees it (exec.zig): an Op
-/// whose P1, P2 and P3 have the types of `shape`, the operand.kinds() of
+/// whose P1, P2 and P3 have the types of `shape`, the OP.kinds() of
 /// the opcode (operand.Reg, operand.Cursor, operand.Jump, operand.Addr,
 /// or i32 for a number), so that reading an operand as something it is
 /// not does not compile. With a null shape the operands are `Unread`:
-/// for a handler that does not read them, whatever its opcodes are.
+/// for a handler that does not read them, whatever its opcodes are. P5
+/// is a number; OpWithP5() is the instruction of an opcode whose P5 is
+/// a set of flags.
 pub fn OpOf(comptime shape: ?[3]operand.Kind) type {
+    return OpWithP5(shape, u16);
+}
+
+/// OpOf(shape) with P5 of type `P5`: the OP.P5() of the opcode, a
+/// packed struct of its flags (p5.zig), so that a handler reads only the
+/// flags of its own opcode.
+pub fn OpWithP5(comptime shape: ?[3]operand.Kind, comptime P5: type) type {
     return extern struct {
         opcode: OP,
         p4type: P4Type,
-        p5: u16,
+        p5: P5,
         p1: OperandOf(shape, 0),
         p2: OperandOf(shape, 1),
         p3: OperandOf(shape, 2),
@@ -309,6 +339,8 @@ pub fn OpOf(comptime shape: ?[3]operand.Kind) type {
 
         /// What P1, P2 and P3 are (null: not read).
         pub const kinds = shape;
+        /// What P5 is.
+        pub const P5Type = P5;
 
         comptime {
             std.debug.assert(@sizeOf(Self) == @sizeOf(Op));
@@ -336,8 +368,13 @@ pub fn OpOf(comptime shape: ?[3]operand.Kind) type {
     };
 }
 
+/// The instruction of opcode `opc`, with its operands and its P5 typed.
+pub fn OpFor(comptime opc: OP) type {
+    return OpWithP5(opc.kinds(), opc.P5());
+}
+
 /// Instruction `o`, which is an `opc`, with the operands of that opcode.
-pub inline fn opAs(o: *Op, comptime opc: OP) *OpOf(operand.kinds(opc)) {
+pub inline fn opAs(o: *Op, comptime opc: OP) *OpFor(opc) {
     std.debug.assert(o.opcode == opc);
     return @ptrCast(o);
 }
@@ -444,16 +481,6 @@ pub const SubProgram = struct {
     /// (the arena of the Vdbe it was coded in).
     mem: ?std.heap.ArenaAllocator = null,
 };
-
-/// P5 values for OP_Halt with constraint errors.
-pub const P5_ConstraintNotNull: u16 = 1;
-pub const P5_ConstraintUnique: u16 = 2;
-pub const P5_ConstraintCheck: u16 = 3;
-pub const P5_ConstraintFK: u16 = 4;
-/// xqlite: P4 is the error of the dialect the statement was compiled in
-/// (dialect/constraint.zig), with the values of the key in the P5 >> 8
-/// registers from P3 (OP_Halt).
-pub const P5_ConstraintDialect: u16 = 0x10;
 
 /// Column name slots (COLNAME_*).
 pub const COLNAME_NAME = 0;
@@ -662,6 +689,23 @@ pub const VdbeState = enum(u8) {
     run = 2,
     /// Finished; needs a reset.
     halt = 3,
+
+    /// The program is complete: ready, running or halted (C:
+    /// `eVdbeState>=VDBE_READY_STATE`).
+    pub fn built(s: VdbeState) bool {
+        return s != .init;
+    }
+};
+
+/// Whether a statement is out of date (Vdbe.expired; C's 0, 1, 2, which
+/// sqlite3_expired() returns).
+pub const Expired = enum(u2) {
+    no = 0,
+    /// Compile it again before it runs again, and abort a run at its next
+    /// OP_OpenRead or OP_OpenWrite.
+    now = 1,
+    /// Compile it again before it runs again; a run goes on to its end.
+    when_convenient = 2,
 };
 
 /// A prepared statement (Vdbe).
@@ -673,7 +717,6 @@ pub const Vdbe = struct {
     prev: ?*Vdbe = null,
     next: ?*Vdbe = null,
     parse: ?*Parse = null,
-    n_var: int.YnVar = 0,
     /// Registers; mem[0] is unused, as in C.
     mem: []Mem = &.{},
     csr: []?*VdbeCursor = &.{},
@@ -710,7 +753,7 @@ pub const Vdbe = struct {
     xq_col_types: []@import("../sql/types.zig").Type = &.{},
     /// xqlite: the type of each parameter (by number - 1) where the
     /// statement gives it one (Parse.xq_param_types, sql/typing.zig):
-    /// n_var entries, .unknown where not known; empty if none is known.
+    /// vars.len entries, .unknown where not known; empty if none is known.
     xq_param_types: []@import("../sql/types.zig").Type = &.{},
     /// xqlite: the text of the statement this one runs, when it is not
     /// its own (PostgreSQL's EXECUTE of a prepared statement): what a
@@ -731,7 +774,9 @@ pub const Vdbe = struct {
     /// xqlite: the notices the statement reports each time it runs
     /// (Parse.xq_notices, int.Notice), in the program's memory.
     xq_notices: []const int.Notice = &.{},
-    result_row: ?[*]Mem = null,
+    /// The current row (the n_res_column registers of OP_ResultRow), if
+    /// the statement is on one.
+    result_row: ?[]Mem = null,
     /// What api.columnMem() returns outside a row (C: a static const
     /// nullMem, which callers may not write; here they may).
     null_mem: Mem = .{ .flags = .{ .Null = true } },
@@ -744,10 +789,9 @@ pub const Vdbe = struct {
     /// Names of named parameters.
     vlist: []const int.VListEntry = &.{},
     n_res_column: u16 = 0,
-    n_res_alloc: u16 = 0,
     error_action: int.OE = .Abort,
     min_write_file_format: u8 = 255,
-    prep_flags: u8 = 0,
+    prep_flags: int.PrepFlags = .{},
     /// xqlite: the language (dialect and frontend) the statement was
     /// compiled in, and is recompiled in.
     xq_lang: @import("../dialect/dialect.zig").Lang = .{},
@@ -759,8 +803,8 @@ pub const Vdbe = struct {
     /// (OP_FkCounter), owned (the connection's gpa).
     xq_fk_owned: ?[:0]u8 = null,
     e_vdbe_state: VdbeState = .init,
-    expired: u2 = 0,
-    explain: u2 = 0,
+    expired: Expired = .no,
+    explain: int.Explain = .none,
     change_cnt_on: bool = false,
     uses_stmt_journal: bool = false,
     read_only: bool = true,
@@ -769,7 +813,8 @@ pub const Vdbe = struct {
     /// Databases used, and those needing locks.
     btree_mask: u32 = 0,
     lock_mask: u32 = 0,
-    counters: [9]u32 = @splat(0),
+    /// sqlite3_stmt_status() counters.
+    counters: std.EnumArray(StmtStatus, u32) = .initFill(0),
     sql: ?[:0]const u8 = null,
     /// sqlite3_normalized_sql(), made on first use (zNormSql).
     norm_sql: ?[:0]const u8 = null,
@@ -798,46 +843,10 @@ pub const Vdbe = struct {
     pub fn nOp(v: *const Vdbe) i32 {
         return @intCast(v.ops.items.len);
     }
-};
 
-/// sqlite3_stmt_status() counters (SQLITE_STMTSTATUS_*).
-pub const STMTSTATUS = struct {
-    pub const FULLSCAN_STEP = 1;
-    pub const SORT = 2;
-    pub const AUTOINDEX = 3;
-    pub const VM_STEP = 4;
-    pub const REPREPARE = 5;
-    pub const RUN = 6;
-    pub const FILTER_MISS = 7;
-    pub const FILTER_HIT = 8;
-    pub const MEMUSED = 99;
+    /// The number of columns col_names has room for (nResAlloc), which
+    /// n_res_column is but for the listing of EXPLAIN.
+    pub fn nColNames(v: *const Vdbe) usize {
+        return v.col_names.len / COLNAME_N;
+    }
 };
-
-/// P5 flags of opcodes (OPFLAG_*).
-pub const OPFLAG = struct {
-    pub const NCHANGE: u16 = 0x01;
-    pub const NOCHNG: u16 = 0x01;
-    pub const EPHEM: u16 = 0x01;
-    pub const LASTROWID: u16 = 0x20;
-    pub const ISUPDATE: u16 = 0x04;
-    pub const APPEND: u16 = 0x08;
-    pub const USESEEKRESULT: u16 = 0x10;
-    pub const ISNOOP: u16 = 0x40;
-    pub const LENGTHARG: u16 = 0x40;
-    pub const TYPEOFARG: u16 = 0x80;
-    pub const BYTELENARG: u16 = 0xc0;
-    pub const BULKCSR: u16 = 0x01;
-    pub const SEEKEQ: u16 = 0x02;
-    pub const FORDELETE: u16 = 0x08;
-    pub const P2ISREG: u16 = 0x10;
-    pub const PERMUTE: u16 = 0x01;
-    pub const SAVEPOSITION: u16 = 0x02;
-    pub const AUXDELETE: u16 = 0x04;
-    pub const NOCHNG_MAGIC: u16 = 0x6d;
-    pub const PREFORMAT: u16 = 0x80;
-};
-
-/// P5 flags of comparison opcodes.
-pub const SQLITE_JUMPIFNULL: u16 = 0x10;
-pub const SQLITE_NULLEQ: u16 = 0x80;
-pub const SQLITE_NOTNULL: u16 = 0x90;

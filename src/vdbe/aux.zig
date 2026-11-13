@@ -12,7 +12,6 @@ const mem = @import("mem.zig");
 const int = @import("../sql/sqlite_int.zig");
 const util = @import("../sql/util.zig");
 const main_mod = @import("../sql/main.zig");
-const opcodes = vi.opcodes;
 pub const operand = @import("operand.zig");
 
 const Vdbe = vi.Vdbe;
@@ -74,9 +73,9 @@ pub fn vdbeErrorState(v: *Vdbe, state: int.ErrorState, comptime fmt: []const u8,
 }
 
 /// Port of sqlite3VdbeSetSql().
-pub fn setSql(v: *Vdbe, z: []const u8, prep_flags: u8) void {
+pub fn setSql(v: *Vdbe, z: []const u8, prep_flags: int.PrepFlags) void {
     v.prep_flags = prep_flags;
-    if (prep_flags & PREPARE_SAVESQL == 0) {
+    if (!prep_flags.save_sql) {
         v.expmask = 0;
         v.smimask = 0;
     }
@@ -85,21 +84,12 @@ pub fn setSql(v: *Vdbe, z: []const u8, prep_flags: u8) void {
     v.sql = v.db.gpa.dupeSentinel(u8, z, 0) catch null;
 }
 
-/// SQLITE_PREPARE_* flags.
-pub const PREPARE_PERSISTENT: u8 = 0x01;
-pub const PREPARE_NORMALIZE: u8 = 0x02;
-pub const PREPARE_NO_VTAB: u8 = 0x04;
-pub const PREPARE_DONT_LOG: u8 = 0x10;
-pub const PREPARE_FROM_DDL: u8 = 0x20;
-pub const PREPARE_SAVESQL: u8 = 0x80;
-pub const PREPARE_MASK: u8 = 0x3f;
-
 /// Append the instruction `op` with the operands `args` (P1, P2 and P3,
-/// those at the end left out being 0), each of the type operand.kinds()
+/// those at the end left out being 0), each of the type OP.kinds()
 /// gives it: a Reg, a Cursor, a Label or Addr to jump to, or a number.
 /// Returns its address.
 pub fn emit(v: *Vdbe, comptime op: OP, args: anytype) Addr {
-    return emitShaped(v, op, op, comptime operand.kinds(op), args);
+    return emitShaped(v, op, op, comptime op.kinds(), args);
 }
 
 /// emit() with P4.
@@ -125,7 +115,7 @@ pub fn emitStr(v: *Vdbe, comptime op: OP, args: anytype, z: ?[]const u8) Addr {
 /// or OP_NotFound, by the kind of table): `shape` is what the operands of
 /// every opcode `op` can be are, and the arguments are checked against it.
 pub fn emitAny(v: *Vdbe, op: OP, comptime shape: [3]operand.Kind, args: anytype) Addr {
-    std.debug.assert(std.meta.eql(operand.kinds(op), shape));
+    std.debug.assert(std.meta.eql(op.kinds(), shape));
     return emitShaped(v, op, null, shape, args);
 }
 
@@ -269,7 +259,7 @@ pub fn addFunctionCall(p: *Parse, p1: i32, p2: Reg, p3: Reg, n_arg: i32, func: *
     // registers were at the same address (argv then stays unset).
     ctx.* = .{ .out = undefined, .func = func, .argv = argv, .i_op = v.nOp(), .vdbe = null };
     const addr = emitAny4(v, if (e_call_ctx != 0) OP.PureFunc else OP.Function, .{ .int, .reg, .reg }, .{ p1, p2, p3 }, .{ .funcctx = ctx });
-    changeP5(v, @intCast(e_call_ctx & NC_SelfRef));
+    changeP5(v, @as(u16, @intCast(e_call_ctx & NC_SelfRef)));
     main_mod.mayAbort(p);
     return addr;
 }
@@ -286,7 +276,7 @@ pub fn explainParent(p: *Parse) i32 {
 /// is running, or the statement records scan status: its address, null
 /// if none was coded.
 pub fn explain(p: *Parse, push: bool, comptime fmt: []const u8, args: anytype) ?Addr {
-    if (p.explain != 2 and !isStmtScanStatus(p.db)) return null;
+    if (p.explain != .query_plan and !isStmtScanStatus(p.db)) return null;
     const v = p.vdbe.?;
     const msg = std.fmt.allocPrintSentinel(v.alloc(), fmt, args, 0) catch {
         p.db.oomFault();
@@ -431,29 +421,26 @@ fn resolveP2Values(v: *Vdbe, max_vtab_args: *i32) void {
     while (i > 0) {
         i -= 1;
         const op = &v.ops.items[i];
-        if (!op.opcode.mayJump()) continue;
-        switch (op.opcode) {
-            OP.Transaction => {
-                if (op.p2 != 0) v.read_only = false;
-                v.is_reader = true;
-            },
-            OP.AutoCommit, OP.Savepoint => v.is_reader = true,
-            OP.Checkpoint, OP.Vacuum, OP.JournalMode => {
+        switch (op.opcode.info().access) {
+            .none => {},
+            .read => v.is_reader = true,
+            .write => {
                 v.read_only = false;
                 v.is_reader = true;
             },
-            OP.Init => break,
-            OP.VUpdate => max_vtab_args.* = @max(max_vtab_args.*, op.p2),
-            else => {
-                if (op.opcode == OP.VFilter) {
-                    max_vtab_args.* = @max(max_vtab_args.*, v.ops.items[i - 1].p1);
-                }
-                if (op.p2 < 0) {
-                    std.debug.assert(op.opcode.opflags() & opcodes.OPFLG.JUMP != 0);
-                    op.p2 = p.labels.items[@intCast(~op.p2)];
-                }
+            .write_if_p2 => {
+                if (op.p2 != 0) v.read_only = false;
+                v.is_reader = true;
             },
         }
+        switch (op.opcode) {
+            // The first instruction; its P2 is an address already.
+            OP.Init => break,
+            OP.VUpdate => max_vtab_args.* = @max(max_vtab_args.*, op.p2),
+            OP.VFilter => max_vtab_args.* = @max(max_vtab_args.*, v.ops.items[i - 1].p1),
+            else => {},
+        }
+        if (op.opcode.props().jump and op.p2 < 0) op.p2 = p.labels.items[@intCast(~op.p2)];
     }
     p.labels.clearRetainingCapacity();
     p.n_label = 0;
@@ -513,18 +500,42 @@ pub fn changeP3(v: *Vdbe, addr: Addr, val: i32) void {
     getOp(v, addr).p3 = val;
 }
 
-/// Port of sqlite3VdbeChangeP5(): P5 of the last instruction.
-pub fn changeP5(v: *Vdbe, p5: u16) void {
-    if (v.ops.items.len > 0) v.ops.items[v.ops.items.len - 1].p5 = p5;
+/// Port of sqlite3VdbeChangeP5(): P5 of the last instruction: a number,
+/// or for an opcode whose P5 is a set of flags a value of their type
+/// (OP.P5(), p5.zig).
+pub fn changeP5(v: *Vdbe, p5: anytype) void {
+    if (v.ops.items.len == 0) return;
+    const op = &v.ops.items[v.ops.items.len - 1];
+    const T = @TypeOf(p5);
+    const n: u16 = switch (@typeInfo(T)) {
+        .int, .comptime_int => @intCast(p5),
+        else => vi.p5.int(p5),
+    };
+    // After an allocation failure (or past SQLITE_LIMIT_VDBE_OP) the
+    // instruction was not added, and P5 lands on the one before, as in
+    // C; the statement fails anyway.
+    if (!v.db.malloc_failed) {
+        const family: vi.p5.Family = switch (@typeInfo(T)) {
+            .int, .comptime_int => .number,
+            else => comptime .of(T),
+        };
+        std.debug.assert(op.opcode.info().p5 == family);
+    }
+    op.p5 = n;
 }
 
-/// OPFLAG_TYPEOFARG: OP_Column only needs the type.
-pub const OPFLAG_TYPEOFARG: u16 = 0x80;
-
-/// Port of sqlite3VdbeTypeofColumn().
+/// Port of sqlite3VdbeTypeofColumn(): the OP_Column that loads `dest`, if
+/// it is the last instruction, need only load the type.
 pub fn typeofColumn(v: *Vdbe, dest: Reg) void {
     const op = getLastOp(v);
-    if (op.p3 == dest.int() and op.opcode == OP.Column) op.p5 |= OPFLAG_TYPEOFARG;
+    if (op.p3 != dest.int() or op.opcode != OP.Column) return;
+    var c = op.p5As(vi.ColumnP5);
+    // As C's `p5 |= OPFLAG_TYPEOFARG`: on length() it gives octet_length().
+    c.arg = switch (c.arg) {
+        .none, .typeof => .typeof,
+        .length, .octet_length => .octet_length,
+    };
+    op.setP5(c);
 }
 
 /// Port of sqlite3VdbeJumpHereOrPopInst(): like `landHere`, but drop the
@@ -853,9 +864,7 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: NEXTOP, pc: *i32, addr: *usize, 
         if (e_mode == .NORMAL) break;
         if (e_mode == .TABLES_USED) {
             const op = &a_op[i];
-            if (op.opcode == OP.OpenRead) break;
-            if (op.opcode == OP.OpenWrite and op.p5 & vi.OPFLAG.P2ISREG == 0) break;
-            if (op.opcode == OP.ReopenIdx) break;
+            if (op.opcode.info().opens_table and !(op.opcode == OP.OpenWrite and op.p5As(vi.OpenP5).p2_is_reg)) break;
         } else {
             std.debug.assert(e_mode == .EQP);
             if (a_op[i].opcode == OP.Explain) break;
@@ -873,7 +882,7 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: NEXTOP, pc: *i32, addr: *usize, 
 /// PLAN. Returns RC.ROW, RC.DONE or RC.ERROR.
 pub fn list(v: *Vdbe) i32 {
     const db = v.db;
-    std.debug.assert(v.explain != 0 and v.e_vdbe_state == .run);
+    std.debug.assert(v.explain != .none and v.e_vdbe_state == .run);
     const cells = v.mem[1..9];
     releaseMemArray(cells);
     if (v.rc == RC.NOMEM) {
@@ -881,11 +890,11 @@ pub fn list(v: *Vdbe) i32 {
         return RC.ERROR;
     }
     // With the trigger programs, mem[9] keeps the list of them.
-    const list_subprogs = v.explain == 1 or db.flags.TriggerEQP;
+    const list_subprogs = v.explain == .explain or db.flags.TriggerEQP;
     const sub: ?*Mem = if (list_subprogs) &v.mem[9] else null;
     var i: usize = 0;
     var a_op: []Op = &.{};
-    const more = nextOpcode(v, sub, if (v.explain == 2) NEXTOP.EQP else NEXTOP.NORMAL, &v.pc, &i, &a_op) catch return RC.ERROR;
+    const more = nextOpcode(v, sub, if (v.explain == .query_plan) NEXTOP.EQP else NEXTOP.NORMAL, &v.pc, &i, &a_op) catch return RC.ERROR;
     if (!more) return RC.DONE;
     const op = &a_op[i];
     if (db.is_interrupted.load(.monotonic)) {
@@ -897,7 +906,7 @@ pub fn list(v: *Vdbe) i32 {
         v.rc = RC.NOMEM;
         return RC.ERROR;
     };
-    if (v.explain == 2) {
+    if (v.explain == .query_plan) {
         mem.setInt64(&cells[0], op.p1);
         mem.setInt64(&cells[1], op.p2);
         mem.setInt64(&cells[2], op.p3);
@@ -912,7 +921,7 @@ pub fn list(v: *Vdbe) i32 {
         mem.setNull(&cells[7]);
         mem.setTextZ(&cells[5], p4, .dynamic) catch {};
     }
-    v.result_row = cells.ptr;
+    v.result_row = cells[0..v.n_res_column];
     v.rc = RC.OK;
     return RC.ROW;
 }
@@ -956,12 +965,12 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     resolveP2Values(v, &n_arg);
     v.prog = v.ops.items;
     v.uses_stmt_journal = p.is_multi_write and p.may_abort;
-    if (p.explain != 0) {
+    if (p.explain != .none) {
         if (n_mem < 10) n_mem = 10;
-        v.explain = @intCast(p.explain);
-        v.n_res_column = 12 - 4 * @as(u16, p.explain);
+        v.explain = p.explain;
+        v.n_res_column = @intCast(p.explain.columnNames().len);
     }
-    v.expired = 0;
+    v.expired = .no;
     v.mem = a.alloc(Mem, n_mem) catch return oom(v);
     v.vars = a.alloc(Mem, n_var) catch return oom(v);
     if (isStmtScanStatus(db)) {
@@ -970,12 +979,11 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     }
     v.ap_arg = a.alloc(*Mem, @intCast(n_arg)) catch return oom(v);
     v.csr = a.alloc(?*VdbeCursor, n_cursor) catch return oom(v);
-    v.n_var = @intCast(n_var);
     v.xq_param_types = @import("../sql/typing.zig").paramTypes(p, a, n_var) catch return oom(v);
     v.xq_exact_numeric = p.xq_exact_numeric;
     v.xq_values_coroutine = p.xq_values_coroutine;
-    v.xq_no_columns = p.xq_no_columns and p.explain == 0;
-    v.xq_binary_rows = p.xq_binary_rows and p.explain == 0;
+    v.xq_no_columns = p.xq_no_columns and p.explain == .none;
+    v.xq_binary_rows = p.xq_binary_rows and p.explain == .none;
     v.xq_notices = copyNotices(a, p.xq_notices.items) catch return oom(v);
     initMemArray(v.vars, db, .{ .Null = true });
     initMemArray(v.mem, db, MEM.Undefined);
@@ -1010,7 +1018,6 @@ fn oom(v: *Vdbe) void {
     v.mem = &.{};
     v.vars = &.{};
     v.csr = &.{};
-    v.n_var = 0;
 }
 
 /// Port of sqlite3VdbeFreeCursor().
@@ -1100,12 +1107,11 @@ fn closeAllCursors(v: *Vdbe) void {
 
 /// Port of sqlite3VdbeSetNumCols().
 pub fn setNumCols(v: *Vdbe, n: u16) void {
-    if (v.n_res_alloc != 0) releaseMemArray(v.col_names);
+    releaseMemArray(v.col_names);
     if (v.col_meta.len > 0) releaseMemArray(v.col_meta);
     v.col_meta = &.{};
     v.xq_col_types = &.{};
     v.n_res_column = n;
-    v.n_res_alloc = n;
     v.col_names = v.alloc().alloc(Mem, @as(usize, n) * vi.COLNAME_N) catch {
         v.db.oomFault();
         v.col_names = &.{};
@@ -1143,9 +1149,9 @@ pub fn setColType(v: *Vdbe, idx: usize, t: @import("../sql/types.zig").Type) voi
 pub fn setColName(v: *Vdbe, idx: usize, var_: usize, name: [:0]const u8) void {
     if (v.db.malloc_failed) return;
     const m = if (var_ < vi.COLNAME_N)
-        &v.col_names[idx + var_ * v.n_res_alloc]
+        &v.col_names[idx + var_ * v.nColNames()]
     else
-        &v.col_meta[idx + (var_ - vi.COLNAME_N) * v.n_res_alloc];
+        &v.col_meta[idx + (var_ - vi.COLNAME_N) * v.nColNames()];
     mem.setTextZ(m, name, .transient) catch |err| switch (err) {
         // Reported to the statement being compiled.
         error.TooBig => {},
@@ -1417,7 +1423,7 @@ fn fkError(v: *Vdbe) FkError {
     } else {
         vdbeError(v, "FOREIGN KEY constraint failed", .{});
     }
-    if (v.prep_flags & PREPARE_SAVESQL == 0) return error.Error;
+    if (!v.prep_flags.save_sql) return error.Error;
     return error.Constraint;
 }
 
@@ -1554,13 +1560,13 @@ pub fn swap(a: *Vdbe, b: *Vdbe) void {
     b.smimask |= a.smimask;
     b.prep_flags = a.prep_flags;
     b.counters = a.counters;
-    b.counters[vi.STMTSTATUS.REPREPARE] += 1;
+    b.counters.getPtr(.reprepare).* += 1;
 }
 
 /// Port of sqlite3TransferBindings(): move the parameter values of `from`
 /// to `to`.
 pub fn transferBindings(from: *Vdbe, to: *Vdbe) void {
-    std.debug.assert(to.n_var == from.n_var);
+    std.debug.assert(to.vars.len == from.vars.len);
     for (from.vars, to.vars) |*f, *t| mem.move(t, f);
 }
 
@@ -1601,7 +1607,7 @@ pub fn reset(v: *Vdbe) i32 {
 /// Port of sqlite3VdbeFinalize().
 pub fn finalize(v: *Vdbe) i32 {
     var rc: i32 = RC.OK;
-    if (@backingInt(v.e_vdbe_state) >= @backingInt(vi.VdbeState.ready)) rc = reset(v);
+    if (v.e_vdbe_state.built()) rc = reset(v);
     delete(v);
     return rc;
 }
@@ -1675,9 +1681,9 @@ pub fn countChanges(v: *Vdbe) void {
     v.change_cnt_on = true;
 }
 
-/// Port of sqlite3ExpirePreparedStatements(): make statements reprepare
-/// (`code` 1) or recompile when convenient (2).
-pub fn expirePreparedStatements(db: *Sqlite3, code: u2) void {
+/// Port of sqlite3ExpirePreparedStatements(): mark every statement of
+/// `db` out of date (C's iCode 0 is `.now`, 1 `.when_convenient`).
+pub fn expirePreparedStatements(db: *Sqlite3, how: vi.Expired) void {
     var it = db.vdbe;
-    while (it) |v| : (it = v.next) v.expired = code + 1;
+    while (it) |v| : (it = v.next) v.expired = how;
 }

@@ -257,7 +257,6 @@ const Jump = aux.operand.Jump;
 const Walker = walker.Walker;
 const WRC = walker.WRC;
 const OP = vi.OP;
-const OPFLAG = vi.OPFLAG;
 const EP = int.EP;
 const SF = int.SF;
 const NC = int.NC;
@@ -607,7 +606,7 @@ fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat:
                     _ = aux.emit(v, .Eq, .{ elem.at(i), repeat, prev.at(i) });
                 }
                 if (coll) |c| aux.changeP4(v, null, .{ .collseq = c });
-                aux.changeP5(v, vi.SQLITE_NULLEQ);
+                aux.changeP5(v, vi.CmpP5{ .null_eq = true });
             }
             _ = aux.emit(v, .Copy, .{ elem, prev, n_result_col - 1 });
             return .{ .prev = prev };
@@ -618,7 +617,7 @@ fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat:
             _ = aux.emitInt(v, .Found, .{ tab, repeat, elem }, n_result_col);
             _ = aux.emit(v, .MakeRecord, .{ elem, n_result_col, r1 });
             _ = aux.emitInt(v, .IdxInsert, .{ tab, r1, elem }, n_result_col);
-            aux.changeP5(v, OPFLAG.USESEEKRESULT);
+            aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
             expr_mod.releaseTempReg(p, r1);
             return .{ .table = tab };
         },
@@ -741,7 +740,7 @@ fn innerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, disti
                 const r2 = expr_mod.getTempReg(p);
                 _ = aux.emit(v, .NewRowid, .{ tab, r2 });
                 _ = aux.emit(v, .Insert, .{ tab, r1, r2 });
-                aux.changeP5(v, OPFLAG.APPEND);
+                aux.changeP5(v, vi.InsertP5{ .append = true });
                 expr_mod.releaseTempReg(p, r2);
             }
             expr_mod.releaseTempRange(p, r1, n_prefix_reg + 1);
@@ -821,7 +820,7 @@ fn innerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, disti
             _ = aux.emit(v, .MakeRecord, .{ result, n_result_col, r3 });
             if (e_dest == SRT.DistQueue) {
                 _ = aux.emit(v, .IdxInsert, .{ queue.at(1), r3 });
-                aux.changeP5(v, OPFLAG.USESEEKRESULT);
+                aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
             }
             for (so.slice(), 0..) |item, i| {
                 _ = aux.emit(v, .SCopy, .{ result.at(@as(i32, item.u.x.order_by_col) - 1), r2.at(i) });
@@ -939,7 +938,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
             _ = aux.emit(v, .Column, .{ sort_tab, n_key + b_seq, row });
             _ = aux.emit(v, .NewRowid, .{ out, rowid });
             _ = aux.emit(v, .Insert, .{ out, row, rowid });
-            aux.changeP5(v, OPFLAG.APPEND);
+            aux.changeP5(v, vi.InsertP5{ .append = true });
         },
         SRT.Set => {
             _ = aux.emitStr(v, .MakeRecord, .{ row, n_column, rowid }, dest.aff_sdst.?);
@@ -1648,7 +1647,7 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
             }
             _ = aux.emit(v, .NewRowid, .{ tab, r2 });
             _ = aux.emit(v, .Insert, .{ tab, r1, r2 });
-            aux.changeP5(v, OPFLAG.APPEND);
+            aux.changeP5(v, vi.InsertP5{ .append = true });
             expr_mod.releaseTempReg(p, r2);
             expr_mod.releaseTempReg(p, r1);
         },
@@ -1894,7 +1893,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     if (permute) |pm| _ = aux.emit4(v, .Permutation, .{}, .{ .intarray = pm });
     aux.place(v, label_cmpr);
     _ = aux.emit4(v, .Compare, .{ dest_a.i_sdst, dest_b.i_sdst, n_order_by }, if (key_merge) |k| .{ .keyinfo = k } else .notused);
-    if (permute != null) aux.changeP5(v, OPFLAG.PERMUTE);
+    if (permute != null) aux.changeP5(v, vi.CompareP5{ .permute = true });
     // P1 and P3 of OP_Jump are addresses too.
     _ = aux.emit(v, .Jump, .{ addr_alt_b, addr_aeq_b, addr_agt_b });
 
@@ -2979,7 +2978,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!WRC {
                         }
                         try build.srcItemAttachSubquery(p, from, (try expr_mod.selectDup(p.arena, t.u.view.select)).?);
                     } else if (t.isVirtual() and
-                        (from.fg.from_ddl or p.prep_flags & aux.PREPARE_FROM_DDL != 0) and
+                        (from.fg.from_ddl or p.prep_flags.from_ddl) and
                         t.u.vtab.p != null and
                         t.u.vtab.p.?.e_vtab_risk.unsafeInSchema(db.flags.TrustedSchema))
                     {
@@ -3322,7 +3321,7 @@ fn finalizeAggFunctions(p: *Parse, agg: *AggInfo) void {
             }
             _ = aux.emit(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) });
             aux.appendP4(v, .{ .funcdef = f.func.? });
-            aux.changeP5(v, @intCast(n_arg));
+            aux.changeP5(v, @as(u16, @intCast(n_arg)));
             _ = aux.emit(v, .Next, .{ ob_tab, top.plus(1) });
             aux.landHere(v, top);
             expr_mod.releaseTempRange(p, reg_agg, n_arg);
@@ -3361,7 +3360,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
             }
             const filtered = aux.newLabel(p);
             next = filtered;
-            ec.exprIfFalse(p, filter, filtered, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, filter, filtered, true);
         }
         if (f.i_ob_tab) |ob_tab| {
             // The arguments go to the ORDER BY table; OP_AggStep runs at
@@ -3427,7 +3426,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
             }
             _ = aux.emit(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) });
             aux.appendP4(v, .{ .funcdef = f.func.? });
-            aux.changeP5(v, @intCast(n_arg));
+            aux.changeP5(v, @as(u16, @intCast(n_arg)));
             expr_mod.releaseTempRange(p, reg_agg, n_arg);
         }
         if (next) |l| aux.place(v, l);
@@ -4322,7 +4321,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             _ = aux.emit(v, .IfPos, .{ use_flag, addr_output_row.plus(2) });
             _ = aux.emit(v, .Return, .{reg_output_row});
             finalizeAggFunctions(p, agg);
-            ec.exprIfFalse(p, having, addr_output_row.plus(1), vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, having, addr_output_row.plus(1), true);
             selectInnerLoop(p, s, null, &sort, &distinct, dest, addr_output_row.plus(1), addr_set_abort);
             _ = aux.emit(v, .Return, .{reg_output_row});
 
@@ -4406,7 +4405,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             }
 
             sort.order_by = null;
-            ec.exprIfFalse(p, having, addr_end, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalse(p, having, addr_end, true);
             selectInnerLoop(p, s, null, null, null, dest, addr_end, addr_end);
         }
         aux.place(v, addr_end);
@@ -4454,7 +4453,7 @@ fn explainTempTable(p: *Parse, usage: []const u8) void {
 /// Port of explainSimpleCount(): the EXPLAIN QUERY PLAN line of
 /// "SELECT count(*) FROM <tbl>".
 fn explainSimpleCount(p: *Parse, t: *Table, idx: ?*Index) void {
-    if (p.explain != 2) return;
+    if (p.explain != .query_plan) return;
     const cover = if (idx) |ix| t.hasRowid() or !ix.isPrimaryKey() else false;
     _ = aux.explain(p, false, "SCAN {s}{s}{s}", .{ t.name, if (cover) " USING COVERING INDEX " else "", if (cover) idx.?.name else "" });
 }

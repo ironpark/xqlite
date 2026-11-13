@@ -790,7 +790,7 @@ fn runStatementTimes(db: *Sqlite3, v: *Vdbe, sql: []const u8, f: *Failure, sink:
     const z = try db.gpa.dupeSentinel(u8, sql, 0);
     defer db.gpa.free(z);
     var stmt_opt: ?*Vdbe = null;
-    var rc = prepare.prepareV3Z(db, z, 0, &stmt_opt, null);
+    var rc = prepare.prepareV3Z(db, z, .{}, &stmt_opt, null);
     if (rc != RC.OK) return failFromDb(db, f, rc);
     const stmt = stmt_opt orelse return;
     var finalized = false;
@@ -833,7 +833,7 @@ pub fn explainInto(p: *int.Parse, sql: []const u8, parent: i32) error{ OutOfMemo
     const z = try std.fmt.allocPrintSentinel(db.gpa, "EXPLAIN {s}", .{sql}, 0);
     defer db.gpa.free(z);
     var stmt_opt: ?*Vdbe = null;
-    var rc = prepare.prepareV3Z(db, z, 0, &stmt_opt, null);
+    var rc = prepare.prepareV3Z(db, z, .{}, &stmt_opt, null);
     if (rc != RC.OK) return explainFailed(p, rc);
     const stmt = stmt_opt orelse return;
     defer _ = aux.finalize(stmt);

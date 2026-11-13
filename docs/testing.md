@@ -53,7 +53,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `zig build test-wasi` | wasm32-wasi 단위 테스트(wasmtime)와 `xqt wasi` | wasmtime, `--sqlite3`/`SQLITE3` |
 | `xqt wasi [--wasm PATH]` | WASI 빌드의 SQL 결과, 저널·WAL, 크래시 복구, 방언 | sqlite3, 네이티브 xqlite(`--xq`), wasmtime |
 | `zig build wasm-example` | 브라우저용 모듈을 Node.js에서 (`examples/wasm/node.mjs`) | node |
-| `xqt gen fixtures\|opcodes` | `src/testdata`의 테스트용 DB, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
+| `xqt gen fixtures` | `src/testdata`의 테스트용 DB 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
 | `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사. sqlite3용 확장을 올리는 것도 | — |
 | `zig build ext` | sqlite3용 확장 `libxqlite_ext`([sqlite3용 확장](extension.md)). `xqt interop ext`가 씀 | — |
@@ -127,7 +127,6 @@ xqlite를 의존성으로 쓰는 프로젝트의 빌드는 SQLite를 내려받�
 | 명령 | 쓰는 것 |
 | --- | --- |
 | `gen fixtures` | `PATH`의 `sqlite3`, 또는 `--fixtures-sqlite3 PATH`. 커밋한 fixture는 헤더에 3.44.4라는 버전이 들어 있으므로 `SQLITE3`를 따르지 않습니다 |
-| `gen opcodes` | `zig cc`(lemon), `zig run`(변환기), `tclsh`. `ZIG`로 zig 바이너리를 바꿉니다 |
 | `dialect-diff` | podman 컨테이너의 클라이언트(`PG_PSQL`, `MARIA_CLIENT`, `ORA_SQLPLUS`) |
 | `wire-diff` | psql을 `sh -c`로 돌리는 명령(`PG_WIRE_EXEC`), 컨테이너에서 본 호스트(`PG_WIRE_HOST`), xqlite가 받는 주소(`PG_WIRE_LISTEN`), 회귀 테스트 디렉터리(`PG_REGRESS_DIR`) |
 | `fetch slt` | `git` |
@@ -654,9 +653,6 @@ zig build capi-sortbench -- -spill        # 디스크로 넘치는 정렬
 | `xqt gen fixtures` | `src/testdata`의 테스트용 DB(`btree.db`, `autovacuum.db`, `sql.db`)를 sqlite3 셸로 다시 만듭니다. 내용은 결정적이고 테스트가 같은 식으로 검사합니다. 커밋한 파일은 3.44.4로 만든 것이라 헤더에 그 버전이 들어 있으므로 `PATH`의 `sqlite3`(또는 `--fixtures-sqlite3 PATH`)를 씁니다. |
 | `xqt gen superjournal [DIR]` | 세 파일 트랜잭션을 커밋하던 sqlite3를 크래시 shim으로 네 지점(super journal을 지우기 직전, 지운 뒤 저널을 하나도·하나·둘 지운 때)에서 죽여 남은 파일을 `src/testdata/superjournal`(또는 `DIR`)에 저장합니다. `src/sql/attach_test.zig`가 xqlite로 복구해 봅니다. sqlite3가 super journal 이름을 무작위로 고르므로 저널은 다시 만들 때마다 바이트가 달라집니다. 그래서 생성기는 바이트 대신 상태마다 있어야 할 파일들이 있는지 확인합니다. |
 | `xqt bench [WORKLOAD...]` | 같은 작업을 xqlite와 sqlite3로 재고 비율을 출력합니다. `zig build -Doptimize=ReleaseFast` 뒤에 씁니다(`--runs`/`RUNS`, `--rows`/`ROWS`, `--xq`, `--sqlite3`). |
-| `xqt gen opcodes` | `src/vdbe/opcodes.zig`를 다시 만듭니다. `ref/sqlite`와 tclsh가 필요합니다. |
-
-`xqt gen`은 이름을 여럿 받아(`xqt gen fixtures opcodes`) 동시에 돌립니다. 출력은 프로세스 안에서 `zig fmt`와 같은 형식으로 맞춥니다.
 
 ## 테스트 전략
 

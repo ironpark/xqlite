@@ -237,7 +237,7 @@ pub const Lowerer = struct {
             .rollback_to => |n| ir.txn.savepoint(p, .ROLLBACK, try l.nameTok(n)),
             .truncate => |t| try l.truncate(t),
             .explain => |inner| {
-                ir.stmt.setExplain(p, 2);
+                ir.stmt.setExplain(p, .query_plan);
                 try l.statement(inner.*);
             },
             .create_table => |x| try l.createTable(x),

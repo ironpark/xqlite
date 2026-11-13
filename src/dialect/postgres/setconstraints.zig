@@ -210,7 +210,7 @@ pub fn deferred(p: *Parse, fk: *const FKey) ?bool {
 
 /// The compiled statements compile again (with the modes now).
 fn expire(db: *Sqlite3) void {
-    @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    @import("../../vdbe/aux.zig").expirePreparedStatements(db, .now);
 }
 
 /// The transaction ended (dialect.transactionEnded()): its modes go.
@@ -346,7 +346,7 @@ fn otherExists(db: *Sqlite3, schema: ?[]const u8, name: []const u8) parser.Error
     const q = "SELECT 1 FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_namespace n ON n.oid = c.connamespace " ++
         "WHERE c.conname = $1 AND c.contype <> 'f' AND ($2 IS NULL OR n.nspname = $2 OR ($2 = 'pg_temp' AND n.nspname LIKE 'pg\\_temp\\_%'))";
     var v: ?*vi.Vdbe = null;
-    const rc = prepare.prepareLang(db, q, .of(.postgres), 0, &v, null);
+    const rc = prepare.prepareLang(db, q, .of(.postgres), .{}, &v, null);
     const stmt = v orelse {
         if (rc == RC.NOMEM) return error.OutOfMemory;
         return false;
@@ -561,7 +561,7 @@ fn keyDetail(db: *Sqlite3, a: Allocator, i_db: usize, t: *Table, fk: *FKey, rowi
     const schema: []const u8 = if (i_db == 1) "pg_temp" else if (i_db == 0) (if (nsp.split(t.name)) |sp| sp.schema else "public") else db.dbs.items[i_db].name;
     try sql.print(a, " FROM {f}.{f} WHERE rowid = {d}", .{ Quoted{ .z = schema }, Quoted{ .z = relName(db, t) }, id });
     var v: ?*vi.Vdbe = null;
-    const rc = prepare.prepareLang(db, sql.items, .of(.postgres), 0, &v, null);
+    const rc = prepare.prepareLang(db, sql.items, .of(.postgres), .{}, &v, null);
     const stmt = v orelse {
         if (rc == RC.NOMEM) return error.OutOfMemory;
         return null;

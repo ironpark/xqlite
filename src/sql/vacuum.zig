@@ -41,7 +41,7 @@ const RC = int.RC;
 /// On error the connection's message goes to `v`.
 fn execSql(db: *Sqlite3, v: *Vdbe, sql: []const u8) i32 {
     var stmt_opt: ?*Vdbe = null;
-    var rc = prepare.prepareLang(db, sql, .sqlite, 0, &stmt_opt, null);
+    var rc = prepare.prepareLang(db, sql, .sqlite, .{}, &stmt_opt, null);
     if (rc != RC.OK) return rc;
     const stmt = stmt_opt orelse return RC.OK;
     while (true) {

@@ -15,6 +15,7 @@ const Reg = aux.operand.Reg;
 const mem = @import("../vdbe/mem.zig");
 const serial = @import("../vdbe/serial.zig");
 const ENC = @import("../vdbe/vdbe_int.zig").ENC;
+const CmpP5 = @import("../vdbe/vdbe_int.zig").CmpP5;
 const update = @import("update.zig");
 
 const Allocator = std.mem.Allocator;
@@ -1144,9 +1145,9 @@ pub fn indexAffinityOk(e: *const Expr, idx_affinity: u8) bool {
 }
 
 /// Port of binaryCompareP5(): P5 of a comparison opcode.
-pub fn binaryCompareP5(e1: *const Expr, e2: *const Expr, jump_if_null: u16) u16 {
+pub fn binaryCompareP5(e1: *const Expr, e2: *const Expr, nulls: CmpP5) CmpP5 {
     const aff = affinity(e2);
-    return @as(u16, compareAffinity(e1, aff)) | jump_if_null;
+    return .init(compareAffinity(e1, aff), nulls);
 }
 
 /// Port of sqlite3BinaryCompareCollSeq(): the collation of a comparison:
@@ -1176,7 +1177,7 @@ pub fn compareCollSeq(p: *Parse, e: *const Expr) ?*const CollSeq {
 /// Port of sqlite3ExprFunctionUsable(): DIRECTONLY and unsafe functions
 /// may not be used from the schema.
 pub fn functionUsable(p: *Parse, e: *const Expr, def: *const int.FuncDef) void {
-    if (e.flags.FromDDL or p.prep_flags & @import("../vdbe/aux.zig").PREPARE_FROM_DDL != 0) {
+    if (e.flags.FromDDL or p.prep_flags.from_ddl) {
         if (def.func_flags.DIRECT or !p.db.flags.TrustedSchema) {
             // %#T in C: the offset of the function.
             util.errorMsg(p, "unsafe use of {s}()", .{e.token()});

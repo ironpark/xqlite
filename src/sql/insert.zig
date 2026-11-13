@@ -43,7 +43,6 @@ const NameContext = int.NameContext;
 const Vdbe = vi.Vdbe;
 const Oom = int.Oom;
 const OP = vi.OP;
-const OPFLAG = vi.OPFLAG;
 const SF = int.SF;
 const TK = int.TK;
 const TF = int.TF;
@@ -291,7 +290,7 @@ pub fn autoincrementBegin(p: *Parse) void {
         _ = aux.emit(v, .Rewind, .{ seq_cur, not_found });
         const loop = aux.emit(v, .Column, .{ seq_cur, 0, ctr });
         _ = aux.emit(v, .Ne, .{ ctr.at(-1), next, ctr });
-        aux.changeP5(v, vi.SQLITE_JUMPIFNULL);
+        aux.changeP5(v, vi.CmpP5{ .jump_if_null = true });
         _ = aux.emit(v, .Rowid, .{ seq_cur, ctr.at(1) });
         _ = aux.emit(v, .Column, .{ seq_cur, 1, ctr });
         _ = aux.emit(v, .AddImm, .{ctr});
@@ -331,7 +330,7 @@ pub fn autoincrementEnd(p: *Parse) void {
         aux.place(v, has_rowid);
         _ = aux.emit(v, .MakeRecord, .{ ctr.at(-1), 2, i_rec });
         _ = aux.emit(v, .Insert, .{ seq_cur, i_rec, ctr.at(1) });
-        aux.changeP5(v, OPFLAG.APPEND);
+        aux.changeP5(v, vi.InsertP5{ .append = true });
         _ = aux.emit(v, .Close, .{seq_cur});
         expr_mod.releaseTempReg(p, i_rec);
     }
@@ -676,7 +675,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     var idx_cur: Cursor = .from(0);
     var reg_idx: []Reg = &.{};
     if (!is_view) {
-        const n_idx = openTableAndIndices(p, t, OP.OpenWrite, 0, null, null, &data_cur, &idx_cur);
+        const n_idx = openTableAndIndices(p, t, OP.OpenWrite, .{}, null, null, &data_cur, &idx_cur);
         reg_idx = try p.arena.alloc(Reg, n_idx + 1);
         // n_idx, not the index list: a virtual table may have indexes
         // (made by the module's declaration) but opens none.
@@ -894,11 +893,11 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             var is_replace = false;
             generateConstraintChecks(p, t, reg_idx, data_cur, idx_cur, ins_reg, .none, ipk_column >= 0 or ipk_default, on_error, end_of_loop, &is_replace, null, upsert);
             if (db.flags.ForeignKeys) fkey.fkCheck(p, t, .none, ins_reg, null, false);
-            // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
+            // InsertP5.use_seek_result is safe without REPLACE, or without
             // trigger programs (a REPLACE delete then resets the seek
             // result).
             const use_seek = !is_replace or !aux.hasSubProgram(v);
-            completeInsertion(p, t, data_cur, idx_cur, ins_reg, reg_idx, 0, append_flag, use_seek);
+            completeInsertion(p, t, data_cur, idx_cur, ins_reg, reg_idx, .{}, append_flag, use_seek);
         }
     }
 
@@ -1111,13 +1110,11 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
             addr1 = aux.emit(v, .Rowid, .{ src_cur, rowid });
             std.debug.assert(!dest.tab_flags.Autoincrement);
         }
-        var ins_flags: u16 = undefined;
-        if (vacuum) {
-            _ = aux.emit(v, .SeekEnd, .{dest_cur});
-            ins_flags = OPFLAG.APPEND | OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT;
-        } else {
-            ins_flags = OPFLAG.NCHANGE | OPFLAG.LASTROWID | OPFLAG.APPEND | OPFLAG.PREFORMAT;
-        }
+        if (vacuum) _ = aux.emit(v, .SeekEnd, .{dest_cur});
+        const ins_flags: vi.InsertP5 = if (vacuum)
+            .{ .append = true, .use_seek_result = true, .preformat = true }
+        else
+            .{ .nchange = true, .last_rowid = true, .append = true, .preformat = true };
         _ = aux.emit(v, .RowCell, .{ dest_cur, src_cur, rowid });
         _ = aux.emit(v, .Insert, .{ dest_cur, data, rowid });
         if (!vacuum) aux.appendP4(v, .{ .table = dest });
@@ -1131,7 +1128,7 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
     }
     di = dest.index;
     while (di) |dest_idx| : (di = dest_idx.next) {
-        var idx_ins_flags: u16 = 0;
+        var idx_ins_flags: vi.InsertP5 = .{};
         var si = src.index;
         const src_idx = while (si) |x| : (si = x.next) {
             if (xferCompatibleIndex(dest_idx, x)) break x;
@@ -1140,7 +1137,7 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         aux.setP4KeyInfo(p, src_idx);
         _ = aux.emit(v, .OpenWrite, .{ dest_cur, dest_idx.tnum, i_db_dest });
         aux.setP4KeyInfo(p, dest_idx);
-        aux.changeP5(v, OPFLAG.BULKCSR);
+        aux.changeP5(v, vi.OpenP5{ .bulk_csr = true });
         const addr1 = aux.emit(v, .Rewind, .{ src_cur, 0 });
         if (vacuum) {
             // The destination is empty, and if every column collates with
@@ -1151,18 +1148,20 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
                 if (ctype.strICmp(coll_mod.str_binary, zcoll) != 0) break false;
             } else true;
             if (all_binary) {
-                idx_ins_flags = OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT;
+                idx_ins_flags = .{ .use_seek_result = true, .preformat = true };
                 _ = aux.emit(v, .SeekEnd, .{dest_cur});
                 _ = aux.emit(v, .RowCell, .{ dest_cur, src_cur });
             }
         } else if (!src.hasRowid() and dest_idx.isPrimaryKey()) {
-            idx_ins_flags |= OPFLAG.NCHANGE;
+            idx_ins_flags.nchange = true;
         }
-        if (idx_ins_flags != OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT) {
+        // Without OP_RowCell, the record is read.
+        if (!idx_ins_flags.preformat) {
             _ = aux.emit(v, .RowData, .{ src_cur, data, 1 });
         }
         _ = aux.emit(v, .IdxInsert, .{ dest_cur, data });
-        aux.changeP5(v, idx_ins_flags | OPFLAG.APPEND);
+        idx_ins_flags.append = true;
+        aux.changeP5(v, idx_ins_flags);
         _ = aux.emit(v, .Next, .{ src_cur, addr1.plus(1) });
         aux.landHere(v, addr1);
         _ = aux.emit(v, .Close, .{ src_cur, 0 });
@@ -1307,7 +1306,7 @@ fn generateConstraintChecksImpl(
                         if (on_error == OE.Abort) main_mod.mayAbort(p);
                         const msg = try std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, c.name() });
                         _ = aux.emitStr(v, .HaltIfNull, .{ RC.CONSTRAINT_NOTNULL, on_error.int(), col_reg }, msg);
-                        aux.changeP5(v, vi.P5_ConstraintNotNull);
+                        aux.changeP5(v, vi.HaltP5{ .constraint = .not_null });
                     },
                     else => {
                         _ = aux.emit(v, .IsNull, .{ col_reg, ignore });
@@ -1334,7 +1333,7 @@ fn generateConstraintChecksImpl(
             }
             const all_ok = aux.newLabel(p);
             const copy = try expr_mod.exprDup(p.arena, e);
-            if (!db.malloc_failed) ec.exprIfTrue(p, copy, all_ok, vi.SQLITE_JUMPIFNULL);
+            if (!db.malloc_failed) ec.exprIfTrue(p, copy, all_ok, true);
             if (on_error == OE.Ignore) {
                 _ = aux.emit(v, .Goto, .{ 0, ignore });
             } else {
@@ -1342,7 +1341,7 @@ fn generateConstraintChecksImpl(
                 if (dconstraint.check(p, t, item.e_name, is_update, new_data)) |z| {
                     build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_CHECK, on_error, z, .none);
                 } else {
-                    build.haltConstraint(p, RC.CONSTRAINT_CHECK, on_error, item.e_name, vi.P5_ConstraintCheck);
+                    build.haltConstraint(p, RC.CONSTRAINT_CHECK, on_error, item.e_name, .check);
                 }
             }
             aux.place(v, all_ok);
@@ -1485,7 +1484,7 @@ fn generateConstraintChecksImpl(
         // An UPDATE need not check an unchanged rowid.
         if (is_update) {
             _ = aux.emit(v, .Eq, .{ new_data, rowid_ok, old_data });
-            aux.changeP5(v, vi.SQLITE_NOTNULL);
+            aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
         }
 
         _ = aux.emit(v, .NotExists, .{ data_cur, rowid_ok, new_data });
@@ -1544,7 +1543,7 @@ fn generateConstraintChecksImpl(
         if (idx.part_idx_where) |w| {
             _ = aux.emit(v, .Null, .{ 0, idx_rec });
             p.i_self_tab = -new_data.at(1).int();
-            ec.exprIfFalseDup(p, w, unique_ok, vi.SQLITE_JUMPIFNULL);
+            ec.exprIfFalseDup(p, w, unique_ok, true);
             p.i_self_tab = 0;
         }
 
@@ -1606,7 +1605,7 @@ fn generateConstraintChecksImpl(
                 // No conflict with the row being updated.
                 if (is_update) {
                     _ = aux.emit(v, .Eq, .{ other_key, unique_ok, old_data });
-                    aux.changeP5(v, vi.SQLITE_NOTNULL);
+                    aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
                 }
             } else {
                 const k = pk.?;
@@ -1630,7 +1629,7 @@ fn generateConstraintChecksImpl(
                         }
                         const old = build.columnRegister(t, old_data, k.ai_column[ii]);
                         _ = aux.emitAny4(v, op, .{ .reg, .jump, .reg }, .{ old, addr_jump, cmp_reg.at(ii) }, if (coll) |cl| .{ .collseq = cl } else .notused);
-                        aux.changeP5(v, vi.SQLITE_NOTNULL);
+                        aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
                     }
                 }
             }
@@ -1672,10 +1671,10 @@ fn generateConstraintChecksImpl(
                 if (x.opcode != OP.IdxRowid or is_update) {
                     // A copy of an instruction of any opcode: its operands
                     // are numbers here.
-                    const p2 = if (x.opcode.opflags() & vi.opcodes.OPFLG.JUMP != 0) recheck_ok.int() else x.p2;
+                    const p2 = if (x.opcode.props().jump) recheck_ok.int() else x.p2;
                     const copy = aux.emitRaw(v, x.opcode, x.p1, p2, x.p3);
                     aux.changeP4(v, copy, x.getP4());
-                    aux.changeP5(v, x.p5);
+                    aux.getOp(v, copy).p5 = x.p5;
                 }
             }
             build.uniqueConstraint(p, OE.Abort, idx, key_reg);
@@ -1702,7 +1701,7 @@ fn generateConstraintChecksImpl(
         if (pk == null) {
             if (is_update) {
                 _ = aux.emit(v, .Eq, .{ new_data, addr_recheck.?, old_data });
-                aux.changeP5(v, vi.SQLITE_NOTNULL);
+                aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
             }
             _ = aux.emit(v, .NotExists, .{ data_cur, addr_recheck.?, new_data });
             build.rowidConstraint(p, OE.Abort, t, new_data);
@@ -1724,9 +1723,11 @@ fn generateConstraintChecksImpl(
 const IndexListTerm = struct { idx: *Index, ix: usize };
 
 /// Port of sqlite3CompleteInsertion(): write the index entries and the
-/// record made by generateConstraintChecks(). `update_flags` is 0 for an
-/// INSERT, else OPFLAG_ISUPDATE (and OPFLAG_SAVEPOSITION).
-pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor, new_data: Reg, reg_idx: []const Reg, update_flags: u16, append_bias: bool, use_seek_result: bool) void {
+/// record made by generateConstraintChecks(). `update_flags` is empty for
+/// an INSERT, else `is_update` (and `save_position`).
+pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor, new_data: Reg, reg_idx: []const Reg, update_flags: vi.InsertP5, append_bias: bool, use_seek_result: bool) void {
+    const is_update = update_flags.is_update;
+    std.debug.assert(vi.p5.int(update_flags) == vi.p5.int(vi.InsertP5{ .is_update = is_update, .save_position = update_flags.save_position }));
     const v = p.vdbe.?;
     var i: usize = 0;
     var idx_opt = t.index;
@@ -1738,25 +1739,28 @@ pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor
         const rec = reg_idx[i];
         // A NULL record: no entry (partial indexes, and UPDATE of an index
         // on expressions).
-        if (idx.part_idx_where != null or (update_flags != 0 and idx.has_expr)) {
+        if (idx.part_idx_where != null or (is_update and idx.has_expr)) {
             _ = aux.emit(v, .IsNull, .{ rec, aux.here(v).plus(2) });
         }
-        var pik_flags: u16 = if (use_seek_result) OPFLAG.USESEEKRESULT else 0;
+        var pik_flags: vi.InsertP5 = .{ .use_seek_result = use_seek_result };
         if (idx.isPrimaryKey() and !t.hasRowid()) {
-            pik_flags |= OPFLAG.NCHANGE;
-            pik_flags |= update_flags & OPFLAG.SAVEPOSITION;
+            pik_flags.nchange = true;
+            pik_flags.save_position = update_flags.save_position;
         }
         _ = aux.emitInt(v, .IdxInsert, .{ idx_cur.at(i), rec, rec.at(1) }, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
         aux.changeP5(v, pik_flags);
     }
     if (!t.hasRowid()) return;
-    var pik_flags: u16 = 0;
+    var pik_flags: vi.InsertP5 = .{ .append = append_bias, .use_seek_result = use_seek_result };
     if (p.nested == 0) {
-        pik_flags = OPFLAG.NCHANGE;
-        pik_flags |= if (update_flags != 0) update_flags else OPFLAG.LASTROWID;
+        pik_flags.nchange = true;
+        if (is_update) {
+            pik_flags.is_update = true;
+            pik_flags.save_position = update_flags.save_position;
+        } else {
+            pik_flags.last_rowid = true;
+        }
     }
-    if (append_bias) pik_flags |= OPFLAG.APPEND;
-    if (use_seek_result) pik_flags |= OPFLAG.USESEEKRESULT;
     _ = aux.emit(v, .Insert, .{ data_cur, reg_idx[i], new_data });
     if (p.nested == 0) aux.appendP4(v, .{ .table = t });
     aux.changeP5(v, pik_flags);
@@ -1772,7 +1776,7 @@ pub const vtab_no_cursor: Cursor = .from(-999);
 /// with `to_open` set if given. Returns the number of indexes; the cursor
 /// of the table (the PRIMARY KEY of a WITHOUT ROWID table) goes to
 /// `data_cur` and that of the first index to `idx_cur`.
-pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, base_arg: ?Cursor, to_open: ?[]const bool, data_cur: *Cursor, idx_cur: *Cursor) usize {
+pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: vi.OpenP5, base_arg: ?Cursor, to_open: ?[]const bool, data_cur: *Cursor, idx_cur: *Cursor) usize {
     var p5 = p5_arg;
     if (t.e_tab_type == .vtab) {
         data_cur.* = vtab_no_cursor;
@@ -1799,7 +1803,7 @@ pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, base_arg: ?
         base = base.at(1);
         if (idx.isPrimaryKey() and !t.hasRowid()) {
             data_cur.* = this_cur;
-            p5 = 0;
+            p5 = .{};
         }
         if (to_open == null or to_open.?[i + 1]) {
             _ = aux.emitAny(v, op, open_shape, .{ this_cur, idx.tnum, i_db });

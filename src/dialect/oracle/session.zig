@@ -218,7 +218,7 @@ fn setCurrentSchemaFunc(ctx: *Context, argv: []*Mem) void {
         const s = nsp.find(schemas, name) orelse return ora_errors.resultError(ctx, "ORA-01435: user does not exist");
         st.setCurrentSchema(db.gpa, s.name) catch return api.resultErrorNomem(ctx);
     }
-    @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    @import("../../vdbe/aux.zig").expirePreparedStatements(db, .now);
     api.resultText(ctx, st.currentSchema(), .transient);
 }
 

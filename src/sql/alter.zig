@@ -1561,7 +1561,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         } else {
             _ = aux.emit(v, .Insert, .{ cur, rec, reg });
         }
-        aux.changeP5(v, vi.OPFLAG.SAVEPOSITION);
+        aux.changeP5(v, vi.InsertP5{ .save_position = true });
         _ = aux.emit(v, .Next, .{ cur, addr.plus(1) });
         aux.landHere(v, addr);
     }

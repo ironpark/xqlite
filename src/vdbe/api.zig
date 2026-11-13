@@ -32,11 +32,11 @@ fn stepOnce(v: *Vdbe) i32 {
             _ = reset(v);
         }
         std.debug.assert(v.e_vdbe_state == .ready);
-        if (v.expired != 0) {
+        if (v.expired != .no) {
             v.rc = RC.SCHEMA;
             // A statement with saved SQL returns SQLITE_SCHEMA, so that
             // step() compiles it again.
-            const r = if (v.prep_flags & aux.PREPARE_SAVESQL != 0) aux.transferError(v) else RC.ERROR;
+            const r = if (v.prep_flags.save_sql) aux.transferError(v) else RC.ERROR;
             return r & db.err_mask;
         }
         if (db.n_vdbe_active == 0) db.is_interrupted.store(false, .monotonic);
@@ -49,7 +49,7 @@ fn stepOnce(v: *Vdbe) i32 {
             v.start_time = osCurrentTimeInt64();
         }
     }
-    if (v.explain != 0) {
+    if (v.explain != .none) {
         rc = aux.list(v);
     } else {
         db.n_vdbe_exec += 1;
@@ -67,7 +67,7 @@ fn stepOnce(v: *Vdbe) i32 {
         std.debug.assert(v.rc == RC.OK);
         v.rc = doWalCallbacks(db);
         if (v.rc != RC.OK) rc = RC.ERROR;
-    } else if (rc != RC.DONE and v.prep_flags & aux.PREPARE_SAVESQL != 0) {
+    } else if (rc != RC.DONE and v.prep_flags.save_sql) {
         // A statement with saved SQL returns the error of the program
         // (an extended code, SQLITE_SCHEMA for a reprepare), also set on
         // the connection.
@@ -163,7 +163,7 @@ pub fn reset(v: *Vdbe) i32 {
 fn rowToDbEnc(v: *Vdbe) void {
     @branchHint(.cold);
     const row = v.result_row orelse return;
-    for (row[0..v.n_res_column]) |*m| mem.toDbEnc(m);
+    for (row) |*m| mem.toDbEnc(m);
 }
 
 /// Port of sqlite3_finalize().
@@ -178,7 +178,7 @@ pub fn clearBindings(v: *Vdbe) void {
         mem.release(m);
         m.flags = .{ .Null = true };
     }
-    if (v.expmask != 0) v.expired = 1;
+    if (v.expmask != 0) v.expired = .now;
 }
 
 /// Port of sqlite3_changes64().
@@ -207,7 +207,7 @@ pub fn dataCount(v: *const Vdbe) usize {
 /// Port of columnMem(): the value of column `i` (a NULL outside a row).
 fn columnMem(v: *Vdbe, i: usize) *Mem {
     if (v.result_row) |row| {
-        if (i < v.n_res_column) return &row[i];
+        if (i < row.len) return &row[i];
     }
     v.null_mem = .{ .flags = .{ .Null = true } };
     return &v.null_mem;
@@ -236,10 +236,10 @@ pub fn columnDouble(v: *Vdbe, i: usize) f64 {
     return r;
 }
 
-/// Port of sqlite3_stmt_isexplain(): 1 for EXPLAIN, 2 for EXPLAIN QUERY
-/// PLAN, else 0.
-pub fn stmtIsExplain(v: *Vdbe) u8 {
-    return @intCast(v.explain);
+/// Port of sqlite3_stmt_isexplain(): whether the statement is EXPLAIN or
+/// EXPLAIN QUERY PLAN.
+pub fn stmtIsExplain(v: *Vdbe) int.Explain {
+    return v.explain;
 }
 
 /// Port of sqlite3_column_text(): null for NULL.
@@ -278,18 +278,14 @@ pub fn columnValue(v: *Vdbe, i: usize) *Mem {
 /// column `i`.
 pub fn columnNameOf(v: *Vdbe, i: usize, var_: usize) ?[:0]const u8 {
     if (i >= v.n_res_column) return null;
-    if (v.explain != 0) {
+    if (v.explain != .none) {
         if (var_ != vi.COLNAME_NAME) return null;
-        const k = if (v.explain == 2) i + 8 else i;
-        return explain_names[k];
+        return v.explain.columnNames()[i];
     }
     return valueText(colNameMem(v, i, var_) orelse return null);
 }
 
-const explain_names = [_][:0]const u8{
-    "addr", "opcode", "p1",      "p2",     "p3", "p4", "p5", "comment",
-    "id",   "parent", "notused", "detail",
-};
+const explain_names = int.explain_column_names;
 
 /// explain_names in native UTF-16.
 const explain_names16 = blk: {
@@ -309,10 +305,10 @@ const explain_names16 = blk: {
 fn colNameMem(v: *Vdbe, i: usize, var_: usize) ?*Mem {
     if (var_ < vi.COLNAME_N) {
         if (v.col_names.len == 0) return null;
-        return &v.col_names[i + var_ * v.n_res_alloc];
+        return &v.col_names[i + var_ * v.nColNames()];
     }
     if (v.col_meta.len == 0) return null;
-    return &v.col_meta[i + (var_ - vi.COLNAME_N) * v.n_res_alloc];
+    return &v.col_meta[i + (var_ - vi.COLNAME_N) * v.nColNames()];
 }
 
 pub fn columnName(v: *Vdbe, i: usize) ?[:0]const u8 {
@@ -384,10 +380,10 @@ pub fn columnBytes16(v: *Vdbe, i: usize) usize {
 /// as UTF-16, converted in place like valueText16().
 pub fn columnName16(v: *Vdbe, i: usize, var_: usize) ?[*]const u8 {
     if (i >= v.n_res_column) return null;
-    if (v.explain != 0) {
+    if (v.explain != .none) {
         // The fixed EXPLAIN names (azExplainColNames16data).
         if (var_ != vi.COLNAME_NAME) return null;
-        const k = if (v.explain == 2) i + 8 else i;
+        const k = if (v.explain == .query_plan) i + 8 else i;
         return @ptrCast(explain_names16[k].ptr);
     }
     const m = colNameMem(v, i, var_) orelse return null;
@@ -492,7 +488,7 @@ fn unbindFor(v: *Vdbe, i: usize, new: ?i64) i32 {
         main_mod.errorWithMsg(v.db, RC.MISUSE, "bad parameter or other API misuse", .{});
         return RC.MISUSE;
     }
-    if (i < 1 or i > v.n_var) {
+    if (i < 1 or i > v.vars.len) {
         main_mod.setError(v.db, RC.RANGE);
         return RC.RANGE;
     }
@@ -504,7 +500,7 @@ fn unbindFor(v: *Vdbe, i: usize, new: ?i64) i32 {
             (if (v.smimask & bit != 0) old_small != isSmallInt(x) else !m.flags.Int or m.u.i != x)
         else
             v.smimask & bit == 0 or old_small;
-        if (changed) v.expired = 1;
+        if (changed) v.expired = .now;
     }
     mem.release(m);
     m.flags = .{ .Null = true };
@@ -601,7 +597,7 @@ pub fn bindTextEnc(v: *Vdbe, i: usize, text: []const u8, enc: u8) i32 {
 
 /// Port of sqlite3_bind_parameter_count().
 pub fn bindParameterCount(v: *const Vdbe) usize {
-    return @intCast(v.n_var);
+    return @intCast(v.vars.len);
 }
 
 /// Port of sqlite3_bind_parameter_name(): null for nameless parameters.
@@ -1275,7 +1271,7 @@ pub fn scanStatus(v: *Vdbe, i_scan_arg: i32, op: i32, flags: i32, out: *anyopaqu
                         // Every instruction on cursor i_end that counts.
                         for (ops, stats) |o, s| {
                             if (o.p1 != i_end) continue;
-                            if (o.opcode.opflags() & @import("opcodes.zig").OPFLG.NCYCLE == 0) continue;
+                            if (!o.opcode.props().ncycle) continue;
                             res +%= @bitCast(s.n_cycle);
                         }
                     }

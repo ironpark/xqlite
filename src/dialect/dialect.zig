@@ -664,7 +664,7 @@ fn applyForeignKeys(p: *Parse) void {
         if (!db.flags.ForeignKeys) return;
     }
     db.flags.ForeignKeys = !db.flags.ForeignKeys;
-    @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    @import("../vdbe/aux.zig").expirePreparedStatements(db, .now);
 }
 
 /// Compile the first statement of `sql` with the connection's frontend

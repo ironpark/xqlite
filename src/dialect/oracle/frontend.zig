@@ -128,7 +128,7 @@ fn fail(p: *int.Parse, sql: [:0]const u8, msg: []const u8) lower.Error {
 /// autocommit mode: if xq_ora_autocommit() then OP_AutoCommit 0 (which
 /// ends the statement, leaving its changes in the transaction).
 fn implicitTransaction(p: *int.Parse) void {
-    if (p.explain != 0 or p.n_err > 0) return;
+    if (p.explain != .none or p.n_err > 0) return;
     const v = build.getVdbe(p) orelse return;
     const r = autocommitRegister(p) orelse return;
     const skip = aux.emit(v, .IfNot, .{r});

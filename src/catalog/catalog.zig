@@ -357,7 +357,7 @@ pub const Query = struct {
         const x_auth = db.auth;
         db.auth = null;
         defer db.auth = x_auth;
-        try int.check(prepare.prepareLang(db, sql, .sqlite, 0, &stmt, null));
+        try int.check(prepare.prepareLang(db, sql, .sqlite, .{}, &stmt, null));
         return .{ .v = stmt orelse return error.Misuse };
     }
 

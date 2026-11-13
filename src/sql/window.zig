@@ -1000,12 +1000,12 @@ fn windowCheckValue(p: *Parse, reg: Reg, e_cond: usize) void {
         const reg_string = expr_mod.getTempReg(p);
         _ = aux.emit4(v, .String8, .{ 0, reg_string }, .{ .z = "" });
         _ = aux.emit(v, .Ge, .{ reg_string, aux.here(v).plus(2), reg });
-        aux.changeP5(v, Aff.numeric | vi.SQLITE_JUMPIFNULL);
+        aux.changeP5(v, vi.CmpP5.init(Aff.numeric, .{ .jump_if_null = true }));
     } else {
         _ = aux.emit(v, .MustBeInt, .{ reg, aux.here(v).plus(2) });
     }
     _ = aux.emitAny(v, ops[e_cond], compare_shape, .{ reg_zero, aux.here(v).plus(2), reg });
-    aux.changeP5(v, Aff.numeric);
+    aux.changeP5(v, vi.CmpP5.init(Aff.numeric, .{}));
     main_mod.mayAbort(p);
     _ = aux.emit(v, .Halt, .{ RC.ERROR, OE.Abort.int() });
     aux.appendP4(v, .{ .z = errs[e_cond] });
@@ -1130,7 +1130,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
             }
             _ = aux.emitAny(v, if (b_inverse) OP.AggInverse else OP.AggStep, .{ .int, .reg, .reg }, .{ b_inverse, reg_arg, win.reg_accum });
             aux.appendP4(v, .{ .funcdef = func });
-            aux.changeP5(v, @intCast(n_arg));
+            aux.changeP5(v, @as(u16, @intCast(n_arg)));
             if (win.expr_args) expr_mod.releaseTempRange(p, reg_arg, n_arg);
         }
 
@@ -1458,7 +1458,7 @@ fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: Cursor, reg_val: Re
     _ = aux.emitAny(v, op, compare_shape, .{ reg2, lbl, reg1 });
     const coll = expr_mod.nnCollSeq(p, order_by.at(0).expr);
     aux.appendP4(v, .{ .collseq = coll });
-    aux.changeP5(v, vi.SQLITE_NULLEQ);
+    aux.changeP5(v, vi.CmpP5{ .null_eq = true });
     aux.place(v, lbl_done);
 
     expr_mod.releaseTempReg(p, reg1);
@@ -1561,7 +1561,7 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: Reg, jump_on_eof: bo
 
     if (op == cx.e_delete) {
         _ = aux.emit(v, .Delete, .{csr});
-        aux.changeP5(v, vi.OPFLAG.SAVEPOSITION);
+        aux.changeP5(v, vi.DeleteP5{ .save_position = true });
     }
 
     if (jump_on_eof) {

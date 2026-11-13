@@ -1652,7 +1652,7 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
                     };
                     if (e.left != null and !item.func.?.func_flags.NEEDCOLL) {
                         // ORDER BY in an aggregate (ignored for min/max).
-                        item.i_ob_tab = p.newCursor().int();
+                        item.i_ob_tab = p.newCursor();
                         const ob = e.left.?.x.list.?;
                         if (ob.len() == 1 and n_arg == 1 and compare(null, ob.at(0).expr, e.x.list.?.at(0).expr, -1) == 0) {
                             item.b_ob_payload = false;
@@ -1662,7 +1662,7 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
                         }
                         item.b_use_subtype = item.func.?.func_flags.SUBTYPE;
                     } else {
-                        item.i_ob_tab = -1;
+                        item.i_ob_tab = null;
                     }
                     if (e.flags.Distinct and !item.b_ob_unique) {
                         item.i_distinct = p.newCursor().int();

@@ -309,7 +309,7 @@ fn materializeViewImpl(p: *Parse, view: *Table, where_arg: ?*Expr, order_by: ?*E
     item.name = try p.arena.dupeSentinel(u8, view.name, 0);
     item.u4 = .{ .database = try p.arena.dupeSentinel(u8, db.dbs.items[i_db].name, 0) };
     const sel = try select_mod.selectNew(p, null, from, where, null, null, order_by, .{ .IncludeHidden = true }, limit);
-    var dest = select_mod.selectDestInit(select_mod.SRT.EphemTab, cur.int());
+    var dest = select_mod.selectDestInit(select_mod.SRT.EphemTab, .{ .cursor = cur });
     select_mod.select(p, sel, &dest) catch {};
 }
 

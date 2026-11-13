@@ -1119,11 +1119,11 @@ pub fn addLimit(wc: *WhereClause, sel: *Select) Oom!void {
 
         const limit = sel.limit.?;
         std.debug.assert(limit.op == TK.LIMIT);
-        if (sel.i_offset != 0 and !sel.sel_flags.Compound) {
-            try whereAddLimitExpr(wc, sel.i_offset, limit.right, i_csr, INDEX_CONSTRAINT.OFFSET);
+        if (!sel.i_offset.isNone() and !sel.sel_flags.Compound) {
+            try whereAddLimitExpr(wc, sel.i_offset.int(), limit.right, i_csr, INDEX_CONSTRAINT.OFFSET);
         }
-        if (sel.i_offset == 0 or !sel.sel_flags.Compound) {
-            try whereAddLimitExpr(wc, sel.i_limit, limit.left, i_csr, INDEX_CONSTRAINT.LIMIT);
+        if (sel.i_offset.isNone() or !sel.sel_flags.Compound) {
+            try whereAddLimitExpr(wc, sel.i_limit.int(), limit.left, i_csr, INDEX_CONSTRAINT.LIMIT);
         }
     }
 }

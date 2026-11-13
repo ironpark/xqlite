@@ -82,8 +82,8 @@ fn updateFromSelect(p: *Parse, eph_cur: Cursor, pk: ?*Index, changes: *ExprList,
     for (changes.slice()) |item| list = try expr_mod.listAppend(p, list, try expr_mod.exprDup(p.arena, item.expr));
     const sel = try select_mod.selectNew(p, list, src, where2, null, null, null, .{ .UFSrcCheck = true, .IncludeHidden = true, .UpdateFrom = true }, null);
     sel.sel_flags.OrderByReqd = true;
-    var dest = select_mod.selectDestInit(e_dest, eph_cur.int());
-    dest.i_sd_parm2 = if (pk) |k| k.n_key_col else -1;
+    var dest = select_mod.selectDestInit(e_dest, .{ .cursor = eph_cur });
+    dest.n_pk = if (pk) |k| k.n_key_col else -1;
     select_mod.select(p, sel, &dest) catch {};
     // xqlite: the types the query gave the new values, for the stores of
     // the dialect's types (the values written are the query's).

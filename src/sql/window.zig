@@ -706,7 +706,7 @@ fn rewriteExpr(w: *Walker, e: *Expr) Oom!WRC {
                 e.* = .{
                     .op = TK.COLUMN,
                     .i_column = @intCast(i_col orelse sub.len() - 1),
-                    .i_table = r.win.i_eph_csr,
+                    .i_table = r.win.i_eph_csr.int(),
                     .y = .{ .tab = r.tab },
                     .flags = f,
                 };
@@ -834,7 +834,7 @@ pub fn windowRewrite(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
 
     // The cursor of the ephemeral table buffering rows (and three more
     // opened on it). It is opened later, once its width is known.
-    m_win.i_eph_csr = p.newCursors(4).int();
+    m_win.i_eph_csr = p.newCursors(4);
 
     selectWindowRewriteEList(p, m_win, src, s.e_list, tab, &sublist);
     selectWindowRewriteEList(p, m_win, src, s.order_by, tab, &sublist);
@@ -861,9 +861,9 @@ pub fn windowRewrite(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
         if (win.filter) |filter| {
             sublist = try expr_mod.listAppend(p, sublist, try expr_mod.exprDup(p.arena, filter));
         }
-        win.reg_accum = p.newReg().int();
-        win.reg_result = p.newReg().int();
-        _ = aux.emit(v, .Null, .{ 0, Reg.from(win.reg_accum) });
+        win.reg_accum = p.newReg();
+        win.reg_result = p.newReg();
+        _ = aux.emit(v, .Null, .{ 0, win.reg_accum });
     }
 
     // "SELECT row_number() OVER () FROM t1" selects nothing from t1: keep
@@ -913,7 +913,7 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
     const n_eph_expr: i32 = @intCast(item0.u4.subq.?.select.e_list.?.len());
     const m_win = s.win.?;
     const v = p.vdbe.?;
-    const eph: Cursor = .from(m_win.i_eph_csr);
+    const eph = m_win.i_eph_csr;
 
     _ = aux.emit(v, .OpenEphemeral, .{ eph, n_eph_expr });
     _ = aux.emit(v, .OpenDup, .{ eph.at(1), eph });
@@ -924,20 +924,21 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
     if (m_win.partition) |part| {
         const n_expr: i32 = @intCast(part.len());
         const reg_part = p.newRegs(n_expr);
-        m_win.reg_part = reg_part.int();
+        m_win.reg_part = reg_part;
         _ = aux.emit(v, .Null, .{ 0, reg_part, reg_part.at(n_expr - 1) });
     }
 
-    m_win.reg_one = p.newReg().int();
-    _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_one) });
+    m_win.reg_one = p.newReg();
+    _ = aux.emit(v, .Integer, .{ 1, m_win.reg_one });
 
     if (m_win.e_exclude != 0) {
-        m_win.reg_start_rowid = p.newReg().int();
-        m_win.reg_end_rowid = p.newReg().int();
-        m_win.csr_app = p.newCursor().int();
-        _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_start_rowid) });
-        _ = aux.emit(v, .Integer, .{ 0, Reg.from(m_win.reg_end_rowid) });
-        _ = aux.emit(v, .OpenDup, .{ Cursor.from(m_win.csr_app), eph });
+        m_win.reg_start_rowid = p.newReg();
+        m_win.reg_end_rowid = p.newReg();
+        const csr_app = p.newCursor();
+        m_win.csr_app = csr_app;
+        _ = aux.emit(v, .Integer, .{ 1, m_win.reg_start_rowid });
+        _ = aux.emit(v, .Integer, .{ 0, m_win.reg_end_rowid });
+        _ = aux.emit(v, .OpenDup, .{ csr_app, eph });
         return;
     }
 
@@ -950,23 +951,26 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
             // a counter that makes the keys unique, reg_app+2 the record.
             const list = win.owner.?.x.list.?;
             const key_info = select_mod.keyInfoFromExprList(p, list, 0, 0);
-            win.csr_app = p.newCursor().int();
-            win.reg_app = p.newRegs(3).int();
+            const csr_app = p.newCursor();
+            win.csr_app = csr_app;
+            win.reg_app = p.newRegs(3);
             if (key_info) |ki| if (f.name[1] == 'i') {
                 std.debug.assert(ki.sort_flags[0] == 0);
                 ki.sort_flags[0] = int.KeyInfoOrder.desc;
             };
-            _ = aux.emit(v, .OpenEphemeral, .{ Cursor.from(win.csr_app), 2 });
+            _ = aux.emit(v, .OpenEphemeral, .{ csr_app, 2 });
             if (key_info) |ki| aux.appendP4(v, .{ .keyinfo = ki });
-            _ = aux.emit(v, .Integer, .{ 0, Reg.from(win.reg_app).at(1) });
+            _ = aux.emit(v, .Integer, .{ 0, win.reg_app.at(1) });
         } else if (isFunc(f, nth_value_name) or isFunc(f, first_value_name)) {
             // Two registers for the start and end of the current frame.
-            win.reg_app = p.newRegs(2).int();
-            win.csr_app = p.newCursor().int();
-            _ = aux.emit(v, .OpenDup, .{ Cursor.from(win.csr_app), eph });
+            win.reg_app = p.newRegs(2);
+            const csr_app = p.newCursor();
+            win.csr_app = csr_app;
+            _ = aux.emit(v, .OpenDup, .{ csr_app, eph });
         } else if (isFunc(f, lead_name) or isFunc(f, lag_name)) {
-            win.csr_app = p.newCursor().int();
-            _ = aux.emit(v, .OpenDup, .{ Cursor.from(win.csr_app), eph });
+            const csr_app = p.newCursor();
+            win.csr_app = csr_app;
+            _ = aux.emit(v, .OpenDup, .{ csr_app, eph });
         }
     }
 }
@@ -1031,7 +1035,7 @@ const WindowCodeArg = struct {
     m_win: *Window,
     v: *vi.Vdbe,
     /// OP_Gosub to here to return one row.
-    addr_gosub: Jump,
+    addr_gosub: Label,
     /// Register of that OP_Gosub.
     reg_gosub: Reg,
     /// First of the argument registers.
@@ -1077,7 +1081,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
             if (i != 1 or !isFunc(func, nth_value_name)) {
                 _ = aux.emit(v, .Column, .{ csr, win.i_arg_col + i, reg.at(i) });
             } else {
-                _ = aux.emit(v, .Column, .{ Cursor.from(m_win.i_eph_csr), win.i_arg_col + i, reg.at(i) });
+                _ = aux.emit(v, .Column, .{ m_win.i_eph_csr, win.i_arg_col + i, reg.at(i) });
             }
         }
         var reg_arg = reg;
@@ -1089,9 +1093,9 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
             expr_mod.releaseTempReg(p, reg_tmp);
         }
 
-        if (m_win.reg_start_rowid == 0 and func.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
-            const reg_app: Reg = .from(win.reg_app);
-            const csr_app: Cursor = .from(win.csr_app);
+        if (m_win.reg_start_rowid.isNone() and func.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
+            const reg_app = win.reg_app;
+            const csr_app = win.csr_app.?;
             const addr_is_null = aux.emit(v, .IsNull, .{reg_arg});
             if (!b_inverse) {
                 _ = aux.emit(v, .AddImm, .{ reg_app.at(1), 1 });
@@ -1104,10 +1108,10 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
                 aux.landHere(v, aux.here(v).plus(-2));
             }
             aux.landHere(v, addr_is_null);
-        } else if (win.reg_app != 0) {
+        } else if (!win.reg_app.isNone()) {
             std.debug.assert(win.filter == null);
             std.debug.assert(isFunc(func, nth_value_name) or isFunc(func, first_value_name));
-            _ = aux.emit(v, .AddImm, .{ Reg.from(win.reg_app + 1 - @intFromBool(b_inverse)), 1 });
+            _ = aux.emit(v, .AddImm, .{ win.reg_app.at(1 - @as(i32, @intFromBool(b_inverse))), 1 });
         } else if (func.x_sfunc.? != &noopStepFunc) {
             const list = win.owner.?.x.list;
             if (win.expr_args) {
@@ -1118,7 +1122,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
                 const i_end = aux.currentAddr(v);
                 while (i_op < i_end) : (i_op += 1) {
                     const op = aux.getOp(v, .from(i_op));
-                    if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr) op.p1 = csr.int();
+                    if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr.int()) op.p1 = csr.int();
                 }
             }
             if (func.func_flags.NEEDCOLL) {
@@ -1126,7 +1130,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
                 const coll = expr_mod.nnCollSeq(p, list.?.at(0).expr);
                 _ = aux.emit4(v, .CollSeq, .{}, .{ .collseq = coll });
             }
-            _ = aux.emitAny(v, if (b_inverse) OP.AggInverse else OP.AggStep, .{ .int, .reg, .reg }, .{ b_inverse, reg_arg, Reg.from(win.reg_accum) });
+            _ = aux.emitAny(v, if (b_inverse) OP.AggInverse else OP.AggStep, .{ .int, .reg, .reg }, .{ b_inverse, reg_arg, win.reg_accum });
             aux.appendP4(v, .{ .funcdef = func });
             aux.changeP5(v, @intCast(n_arg));
             if (win.expr_args) expr_mod.releaseTempRange(p, reg_arg, n_arg);
@@ -1150,18 +1154,18 @@ fn windowAggFinal(cx: *WindowCodeArg, b_fin: bool) void {
     const v = p.vdbe.?;
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
-        const reg_result: Reg = .from(win.reg_result);
-        if (m_win.reg_start_rowid == 0 and win.w_func.?.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
-            const csr_app: Cursor = .from(win.csr_app);
+        const reg_result = win.reg_result;
+        if (m_win.reg_start_rowid.isNone() and win.w_func.?.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
+            const csr_app = win.csr_app.?;
             _ = aux.emit(v, .Null, .{ 0, reg_result });
             _ = aux.emit(v, .Last, .{csr_app});
             _ = aux.emit(v, .Column, .{ csr_app, 0, reg_result });
             aux.landHere(v, aux.here(v).plus(-2));
-        } else if (win.reg_app != 0) {
-            std.debug.assert(m_win.reg_start_rowid == 0);
+        } else if (!win.reg_app.isNone()) {
+            std.debug.assert(m_win.reg_start_rowid.isNone());
         } else {
             const n_arg = windowArgCount(win);
-            const reg_accum: Reg = .from(win.reg_accum);
+            const reg_accum = win.reg_accum;
             if (b_fin) {
                 _ = aux.emit(v, .AggFinal, .{ reg_accum, n_arg });
                 aux.appendP4(v, .{ .funcdef = win.w_func.? });
@@ -1183,8 +1187,8 @@ fn windowFullScan(cx: *WindowCodeArg) void {
     const m_win = cx.m_win;
     const v = cx.v;
 
-    const csr: Cursor = .from(m_win.csr_app);
-    const eph: Cursor = .from(m_win.i_eph_csr);
+    const csr = m_win.csr_app.?;
+    const eph = m_win.i_eph_csr;
     const n_peer: i32 = if (m_win.order_by) |l| @intCast(l.len()) else 0;
 
     const lbl_next = aux.newLabel(p);
@@ -1204,13 +1208,13 @@ fn windowFullScan(cx: *WindowCodeArg) void {
 
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
-        _ = aux.emit(v, .Null, .{ 0, Reg.from(win.reg_accum) });
+        _ = aux.emit(v, .Null, .{ 0, win.reg_accum });
     }
 
-    _ = aux.emit(v, .SeekGE, .{ csr, lbl_brk, Reg.from(m_win.reg_start_rowid) });
+    _ = aux.emit(v, .SeekGE, .{ csr, lbl_brk, m_win.reg_start_rowid });
     const addr_next = aux.here(v);
     _ = aux.emit(v, .Rowid, .{ csr, reg_rowid });
-    _ = aux.emit(v, .Gt, .{ Reg.from(m_win.reg_end_rowid), lbl_brk, reg_rowid });
+    _ = aux.emit(v, .Gt, .{ m_win.reg_end_rowid, lbl_brk, reg_rowid });
 
     if (m_win.e_exclude == TK.CURRENT) {
         _ = aux.emit(v, .Eq, .{ reg_c_rowid, lbl_next, reg_rowid });
@@ -1258,18 +1262,18 @@ fn windowReturnOneRow(cx: *WindowCodeArg) void {
     const m_win = cx.m_win;
     const v = cx.v;
 
-    if (m_win.reg_start_rowid != 0) {
+    if (!m_win.reg_start_rowid.isNone()) {
         windowFullScan(cx);
     } else {
         const p = cx.parse;
-        const eph: Cursor = .from(m_win.i_eph_csr);
+        const eph = m_win.i_eph_csr;
         var it: ?*Window = m_win;
         while (it) |win| : (it = win.next_win) {
             const func = win.w_func.?;
-            const reg_result: Reg = .from(win.reg_result);
+            const reg_result = win.reg_result;
             if (isFunc(func, nth_value_name) or isFunc(func, first_value_name)) {
-                const csr: Cursor = .from(win.csr_app);
-                const reg_app: Reg = .from(win.reg_app);
+                const csr = win.csr_app.?;
+                const reg_app = win.reg_app;
                 const lbl = aux.newLabel(p);
                 const tmp_reg: Reg = expr_mod.getTempReg(p);
                 _ = aux.emit(v, .Null, .{ 0, reg_result });
@@ -1288,7 +1292,7 @@ fn windowReturnOneRow(cx: *WindowCodeArg) void {
                 expr_mod.releaseTempReg(p, tmp_reg);
             } else if (isFunc(func, lead_name) or isFunc(func, lag_name)) {
                 const n_arg = windowArgCount(win);
-                const csr: Cursor = .from(win.csr_app);
+                const csr = win.csr_app.?;
                 const lbl = aux.newLabel(p);
                 const tmp_reg: Reg = expr_mod.getTempReg(p);
 
@@ -1328,20 +1332,20 @@ fn windowInitAccum(p: *Parse, m_win: *Window) Reg {
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
         const func = win.w_func.?;
-        std.debug.assert(win.reg_accum != 0);
-        _ = aux.emit(v, .Null, .{ 0, Reg.from(win.reg_accum) });
+        std.debug.assert(!win.reg_accum.isNone());
+        _ = aux.emit(v, .Null, .{ 0, win.reg_accum });
         n_arg = @max(n_arg, windowArgCount(win));
-        if (m_win.reg_start_rowid == 0) {
-            const reg_app: Reg = .from(win.reg_app);
+        if (m_win.reg_start_rowid.isNone()) {
+            const reg_app = win.reg_app;
             if (isFunc(func, nth_value_name) or isFunc(func, first_value_name)) {
                 _ = aux.emit(v, .Integer, .{ 0, reg_app });
                 _ = aux.emit(v, .Integer, .{ 0, reg_app.at(1) });
             }
-            if (func.func_flags.MINMAX and win.csr_app != 0) {
+            if (func.func_flags.MINMAX) if (win.csr_app) |csr_app| {
                 std.debug.assert(win.e_start != TK.UNBOUNDED);
-                _ = aux.emit(v, .ResetSorter, .{Cursor.from(win.csr_app)});
+                _ = aux.emit(v, .ResetSorter, .{csr_app});
                 _ = aux.emit(v, .Integer, .{ 0, reg_app.at(1) });
-            }
+            };
         }
     }
     const reg_arg = p.newRegs(n_arg);
@@ -1351,7 +1355,7 @@ fn windowInitAccum(p: *Parse, m_win: *Window) Reg {
 /// Port of windowCacheFrame(): whether the frame must be kept in the
 /// ephemeral table even if no xInverse calls need it.
 fn windowCacheFrame(m_win: *Window) bool {
-    if (m_win.reg_start_rowid != 0) return true;
+    if (!m_win.reg_start_rowid.isNone()) return true;
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
         const func = win.w_func.?;
@@ -1501,7 +1505,7 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: Reg, jump_on_eof: bo
         }
     }
 
-    if (op == WINDOW_RETURN_ROW and m_win.reg_start_rowid == 0) {
+    if (op == WINDOW_RETURN_ROW and m_win.reg_start_rowid.isNone()) {
         windowAggFinal(cx, false);
     }
     const addr_continue = aux.here(v);
@@ -1537,9 +1541,9 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: Reg, jump_on_eof: bo
         WINDOW_AGGINVERSE => {
             csr = cx.start.csr;
             reg = cx.start.reg;
-            if (m_win.reg_start_rowid != 0) {
-                std.debug.assert(m_win.reg_end_rowid != 0);
-                _ = aux.emit(v, .AddImm, .{ Reg.from(m_win.reg_start_rowid), 1 });
+            if (!m_win.reg_start_rowid.isNone()) {
+                std.debug.assert(!m_win.reg_end_rowid.isNone());
+                _ = aux.emit(v, .AddImm, .{ m_win.reg_start_rowid, 1 });
             } else {
                 windowAggStep(cx, m_win, csr, true, cx.reg_arg);
             }
@@ -1548,9 +1552,9 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: Reg, jump_on_eof: bo
             std.debug.assert(op == WINDOW_AGGSTEP);
             csr = cx.end.csr;
             reg = cx.end.reg;
-            if (m_win.reg_start_rowid != 0) {
-                std.debug.assert(m_win.reg_end_rowid != 0);
-                _ = aux.emit(v, .AddImm, .{ Reg.from(m_win.reg_end_rowid), 1 });
+            if (!m_win.reg_start_rowid.isNone()) {
+                std.debug.assert(!m_win.reg_end_rowid.isNone());
+                _ = aux.emit(v, .AddImm, .{ m_win.reg_end_rowid, 1 });
             } else {
                 windowAggStep(cx, m_win, csr, false, cx.reg_arg);
             }
@@ -1637,7 +1641,7 @@ fn windowExprGtZero(p: *Parse, e: ?*Expr) bool {
 /// AGGINVERSE calls xInverse on the row of csrStart and advances it. The
 /// other frame types use variants of this; see the comment on
 /// sqlite3WindowCodeStep() in window.c.
-pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_gosub: i32, addr_gosub: i32) void {
+pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_gosub: Reg, addr_gosub: Label) void {
     const m_win = s.win.?;
     const order_by = m_win.order_by;
     const v = p.vdbe.?;
@@ -1658,14 +1662,14 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
 
     // The cursor of the rows to return, the one that inserts, and those of
     // the start and the end of the frame.
-    const csr_current: Cursor = .from(m_win.i_eph_csr);
+    const csr_current = m_win.i_eph_csr;
     const csr_write = csr_current.at(1);
     var cx: WindowCodeArg = .{
         .parse = p,
         .m_win = m_win,
         .v = v,
-        .reg_gosub = .from(reg_gosub),
-        .addr_gosub = .from(addr_gosub),
+        .reg_gosub = reg_gosub,
+        .addr_gosub = addr_gosub,
         .current = .{ .csr = csr_current },
         .start = .{ .csr = csr_current.at(2) },
         .end = .{ .csr = csr_current.at(3) },
@@ -1733,7 +1737,7 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
     if (m_win.partition) |part| {
         const n_part: i32 = @intCast(part.len());
         const reg_new_part = reg_new.at(m_win.n_buffer_col);
-        const reg_part: Reg = .from(m_win.reg_part);
+        const reg_part = m_win.reg_part;
         const key_info = select_mod.keyInfoFromExprList(p, part, 0, 0);
 
         reg_flush_part = p.newReg();
@@ -1748,7 +1752,7 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
     // Insert the row into the ephemeral table.
     _ = aux.emit(v, .NewRowid, .{ csr_write, cx.reg_rowid });
     _ = aux.emit(v, .Insert, .{ csr_write, reg_record, cx.reg_rowid });
-    const addr_ne = aux.emit(v, .Ne, .{ Reg.from(m_win.reg_one), 0, cx.reg_rowid });
+    const addr_ne = aux.emit(v, .Ne, .{ m_win.reg_one, 0, cx.reg_rowid });
 
     // The first row of each partition.
     cx.reg_arg = windowInitAccum(p, m_win);
@@ -1899,9 +1903,9 @@ pub fn windowCodeStep(p: *Parse, s: *Select, w_info: *where_mod.WhereInfo, reg_g
 
     _ = aux.emit(v, .ResetSorter, .{cx.current.csr});
     if (m_win.partition != null) {
-        if (m_win.reg_start_rowid != 0) {
-            _ = aux.emit(v, .Integer, .{ 1, Reg.from(m_win.reg_start_rowid) });
-            _ = aux.emit(v, .Integer, .{ 0, Reg.from(m_win.reg_end_rowid) });
+        if (!m_win.reg_start_rowid.isNone()) {
+            _ = aux.emit(v, .Integer, .{ 1, m_win.reg_start_rowid });
+            _ = aux.emit(v, .Integer, .{ 0, m_win.reg_end_rowid });
         }
         aux.changeP1(v, addr_integer, aux.currentAddr(v));
         _ = aux.emit(v, .Return, .{reg_flush_part});

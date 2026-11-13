@@ -5,6 +5,7 @@ const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
 const btree = @import("xqlite_storage").btree;
 pub const opcodes = @import("opcodes.zig");
+const operand = @import("operand.zig");
 const flags = @import("xqlite_base").flags;
 
 pub const OP = opcodes.OP;
@@ -375,8 +376,8 @@ pub const SubrtnSig = struct {
     complete: bool = false,
     aff: ?[:0]const u8 = null,
     i_table: i32 = 0,
-    i_addr: i32 = 0,
-    reg_return: i32 = 0,
+    i_addr: operand.Addr = .from(0),
+    reg_return: operand.Reg = .none,
 };
 
 /// A compiled trigger program (SubProgram).

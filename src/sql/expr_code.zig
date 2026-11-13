@@ -465,15 +465,15 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
         if (e.flags.Subrtn or findCompatibleInRhsSubrtn(p, e, sig)) {
             const once = aux.emit(v, .Once, .{});
             if (e.useXSelect()) _ = aux.explain(p, false, "REUSE LIST SUBQUERY {d}", .{e.x.select.?.sel_id});
-            _ = aux.emit(v, .Gosub, .{ Reg.from(e.y.sub.reg_return), Addr.from(e.y.sub.addr) });
+            _ = aux.emit(v, .Gosub, .{ e.y.sub.reg_return, e.y.sub.addr });
             _ = aux.emit(v, .OpenDup, .{ tab_cur, Cursor.from(e.i_table) });
             aux.landHere(v, once);
             return;
         }
         // Begin the subroutine.
         e.flags.Subrtn = true;
-        e.y = .{ .sub = .{ .reg_return = p.newReg().int(), .addr = 0 } };
-        e.y.sub.addr = aux.emit(v, .BeginSubrtn, .{ 0, Reg.from(e.y.sub.reg_return) }).plus(1).int();
+        const reg_return = p.newReg();
+        e.y = .{ .sub = .{ .reg_return = reg_return, .addr = aux.emit(v, .BeginSubrtn, .{ 0, reg_return }).plus(1) } };
         if (sig) |s| {
             s.complete = false;
             s.i_addr = e.y.sub.addr;
@@ -498,9 +498,9 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
         const e_list = sel.e_list.?;
         _ = aux.explain(p, true, "{s}LIST SUBQUERY {d}", .{ if (addr_once != null) "" else "CORRELATED ", sel.sel_id });
         if (e_list.len() == n_val) {
-            var dest = select_mod.selectDestInit(SRT.Set, tab_cur.int());
+            var dest = select_mod.selectDestInit(SRT.Set, .{ .cursor = tab_cur });
             dest.aff_sdst = exprINAffinity(p, e);
-            sel.i_limit = 0;
+            sel.i_limit = .none;
             const key_info = key_info_opt.?;
             for (0..n_val) |i| {
                 const x = expr_mod.vectorFieldSubexpr(left, i);
@@ -513,7 +513,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
             if (addr_once != null and allow_bloom and !p.db.optDisabled(int.OPT.BloomFilter)) {
                 const reg_bloom = p.newReg();
                 addr_bloom = aux.emit(v, .Blob, .{ 10000, reg_bloom });
-                dest.i_sd_parm2 = reg_bloom.int();
+                dest.reg_bloom = reg_bloom;
                 aux.changeP4(v, addr, .{ .keyinfo = key_info });
                 key_info_opt = null;
             }
@@ -524,8 +524,8 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
             const rc = select_mod.select(p, copy.?, &dest);
             if (addr_bloom) |bloom| {
                 // The Bloom filter's register goes in P3 of the OP_Once.
-                aux.getOp(v, addr_once.?).p3 = dest.i_sd_parm2;
-                if (dest.i_sd_parm2 == 0) aux.getOp(v, bloom).p1 = 10;
+                aux.getOp(v, addr_once.?).p3 = dest.reg_bloom.int();
+                if (dest.reg_bloom.isNone()) aux.getOp(v, bloom).p1 = 10;
             }
             rc catch return;
         }
@@ -564,7 +564,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, tab_cur: Cursor, allow_bloom_arg: bool) 
         _ = aux.emit(v, .NullRow, .{tab_cur});
         aux.landHere(v, once);
         // Subroutine return.
-        _ = aux.emit(v, .Return, .{ Reg.from(e.y.sub.reg_return), e.y.sub.addr, 1 });
+        _ = aux.emit(v, .Return, .{ e.y.sub.reg_return, e.y.sub.addr.int(), 1 });
         expr_mod.clearTempRegCache(p);
     }
 }
@@ -580,14 +580,14 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
     // Already coded: call the subroutine.
     if (e.flags.Subrtn) {
         _ = aux.explain(p, false, "REUSE SUBQUERY {d}", .{sel.sel_id});
-        _ = aux.emit(v, .Gosub, .{ Reg.from(e.y.sub.reg_return), Addr.from(e.y.sub.addr) });
+        _ = aux.emit(v, .Gosub, .{ e.y.sub.reg_return, e.y.sub.addr });
         return .from(e.i_table);
     }
 
     // Begin the subroutine.
     e.flags.Subrtn = true;
-    e.y = .{ .sub = .{ .reg_return = p.newReg().int(), .addr = 0 } };
-    e.y.sub.addr = aux.emit(v, .BeginSubrtn, .{ 0, Reg.from(e.y.sub.reg_return) }).plus(1).int();
+    const reg_return = p.newReg();
+    e.y = .{ .sub = .{ .reg_return = reg_return, .addr = aux.emit(v, .BeginSubrtn, .{ 0, reg_return }).plus(1) } };
 
     // An uncorrelated subquery runs once.
     const addr_once: ?Addr = if (!e.flags.VarSelect) aux.emit(v, .Once, .{}) else null;
@@ -597,21 +597,22 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
     // The first row of a SELECT goes into registers; EXISTS leaves 0 or 1.
     // Either way the query gets LIMIT 1.
     const n_reg: i32 = if (e.op == TK.SELECT) @intCast(sel.e_list.?.len()) else 1;
-    var dest = select_mod.selectDestInit(undefined, p.newRegs(n_reg).int()); // e_dest set below (0 in C)
+    const result = p.newRegs(n_reg);
+    var dest = select_mod.selectDestInit(undefined, .{ .reg = result }); // e_dest set below (0 in C)
     if (e.op == TK.SELECT) {
         dest.e_dest = SRT.Mem;
         if (sel.sel_flags.Distinct and sel.limit != null and sel.limit.?.right != null) {
             // With DISTINCT and OFFSET, results are copied over only
             // after the OFFSET.
-            dest.i_sdst = p.newRegs(n_reg).int();
+            dest.i_sdst = p.newRegs(n_reg);
         } else {
-            dest.i_sdst = dest.i_sd_parm;
+            dest.i_sdst = result;
         }
         dest.n_sdst = n_reg;
-        _ = aux.emit(v, .Null, .{ 0, Reg.from(dest.i_sd_parm), Reg.from(p.n_mem) });
+        _ = aux.emit(v, .Null, .{ 0, result, Reg.from(p.n_mem) });
     } else {
         dest.e_dest = SRT.Exists;
-        _ = aux.emit(v, .Integer, .{ 0, Reg.from(dest.i_sd_parm) });
+        _ = aux.emit(v, .Integer, .{ 0, result });
     }
     if (sel.limit) |lim| {
         // A limit X other than 0 or 1 becomes X<>0.
@@ -625,13 +626,13 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
         const one = expr_mod.exprInt32(p.arena, 1) catch return oomZero(p);
         sel.limit = expr_mod.pExpr(p, TK.LIMIT, one, null) catch return oomZero(p);
     }
-    sel.i_limit = 0;
+    sel.i_limit = .none;
     select_mod.select(p, sel, &dest) catch {
         e.op2 = e.op;
         e.op = TK.ERROR;
         return .none;
     };
-    const r_reg: Reg = .from(dest.i_sd_parm);
+    const r_reg = dest.parm.reg;
     e.i_table = r_reg.int();
     if (addr_once) |once| aux.landHere(v, once);
     aux.scanStatusRange(v, addr_explain, addr_explain.int(), -1);
@@ -641,7 +642,7 @@ pub fn codeSubselect(p: *Parse, e: *Expr) Reg {
     }
 
     // Subroutine return.
-    _ = aux.emit(v, .Return, .{ Reg.from(e.y.sub.reg_return), e.y.sub.addr, 1 });
+    _ = aux.emit(v, .Return, .{ e.y.sub.reg_return, e.y.sub.addr.int(), 1 });
     expr_mod.clearTempRegCache(p);
     return r_reg;
 }
@@ -777,7 +778,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void {
         if (dest_if_false == dest_if_null) {
             // Steps 3 and 5 together.
             if (e.flags.Subrtn) {
-                const op = aux.getOp(v, .from(e.y.sub.addr));
+                const op = aux.getOp(v, e.y.sub.addr);
                 if (op.p3 > 0) {
                     _ = aux.emitInt(v, .Filter, .{ Reg.from(op.p3), dest_if_false, r_lhs }, @intCast(n_vector));
                 }
@@ -1187,9 +1188,9 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                     }
                     const col = &agg.cols.items[@intCast(e.i_agg)];
                     if (!agg.direct_mode) {
-                        return .from(agg.columnReg(@intCast(e.i_agg)));
+                        return agg.columnReg(@intCast(e.i_agg));
                     } else if (agg.use_sorting_idx) {
-                        _ = aux.emit(v, .Column, .{ Cursor.from(agg.sorting_idx_ptab), col.i_sorter_column, out });
+                        _ = aux.emit(v, .Column, .{ agg.sorting_idx_ptab, col.i_sorter_column, out });
                         if (col.tab) |t| if (col.i_column >= 0 and t.cols[@intCast(col.i_column)].affinity == Aff.real) {
                             _ = aux.emit(v, .RealAffinity, .{out});
                         };
@@ -1390,12 +1391,12 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                     if (w != 0 and ctype.eqlNoCase(e.token(), "sum")) {
                         var zero: Expr = .{ .op = TK.INTEGER, .flags = .{ .IntValue = true, .TokenOnly = true }, .u = .{ .value = 0 } };
                         const r0: Reg = codeTemp(p, &zero, &reg_free1);
-                        _ = aux.emit(v, .Add, .{ r0, Reg.from(reg), out });
+                        _ = aux.emit(v, .Add, .{ r0, reg, out });
                         aux.changeP5(v, w);
                         return out;
                     }
                 }
-                return .from(reg);
+                return reg;
             },
             TK.FUNCTION => return codeFunction(p, e, out),
             TK.EXISTS, TK.SELECT => {
@@ -1470,9 +1471,9 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
             TK.IF_NULL_ROW => {
                 const ok_const_factor = p.ok_const_factor;
                 if (e.agg_info) |agg| {
-                    if (!agg.direct_mode) return .from(agg.columnReg(@intCast(e.i_agg)));
+                    if (!agg.direct_mode) return agg.columnReg(@intCast(e.i_agg));
                     if (agg.use_sorting_idx) {
-                        _ = aux.emit(v, .Column, .{ Cursor.from(agg.sorting_idx_ptab), agg.cols.items[@intCast(e.i_agg)].i_sorter_column, out });
+                        _ = aux.emit(v, .Column, .{ agg.sorting_idx_ptab, agg.cols.items[@intCast(e.i_agg)].i_sorter_column, out });
                         return out;
                     }
                 }
@@ -1560,7 +1561,7 @@ fn codeCase(p: *Parse, e: *Expr, out: Reg, reg_free1: *Reg) void {
 fn codeFunction(p: *Parse, e: *Expr, out: Reg) Reg {
     const v = vdbe(p);
     const db = p.db;
-    if (e.flags.WinFunc) return .from(e.y.win.?.reg_result);
+    if (e.flags.WinFunc) return e.y.win.?.reg_result;
 
     // A constant function call is computed once.
     if (constFactorOk(p) and expr_mod.isConstantNotJoin(p, e)) return codeRunJustOnce(p, e, null);

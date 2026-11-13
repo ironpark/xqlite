@@ -261,9 +261,9 @@ pub fn addScanStatus(v: *Vdbe, src_list: *SrcList, level: *WhereLevel, addr_expl
         }
         if (ws_flags.INDEXED) aux.scanStatusRange(v, addr_explain, -1, level.i_idx_cur);
     } else {
-        const addr = item.u4.subq.?.addr_fill_sub;
-        const op = aux.getOp(v, .from(addr - 1));
-        aux.scanStatusRange(v, addr_explain, addr, op.p2 - 1);
+        const addr = item.u4.subq.?.addr_fill_sub.?;
+        const op = aux.getOp(v, addr.plus(-1));
+        aux.scanStatusRange(v, addr_explain, addr.int(), op.p2 - 1);
     }
 }
 
@@ -648,9 +648,9 @@ fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, cur: 
             codeExprOrVector(p, right, target, 1);
             if (term.e_match_op == vtab.INDEX_CONSTRAINT.OFFSET and loop.vtab.b_omit_offset) {
                 std.debug.assert(term.e_operator == WO.AUX);
-                std.debug.assert(w.select != null and w.select.?.i_offset > 0);
+                std.debug.assert(w.select != null and !w.select.?.i_offset.isNone());
                 // Zero the OFFSET counter.
-                _ = aux.emit(v, .Integer, .{ 0, Reg.from(w.select.?.i_offset) });
+                _ = aux.emit(v, .Integer, .{ 0, w.select.?.i_offset });
             }
         }
     }
@@ -875,8 +875,8 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         // A FROM-clause subquery implemented as a co-routine.
         std.debug.assert(tab_item.fg.is_subquery);
         const subq = tab_item.u4.subq.?;
-        const reg_yield: Reg = .from(subq.reg_return);
-        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, Addr.from(subq.addr_fill_sub) });
+        const reg_yield = subq.reg_return;
+        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, subq.addr_fill_sub.? });
         level.p2 = aux.emit(v, .Yield, .{ reg_yield, addr_brk }).int();
         level.op = OP.Goto;
     } else if (loop.ws_flags.VIRTUALTABLE) {
@@ -1600,7 +1600,7 @@ pub fn rightJoinLoop(w: *WhereInfo, i_level: usize, level: *WhereLevel) Oom!void
             std.debug.assert(right.fg.is_subquery);
             const subq = right.u4.subq.?;
             const n: i32 = @intCast(subq.select.e_list.?.len());
-            const reg_result: Reg = .from(subq.reg_result);
+            const reg_result = subq.reg_result;
             _ = aux.emit(v, .Null, .{ 0, reg_result, reg_result.at(n - 1) });
         }
         _ = aux.emit(v, .NullRow, .{Cursor.from(lk.i_tab_cur)});

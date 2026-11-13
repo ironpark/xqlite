@@ -201,7 +201,8 @@ pub const Expr = struct {
         tab: ?*Table,
         win: ?*Window,
         n_reg: i32,
-        sub: struct { addr: i32, reg_return: i32 },
+        /// The subroutine of a subquery or of the right side of IN.
+        sub: struct { addr: Addr, reg_return: Reg },
     } = .{ .tab = null },
 
     pub fn useUToken(e: *const Expr) bool {
@@ -327,13 +328,17 @@ pub const IdList = struct {
 /// The subquery of a FROM-clause term (Subquery).
 pub const Subquery = struct {
     select: *Select,
-    addr_fill_sub: i32 = 0,
-    reg_return: i32 = 0,
-    reg_result: i32 = 0,
+    /// The start of the co-routine or of the subroutine that fills the
+    /// table, once it is coded.
+    addr_fill_sub: ?Addr = null,
+    /// The return address of the co-routine or the subroutine.
+    reg_return: Reg = .none,
+    /// The result registers of a co-routine.
+    reg_result: Reg = .none,
     /// xqlite: the end of the code of a co-routine (for a LATERAL
     /// subquery's: where whereEnd() copies the columns it reads of the
     /// co-routines before it).
-    xq_end: i32 = 0,
+    xq_end: ?Addr = null,
 };
 
 /// Join types (JT_*).
@@ -545,8 +550,10 @@ pub const Select = struct {
     op: u8 = TK.SELECT,
     n_select_row: LogEst = 0,
     sel_flags: SF = .{},
-    i_limit: i32 = 0,
-    i_offset: i32 = 0,
+    /// The LIMIT counter, if the code for the limit has been made.
+    i_limit: Reg = .none,
+    /// The OFFSET counter (and the LIMIT+OFFSET one after it), if any.
+    i_offset: Reg = .none,
     sel_id: u32 = 0,
     e_list: ?*ExprList = null,
     src: ?*SrcList = null,
@@ -606,9 +613,10 @@ pub const With = struct {
 /// Per-statement usage of a CTE (CteUse).
 pub const CteUse = struct {
     n_use: i32 = 0,
-    addr_m9e: i32 = 0,
-    reg_rtn: i32 = 0,
-    i_cur: i32 = 0,
+    /// The subroutine that materializes the CTE, once it is coded.
+    addr_m9e: ?Addr = null,
+    reg_rtn: Reg = .none,
+    i_cur: Cursor = .from(0),
     n_row_est: LogEst = 0,
     e_m10d: M10d = .any,
 };
@@ -632,18 +640,26 @@ pub const Window = struct {
     next_win: ?*Window = null,
     filter: ?*Expr = null,
     w_func: ?*const FuncDef = null,
-    i_eph_csr: i32 = 0,
-    reg_accum: i32 = 0,
-    reg_result: i32 = 0,
-    csr_app: i32 = 0,
-    reg_app: i32 = 0,
-    reg_part: i32 = 0,
+    /// The ephemeral table buffering the rows (and the three cursors
+    /// after it, opened on the same table).
+    i_eph_csr: Cursor = .from(0),
+    reg_accum: Reg = .none,
+    reg_result: Reg = .none,
+    /// The cursor of the in-line min() and max(), nth_value(),
+    /// first_value(), lag() and lead(), or of the EXCLUDE frame scan.
+    csr_app: ?Cursor = null,
+    /// The registers of the in-line min(), max(), nth_value() and
+    /// first_value(), if any.
+    reg_app: Reg = .none,
+    reg_part: Reg = .none,
     owner: ?*Expr = null,
     n_buffer_col: i32 = 0,
+    /// The column of the first argument in the ephemeral table.
     i_arg_col: i32 = 0,
-    reg_one: i32 = 0,
-    reg_start_rowid: i32 = 0,
-    reg_end_rowid: i32 = 0,
+    reg_one: Reg = .none,
+    /// The frame of an EXCLUDE clause, if there is one.
+    reg_start_rowid: Reg = .none,
+    reg_end_rowid: Reg = .none,
     expr_args: bool = false,
 };
 
@@ -1405,7 +1421,7 @@ pub const NameContext = struct {
     src_list: ?*SrcList = null,
     /// Which member is valid is given by NC_UEList, NC_UAggInfo,
     /// NC_UUpsert and NC_UBaseReg.
-    u_nc: union { e_list: ?*ExprList, agg_info: ?*AggInfo, upsert: ?*Upsert, i_base_reg: i32 } = .{ .e_list = null },
+    u_nc: union { e_list: ?*ExprList, agg_info: ?*AggInfo, upsert: ?*Upsert, i_base_reg: Reg } = .{ .e_list = null },
     next: ?*NameContext = null,
     /// Names resolved by this context.
     n_ref: i32 = 0,
@@ -1433,9 +1449,15 @@ pub const AggInfoCol = struct {
 pub const AggInfoFunc = struct {
     f_expr: *Expr,
     func: ?*const FuncDef,
+    /// The ephemeral table of a DISTINCT aggregate (-1: none). Once
+    /// updateAccumulator() has coded the test, what codeDistinct()
+    /// returned: still the table, the previous-row registers
+    /// (WHERE_DISTINCT_ORDERED) or 0 (WHERE_DISTINCT_UNIQUE).
     i_distinct: i32 = -1,
-    i_dist_addr: i32 = 0,
-    i_ob_tab: i32 = -1,
+    /// The OP_OpenEphemeral of the i_distinct table.
+    i_dist_addr: Addr = .from(0),
+    /// The ephemeral table of an aggregate's ORDER BY, if it has one.
+    i_ob_tab: ?Cursor = null,
     b_ob_payload: bool = false,
     b_ob_unique: bool = false,
     b_use_subtype: bool = false,
@@ -1467,10 +1489,10 @@ pub const AggInfo = struct {
     /// In direct mode, read from the sorting index.
     use_sorting_idx: bool = false,
     n_sorting_column: u32 = 0,
-    sorting_idx: i32 = 0,
-    sorting_idx_ptab: i32 = 0,
+    sorting_idx: Cursor = .from(0),
+    sorting_idx_ptab: Cursor = .from(0),
     /// First register of the columns, then the functions.
-    i_first_reg: i32 = 0,
+    i_first_reg: Reg = .none,
     group_by: ?*ExprList = null,
     cols: std.ArrayList(AggInfoCol) = .empty,
     /// Columns that show through to the output.
@@ -1478,14 +1500,14 @@ pub const AggInfo = struct {
     funcs: std.ArrayList(AggInfoFunc) = .empty,
     sel_id: u32 = 0,
 
-    pub fn columnReg(a: *const AggInfo, i: usize) i32 {
-        std.debug.assert(a.i_first_reg != 0);
-        return a.i_first_reg + @as(i32, @intCast(i));
+    pub fn columnReg(a: *const AggInfo, i: usize) Reg {
+        std.debug.assert(!a.i_first_reg.isNone());
+        return a.i_first_reg.at(i);
     }
 
-    pub fn funcReg(a: *const AggInfo, i: usize) i32 {
-        std.debug.assert(a.i_first_reg != 0);
-        return a.i_first_reg + @as(i32, @intCast(a.cols.items.len + i));
+    pub fn funcReg(a: *const AggInfo, i: usize) Reg {
+        std.debug.assert(!a.i_first_reg.isNone());
+        return a.i_first_reg.at(a.cols.items.len + i);
     }
 };
 

@@ -603,7 +603,7 @@ fn codeTriggerProgram(p: *Parse, step_list: *TriggerStep, orconf: OE) Oom!void {
             },
             else => {
                 std.debug.assert(step.op == TK.SELECT);
-                var dest = select_mod.selectDestInit(select_mod.SRT.Discard, 0);
+                var dest = select_mod.selectDestInit(select_mod.SRT.Discard, .none);
                 if (try expr_mod.selectDup(a, step.select)) |sel| select_mod.select(p, sel, &dest) catch {};
             },
         }
@@ -903,7 +903,7 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: Reg, site_
 
     const new = (try expandReturning(p, ret.return_el.?, t)) orelse return;
     if (p.n_err == 0) {
-        var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in.int() }, .nc_flags = .{ .UBaseReg = true } };
+        var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in }, .nc_flags = .{ .UBaseReg = true } };
         if (ret.n_ret_col == 0) {
             ret.n_ret_col = @intCast(new.len());
             ret.i_ret_cur = p.newCursor();

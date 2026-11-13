@@ -361,9 +361,9 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     if (src.fg.via_coroutine) {
         std.debug.assert(src.fg.is_subquery);
         const subq = src.u4.subq.?;
-        const reg_yield: Reg = .from(subq.reg_return);
+        const reg_yield = subq.reg_return;
         addr_counter = aux.emit(v, .Integer, .{ 0, 0 });
-        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, Addr.from(subq.addr_fill_sub) });
+        _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, subq.addr_fill_sub.? });
         addr_top = aux.emit(v, .Yield, .{reg_yield});
     } else {
         std.debug.assert(level.addr_halt != 0);
@@ -389,7 +389,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         std.debug.assert(src.fg.is_subquery and src.u4.subq != null);
         aux.changeP2(v, addr_counter.?, reg_base.at(n).int());
         std.debug.assert(idx_cur.int() > 0);
-        translateColumnToCopy(p, addr_top.int(), tab_cur.int(), src.u4.subq.?.reg_result, idx_cur.int());
+        translateColumnToCopy(p, addr_top.int(), tab_cur.int(), src.u4.subq.?.reg_result.int(), idx_cur.int());
         _ = aux.emit(v, .Goto, .{ 0, addr_top });
         src.fg.via_coroutine = false;
         aux.landHere(v, addr_top);
@@ -1792,7 +1792,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             std.debug.assert(src.fg.is_subquery);
             const subq = src.u4.subq.?;
             const once: ?Addr = if (!src.fg.is_correlated) aux.emit(v, .Once, .{}) else null;
-            _ = aux.emit(v, .Gosub, .{ Reg.from(subq.reg_return), Jump.from(subq.addr_fill_sub) });
+            _ = aux.emit(v, .Gosub, .{ subq.reg_return, subq.addr_fill_sub.? });
             if (once) |a| aux.landHere(v, a);
         }
         std.debug.assert(tab_list == w.tab_list);
@@ -1948,7 +1948,7 @@ pub fn whereEnd(w: *WhereInfo) void {
                 std.debug.assert(level.i_tab_cur == src.i_cursor);
                 if (src.fg.via_coroutine) {
                     std.debug.assert(src.fg.is_subquery);
-                    const reg_result: Reg = .from(src.u4.subq.?.reg_result);
+                    const reg_result = src.u4.subq.?.reg_result;
                     const m: i32 = src.s_tab.?.nCol();
                     _ = aux.emit(v, .Null, .{ 0, reg_result, reg_result.at(m - 1) });
                 }
@@ -1993,14 +1993,14 @@ pub fn whereEnd(w: *WhereInfo) void {
         // The columns of a co-routine are read from its result registers.
         if (tab_item.fg.via_coroutine) {
             std.debug.assert(tab_item.fg.is_subquery);
-            std.debug.assert(tab_item.u4.subq.?.reg_result >= 0);
-            translateColumnToCopy(p, level.addr_body, level.i_tab_cur, tab_item.u4.subq.?.reg_result, 0);
+            std.debug.assert(tab_item.u4.subq.?.reg_result.int() >= 0);
+            translateColumnToCopy(p, level.addr_body, level.i_tab_cur, tab_item.u4.subq.?.reg_result.int(), 0);
             // xqlite: and in the co-routines of the LATERAL subqueries
             // after it that read it.
             if (tab_item.fg.xq_lateral_ref) for (tab_list.slice()[level.i_from + 1 ..]) |*later| {
                 if (!later.fg.xq_lateral or !later.fg.via_coroutine) continue;
                 const sq = later.u4.subq.?;
-                translateColumnRange(p, sq.addr_fill_sub, sq.xq_end, level.i_tab_cur, tab_item.u4.subq.?.reg_result);
+                if (sq.xq_end) |end| translateColumnRange(p, sq.addr_fill_sub.?.int(), end.int(), level.i_tab_cur, tab_item.u4.subq.?.reg_result.int());
             };
             continue;
         }

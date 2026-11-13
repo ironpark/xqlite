@@ -2016,13 +2016,13 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     t.cols = sel_tab.cols;
     t.n_nv_col = @intCast(sel_tab.cols.len);
     sel_tab.cols = &.{};
-    var dest = select_mod.selectDestInit(select_mod.SRT.Coroutine, reg_yield.int());
+    var dest = select_mod.selectDestInit(select_mod.SRT.Coroutine, .{ .reg = reg_yield });
     select_mod.select(p, sel, &dest) catch {};
     if (p.n_err != 0) return;
     aux.endCoroutine(v, reg_yield);
     aux.landHere(v, addr_top.plus(-1));
-    const addr_ins_loop = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
-    _ = aux.emit(v, .MakeRecord, .{ Reg.from(dest.i_sdst), dest.n_sdst, reg_rec });
+    const addr_ins_loop = aux.emit(v, .Yield, .{dest.parm.reg});
+    _ = aux.emit(v, .MakeRecord, .{ dest.i_sdst, dest.n_sdst, reg_rec });
     insert_mod.tableAffinity(p, t, .none);
     _ = aux.emit(v, .NewRowid, .{ csr, reg_rowid });
     _ = aux.emit(v, .Insert, .{ csr, reg_rec, reg_rowid });

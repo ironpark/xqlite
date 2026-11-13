@@ -162,17 +162,33 @@ pub const SRT = enum(u8) {
 /// SelectDest.
 pub const SelectDest = struct {
     e_dest: SRT,
-    i_sd_parm: i32 = 0,
-    i_sd_parm2: i32 = 0,
-    i_sdst: i32 = 0,
+    /// What the rows are written to (C: iSDParm).
+    parm: Parm = .none,
+    /// SRT.Set: the Bloom filter the keys are added to, if any (C:
+    /// iSDParm2).
+    reg_bloom: Reg = .none,
+    /// SRT.Upfrom: the number of primary key columns of the table, or
+    /// -1 for a rowid table (C: iSDParm2).
+    n_pk: i32 = 0,
+    /// The result registers, if they are given or already allocated.
+    i_sdst: Reg = .none,
     n_sdst: i32 = 0,
     aff_sdst: ?[]const u8 = null,
     order_by: ?*ExprList = null,
+
+    /// The table, the queue or the set of the destinations that write to
+    /// a cursor; the flag register of SRT.Exists, the result register of
+    /// SRT.Mem, the return register of SRT.Coroutine's co-routine.
+    pub const Parm = union(enum) {
+        none,
+        reg: Reg,
+        cursor: Cursor,
+    };
 };
 
 /// Port of sqlite3SelectDestInit().
-pub fn selectDestInit(e_dest: SRT, i_parm: i32) SelectDest {
-    return .{ .e_dest = e_dest, .i_sd_parm = i_parm };
+pub fn selectDestInit(e_dest: SRT, parm: SelectDest.Parm) SelectDest {
+    return .{ .e_dest = e_dest, .parm = parm };
 }
 
 /// Port of sqlite3KeyInfoAlloc(): a KeyInfo for `n` key columns and `x`
@@ -505,7 +521,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
         base = p.newRegs(n_base);
     }
     // The LIMIT+OFFSET counter, if there is a LIMIT.
-    const limit: Reg = .from(if (s.i_offset != 0) s.i_offset + 1 else s.i_limit);
+    const limit: Reg = if (!s.i_offset.isNone()) s.i_offset.at(1) else s.i_limit;
     const done = aux.newLabel(p);
     sort.label_done = done;
     _ = ec.codeExprList(p, sort.order_by.?, base, orig_data, ec.ECEL_DUP | (if (!orig_data.isNone()) ec.ECEL_REF else 0));
@@ -565,7 +581,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, data: Reg, orig_data: R
 /// Port of codeOffset(): skip the row (go to `skip`) while the OFFSET
 /// counter is positive.
 fn codeOffset(v: *Vdbe, offset: Reg, skip: Jump) void {
-    if (offset.int() > 0) _ = aux.emit(v, .IfPos, .{ offset, skip, 1 });
+    if (!offset.isNone()) _ = aux.emit(v, .IfPos, .{ offset, skip, 1 });
 }
 
 /// Port of codeDistinct(): code the DISTINCT test of the row in
@@ -636,8 +652,6 @@ fn fixDistinctOpenEph(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, i_val: i32, op
 fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, distinct: ?*DistinctCtx, dest: *SelectDest, continue_to: Jump, break_to: Jump) void {
     const v = p.vdbe.?;
     const e_dest = dest.e_dest;
-    // A cursor or a register, by the destination.
-    const i_parm = dest.i_sd_parm;
     var n_prefix_reg: i32 = 0;
     var row_load: RowLoadInfo = undefined;
     var sort = sort_arg;
@@ -645,23 +659,23 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
     if (sort) |so| if (so.order_by == null) {
         sort = null;
     };
-    if (sort == null and has_distinct == .NOOP) codeOffset(v, .from(s.i_offset), continue_to);
+    if (sort == null and has_distinct == .NOOP) codeOffset(v, s.i_offset, continue_to);
 
     var n_result_col: i32 = @intCast(s.e_list.?.len());
-    if (dest.i_sdst == 0) {
+    if (dest.i_sdst.isNone()) {
         if (sort) |so| {
             n_prefix_reg = @intCast(so.order_by.?.len());
             if (so.sort_flags & SORTFLAG_UseSorter == 0) n_prefix_reg += 1;
             p.n_mem += n_prefix_reg;
         }
-        dest.i_sdst = p.newRegs(n_result_col).int();
-    } else if (dest.i_sdst + n_result_col > p.n_mem) {
+        dest.i_sdst = p.newRegs(n_result_col);
+    } else if (dest.i_sdst.int() + n_result_col > p.n_mem) {
         // Too many result columns for the destination; the error is
         // reported later.
         p.n_mem += n_result_col;
     }
     dest.n_sdst = n_result_col;
-    const result: Reg = .from(dest.i_sdst);
+    const result = dest.i_sdst;
     // Where the whole row is, for the sorter to refer to; none if columns
     // are left out or not loaded yet.
     var orig = result;
@@ -689,7 +703,7 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
             }
         }
         row_load = .{ .result = result, .ecel_flags = ecel_flags };
-        if (s.i_limit != 0 and ecel_flags & ec.ECEL_OMITREF != 0 and n_prefix_reg > 0) {
+        if (!s.i_limit.isNone() and ecel_flags & ec.ECEL_OMITREF != 0 and n_prefix_reg > 0) {
             sort.?.deferred_row_load = &row_load;
             orig = .none;
         } else {
@@ -702,13 +716,13 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
         const d = distinct.?;
         const i_val = codeDistinct(p, d.e_tnct_type, d.tab_tnct.?, continue_to, s.e_list.?, result);
         fixDistinctOpenEph(p, d.e_tnct_type, i_val, d.addr_tnct.?);
-        if (sort == null) codeOffset(v, .from(s.i_offset), continue_to);
+        if (sort == null) codeOffset(v, s.i_offset, continue_to);
     }
 
     switch (e_dest) {
         SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
             // Store the row as data with a new rowid.
-            const tab: Cursor = .from(i_parm);
+            const tab = dest.parm.cursor;
             const r1: Reg = expr_mod.getTempRange(p, n_prefix_reg + 1);
             _ = aux.emit(v, .MakeRecord, .{ result, n_result_col, r1.at(n_prefix_reg) });
             if (e_dest == SRT.DistFifo) {
@@ -732,8 +746,8 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
             if (sort) |so| {
                 pushOntoSorter(p, so, s, result, orig, n_result_col, n_prefix_reg);
             } else {
-                const i_2 = dest.i_sd_parm2;
-                const tab: Cursor = .from(i_parm);
+                const i_2 = dest.n_pk;
+                const tab = dest.parm.cursor;
                 const r1: Reg = expr_mod.getTempReg(p);
                 // An aggregate matching no rows still makes one; skip it.
                 _ = aux.emit(v, .IsNull, .{ result, break_to });
@@ -750,13 +764,13 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
             if (sort) |so| {
                 // The ORDER BY matters if there is a LIMIT.
                 pushOntoSorter(p, so, s, result, orig, n_result_col, n_prefix_reg);
-                dest.i_sd_parm2 = 0;
+                dest.reg_bloom = .none;
             } else {
                 const r1: Reg = expr_mod.getTempReg(p);
                 _ = aux.emitStr(v, .MakeRecord, .{ result, n_result_col, r1 }, dest.aff_sdst.?);
-                _ = aux.emitInt(v, .IdxInsert, .{ Cursor.from(i_parm), r1, result }, n_result_col);
-                if (dest.i_sd_parm2 != 0) {
-                    _ = aux.emitInt(v, .FilterAdd, .{ Reg.from(dest.i_sd_parm2), 0, result }, n_result_col);
+                _ = aux.emitInt(v, .IdxInsert, .{ dest.parm.cursor, r1, result }, n_result_col);
+                if (!dest.reg_bloom.isNone()) {
+                    _ = aux.emitInt(v, .FilterAdd, .{ dest.reg_bloom, 0, result }, n_result_col);
                     _ = aux.explain(p, false, "CREATE BLOOM FILTER", .{});
                 }
                 expr_mod.releaseTempReg(p, r1);
@@ -764,23 +778,24 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
         },
         SRT.Exists => {
             // The LIMIT ends the loop.
-            _ = aux.emit(v, .Integer, .{ 1, Reg.from(i_parm) });
+            _ = aux.emit(v, .Integer, .{ 1, dest.parm.reg });
         },
         SRT.Mem => {
             // A scalar subquery.
+            const mem = dest.parm.reg;
             if (sort) |so| {
                 pushOntoSorter(p, so, s, result, orig, n_result_col, n_prefix_reg);
-                dest.i_sd_parm = result.int();
-            } else if (result.int() != i_parm) {
+                dest.parm = .{ .reg = result };
+            } else if (result != mem) {
                 // With DISTINCT and OFFSET.
-                _ = aux.emit(v, .Copy, .{ result, Reg.from(i_parm), n_result_col - 1 });
+                _ = aux.emit(v, .Copy, .{ result, mem, n_result_col - 1 });
             }
         },
         SRT.Coroutine, SRT.Output => {
             if (sort) |so| {
                 pushOntoSorter(p, so, s, result, orig, n_result_col, n_prefix_reg);
             } else if (e_dest == SRT.Coroutine) {
-                _ = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
+                _ = aux.emit(v, .Yield, .{dest.parm.reg});
             } else {
                 _ = aux.emit(v, .ResultRow, .{ result, n_result_col });
             }
@@ -790,7 +805,7 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
             // OP_Sequence column; the record is the last column.
             const so = dest.order_by.?;
             const n_key: i32 = @intCast(so.len());
-            const queue: Cursor = .from(i_parm);
+            const queue = dest.parm.cursor;
             const r1: Reg = expr_mod.getTempReg(p);
             const r2: Reg = expr_mod.getTempRange(p, n_key + 2);
             const r3 = r2.at(n_key + 1);
@@ -821,7 +836,7 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx,
     }
 
     // Stop at the LIMIT, unless the sorter already applies it.
-    if (sort == null and s.i_limit != 0) _ = aux.emit(v, .DecrJumpZero, .{ Reg.from(s.i_limit), break_to });
+    if (sort == null and !s.i_limit.isNone()) _ = aux.emit(v, .DecrJumpZero, .{ s.i_limit, break_to });
 }
 
 /// Port of sqlite3KeyInfoFromExprList(): a KeyInfo with the collation and
@@ -846,8 +861,6 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     var once: ?Addr = null;
     const order_by = sort.order_by.?;
     const e_dest = dest.e_dest;
-    // A cursor or a register, by the destination.
-    const i_parm = dest.i_sd_parm;
     const out_ex = s.e_list.?.slice();
     const n_key: i32 = @as(i32, @intCast(order_by.len())) - sort.n_ob_sat;
 
@@ -868,8 +881,8 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     var rowid: Reg = .none;
     var row: Reg = undefined;
     if (e_dest == SRT.Output or e_dest == SRT.Coroutine or e_dest == SRT.Mem) {
-        if (e_dest == SRT.Mem and s.i_offset != 0) _ = aux.emit(v, .Null, .{ 0, Reg.from(dest.i_sdst) });
-        row = .from(dest.i_sdst);
+        if (e_dest == SRT.Mem and !s.i_offset.isNone()) _ = aux.emit(v, .Null, .{ 0, dest.i_sdst });
+        row = dest.i_sdst;
     } else {
         rowid = expr_mod.getTempReg(p);
         if (e_dest == SRT.EphemTab or e_dest == SRT.Table) {
@@ -894,10 +907,10 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         b_seq = 0;
     } else {
         addr = aux.emit(v, .Sort, .{ tab, done }).plus(1);
-        codeOffset(v, .from(s.i_offset), .of(next));
+        codeOffset(v, s.i_offset, .of(next));
         sort_tab = tab;
         b_seq = 1;
-        if (s.i_offset > 0) _ = aux.emit(v, .AddImm, .{ Reg.from(s.i_limit), -1 });
+        if (!s.i_offset.isNone()) _ = aux.emit(v, .AddImm, .{ s.i_limit, -1 });
     }
     var i_col: i32 = n_key + b_seq - 1;
     for (out_ex[0..@intCast(n_column)]) |item| {
@@ -918,7 +931,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     aux.scanStatusRange(v, addr_explain, addr_explain.int(), -1);
     switch (e_dest) {
         SRT.Table, SRT.EphemTab => {
-            const out: Cursor = .from(i_parm);
+            const out = dest.parm.cursor;
             _ = aux.emit(v, .Column, .{ sort_tab, n_key + b_seq, row });
             _ = aux.emit(v, .NewRowid, .{ out, rowid });
             _ = aux.emit(v, .Insert, .{ out, row, rowid });
@@ -926,14 +939,14 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         },
         SRT.Set => {
             _ = aux.emitStr(v, .MakeRecord, .{ row, n_column, rowid }, dest.aff_sdst.?);
-            _ = aux.emitInt(v, .IdxInsert, .{ Cursor.from(i_parm), rowid, row }, n_column);
+            _ = aux.emitInt(v, .IdxInsert, .{ dest.parm.cursor, rowid, row }, n_column);
         },
         SRT.Mem => {
             // The LIMIT ends the loop.
         },
         SRT.Upfrom => {
-            const i_2 = dest.i_sd_parm2;
-            const out: Cursor = .from(i_parm);
+            const i_2 = dest.n_pk;
+            const out = dest.parm.cursor;
             const r1: Reg = expr_mod.getTempReg(p);
             _ = aux.emit(v, .MakeRecord, .{ row.at(@intFromBool(i_2 < 0)), n_column - @intFromBool(i_2 < 0), r1 });
             if (i_2 < 0) {
@@ -944,9 +957,9 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         },
         else => {
             if (e_dest == SRT.Output) {
-                _ = aux.emit(v, .ResultRow, .{ Reg.from(dest.i_sdst), n_column });
+                _ = aux.emit(v, .ResultRow, .{ dest.i_sdst, n_column });
             } else {
-                _ = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
+                _ = aux.emit(v, .Yield, .{dest.parm.reg});
             }
         },
     }
@@ -1277,11 +1290,11 @@ pub fn resultSetOfSelect(p: *Parse, s_arg: *Select, aff: u8) Oom!?*Table {
 /// Port of computeLimitRegisters(): code the LIMIT and OFFSET counters
 /// (i_limit, i_offset, and i_offset+1 for LIMIT+OFFSET).
 fn computeLimitRegisters(p: *Parse, s: *Select, break_to: Label) void {
-    if (s.i_limit != 0) return;
+    if (!s.i_limit.isNone()) return;
     const limit = s.limit orelse return;
     std.debug.assert(limit.op == TK.LIMIT);
     const limit_reg = p.newReg();
-    s.i_limit = limit_reg.int();
+    s.i_limit = limit_reg;
     const v = build.getVdbe(p).?;
     if (expr_mod.isInteger(limit.left, p, false)) |n| {
         _ = aux.emit(v, .Integer, .{ n, limit_reg });
@@ -1300,7 +1313,7 @@ fn computeLimitRegisters(p: *Parse, s: *Select, break_to: Label) void {
     if (limit.right) |off| {
         // The OFFSET counter, and LIMIT+OFFSET in the register after it.
         const offset_reg = p.newRegs(2);
-        s.i_offset = offset_reg.int();
+        s.i_offset = offset_reg;
         ec.exprCode(p, off, offset_reg);
         _ = aux.emit(v, .MustBeInt, .{offset_reg});
         @import("main.zig").mayAbort(p);
@@ -1367,11 +1380,11 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     s.n_select_row = 320;
     computeLimitRegisters(p, s, done);
     const limit = s.limit;
-    const limit_reg: Reg = .from(s.i_limit);
-    const offset_reg: Reg = .from(s.i_offset);
+    const limit_reg = s.i_limit;
+    const offset_reg = s.i_offset;
     s.limit = null;
-    s.i_limit = 0;
-    s.i_offset = 0;
+    s.i_limit = .none;
+    s.i_offset = .none;
     const order_by = s.order_by;
     defer {
         s.order_by = order_by;
@@ -1396,7 +1409,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     } else {
         e_dest = if (order_by != null) SRT.Queue else SRT.Fifo;
     }
-    var dest_queue = selectDestInit(e_dest, queue.int());
+    var dest_queue = selectDestInit(e_dest, .{ .cursor = queue });
 
     const reg_current = p.newReg();
     _ = aux.emit(v, .OpenPseudo, .{ current, reg_current, n_col });
@@ -1523,12 +1536,12 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) (Oom || int.ParseEr
     defer {
         dest_arg.i_sdst = dest.i_sdst;
         dest_arg.n_sdst = dest.n_sdst;
-        dest_arg.i_sd_parm2 = dest.i_sd_parm2;
+        dest_arg.reg_bloom = dest.reg_bloom;
     }
 
     // Create the destination temporary table if necessary.
     if (dest.e_dest == SRT.EphemTab) {
-        _ = aux.emit(v, .OpenEphemeral, .{ Cursor.from(dest.i_sd_parm), s.e_list.?.len() });
+        _ = aux.emit(v, .OpenEphemeral, .{ dest.parm.cursor, s.e_list.?.len() });
         dest.e_dest = SRT.Table;
     }
 
@@ -1573,11 +1586,11 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) (Oom || int.ParseEr
         s.prior = null;
         s.i_limit = prior.i_limit;
         s.i_offset = prior.i_offset;
-        if (s.i_limit != 0) {
-            const limit: Reg = .from(s.i_limit);
+        if (!s.i_limit.isNone()) {
+            const limit = s.i_limit;
             addr = aux.emit(v, .IfNot, .{limit});
-            if (s.i_offset != 0) {
-                const offset: Reg = .from(s.i_offset);
+            if (!s.i_offset.isNone()) {
+                const offset = s.i_offset;
                 _ = aux.emit(v, .OffsetLimit, .{ limit, offset.at(1), offset });
             }
         }
@@ -1603,7 +1616,7 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
     const addr = aux.here(v);
     const cont = aux.newLabel(p);
     // The row of the co-routine.
-    const row: Reg = .from(in.i_sdst);
+    const row = in.i_sdst;
 
     // UNION, EXCEPT and INTERSECT: skip a row equal to the previous one.
     if (!reg_prev.isNone()) {
@@ -1617,13 +1630,13 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
     }
     if (p.db.malloc_failed) return .from(0);
 
-    codeOffset(v, .from(s.i_offset), .of(cont));
+    codeOffset(v, s.i_offset, .of(cont));
 
     switch (dest.e_dest) {
         SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
             const r1: Reg = expr_mod.getTempReg(p);
             const r2: Reg = expr_mod.getTempReg(p);
-            const tab: Cursor = .from(dest.i_sd_parm);
+            const tab = dest.parm.cursor;
             _ = aux.emit(v, .MakeRecord, .{ row, in.n_sdst, r1 });
             if (dest.e_dest == SRT.DistFifo) {
                 // Populate the uniqueness index of the recursive phase.
@@ -1635,29 +1648,29 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
             expr_mod.releaseTempReg(p, r2);
             expr_mod.releaseTempReg(p, r1);
         },
-        SRT.Exists => _ = aux.emit(v, .Integer, .{ 1, Reg.from(dest.i_sd_parm) }),
+        SRT.Exists => _ = aux.emit(v, .Integer, .{ 1, dest.parm.reg }),
         SRT.Set => {
             const r1: Reg = expr_mod.getTempReg(p);
             _ = aux.emitStr(v, .MakeRecord, .{ row, in.n_sdst, r1 }, dest.aff_sdst.?);
-            _ = aux.emitInt(v, .IdxInsert, .{ Cursor.from(dest.i_sd_parm), r1, row }, in.n_sdst);
-            if (dest.i_sd_parm2 > 0) {
-                _ = aux.emitInt(v, .FilterAdd, .{ Reg.from(dest.i_sd_parm2), 0, row }, in.n_sdst);
+            _ = aux.emitInt(v, .IdxInsert, .{ dest.parm.cursor, r1, row }, in.n_sdst);
+            if (!dest.reg_bloom.isNone()) {
+                _ = aux.emitInt(v, .FilterAdd, .{ dest.reg_bloom, 0, row }, in.n_sdst);
                 _ = aux.explain(p, false, "CREATE BLOOM FILTER", .{});
             }
             expr_mod.releaseTempReg(p, r1);
         },
-        SRT.Mem => ec.codeMove(p, .from(in.i_sdst), .from(dest.i_sd_parm), in.n_sdst),
+        SRT.Mem => ec.codeMove(p, in.i_sdst, dest.parm.reg, in.n_sdst),
         SRT.Coroutine => {
-            if (dest.i_sdst == 0) {
-                dest.i_sdst = expr_mod.getTempRange(p, in.n_sdst).int();
+            if (dest.i_sdst.isNone()) {
+                dest.i_sdst = expr_mod.getTempRange(p, in.n_sdst);
                 dest.n_sdst = in.n_sdst;
             }
-            ec.codeMove(p, .from(in.i_sdst), .from(dest.i_sdst), in.n_sdst);
-            _ = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
+            ec.codeMove(p, in.i_sdst, dest.i_sdst, in.n_sdst);
+            _ = aux.emit(v, .Yield, .{dest.parm.reg});
         },
         SRT.DistQueue, SRT.Queue => {
             const so = dest.order_by.?;
-            const queue: Cursor = .from(dest.i_sd_parm);
+            const queue = dest.parm.cursor;
             const n_key: i32 = @intCast(so.len());
             const r1: Reg = expr_mod.getTempReg(p);
             const r2: Reg = expr_mod.getTempRange(p, n_key + 2);
@@ -1681,7 +1694,7 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
     }
 
     // Stop at the LIMIT.
-    if (s.i_limit != 0) _ = aux.emit(v, .DecrJumpZero, .{ Reg.from(s.i_limit), break_to });
+    if (!s.i_limit.isNone()) _ = aux.emit(v, .DecrJumpZero, .{ s.i_limit, break_to });
 
     // The subroutine return.
     aux.place(v, cont);
@@ -1770,10 +1783,10 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     computeLimitRegisters(p, s, label_end);
     var reg_limit_a: Reg = .none;
     var reg_limit_b: Reg = .none;
-    if (s.i_limit != 0 and (op == TK.ALL or unionWithLimitOne(db, s))) {
+    if (!s.i_limit.isNone() and (op == TK.ALL or unionWithLimitOne(db, s))) {
         reg_limit_a = p.newReg();
         reg_limit_b = p.newReg();
-        _ = aux.emit(v, .Copy, .{ Reg.from(if (s.i_offset != 0) s.i_offset + 1 else s.i_limit), reg_limit_a });
+        _ = aux.emit(v, .Copy, .{ if (!s.i_offset.isNone()) s.i_offset.at(1) else s.i_limit, reg_limit_a });
         _ = aux.emit(v, .Copy, .{ reg_limit_a, reg_limit_b });
     }
     s.limit = null;
@@ -1782,15 +1795,15 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     const reg_addr_b = p.newReg();
     const reg_out_a = p.newReg();
     const reg_out_b = p.newReg();
-    var dest_a = selectDestInit(SRT.Coroutine, reg_addr_a.int());
-    var dest_b = selectDestInit(SRT.Coroutine, reg_addr_b.int());
+    var dest_a = selectDestInit(SRT.Coroutine, .{ .reg = reg_addr_a });
+    var dest_b = selectDestInit(SRT.Coroutine, .{ .reg = reg_addr_b });
 
     _ = aux.explain(p, true, "MERGE ({s})", .{selectOpName(s.op)});
 
     // Co-routine A: the query on the left.
     const addr_select_a = aux.here(v).plus(1);
     var addr1 = aux.emit(v, .InitCoroutine, .{ reg_addr_a, 0, addr_select_a });
-    prior.i_limit = reg_limit_a.int();
+    prior.i_limit = reg_limit_a;
     _ = aux.explain(p, true, "LEFT", .{});
     select(p, prior, &dest_a) catch {};
     aux.endCoroutine(v, reg_addr_a);
@@ -1801,8 +1814,8 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     addr1 = aux.emit(v, .InitCoroutine, .{ reg_addr_b, 0, addr_select_b });
     const saved_limit = s.i_limit;
     const saved_offset = s.i_offset;
-    s.i_limit = reg_limit_b.int();
-    s.i_offset = 0;
+    s.i_limit = reg_limit_b;
+    s.i_offset = .none;
     _ = aux.explain(p, true, "RIGHT", .{});
     select(p, s, &dest_b) catch {};
     s.i_limit = saved_limit;
@@ -1823,8 +1836,8 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
         addr_eof_a = .of(label_end);
         addr_eof_a_no_b = .of(label_end);
     } else {
-        addr_eof_a = .from(aux.emit(v, .Gosub, .{ reg_out_b, addr_out_b }).int());
-        addr_eof_a_no_b = .from(aux.emit(v, .Yield, .{ reg_addr_b, label_end }).int());
+        addr_eof_a = .of(aux.emit(v, .Gosub, .{ reg_out_b, addr_out_b }));
+        addr_eof_a_no_b = .of(aux.emit(v, .Yield, .{ reg_addr_b, label_end }));
         _ = aux.emit(v, .Goto, .{ 0, addr_eof_a });
         s.n_select_row = util.logEstAdd(s.n_select_row, prior.n_select_row);
     }
@@ -1835,7 +1848,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
         addr_eof_b = addr_eof_a;
         if (s.n_select_row > prior.n_select_row) s.n_select_row = prior.n_select_row;
     } else {
-        addr_eof_b = .from(aux.emit(v, .Gosub, .{ reg_out_a, addr_out_a }).int());
+        addr_eof_b = .of(aux.emit(v, .Gosub, .{ reg_out_a, addr_out_a }));
         _ = aux.emit(v, .Yield, .{ reg_addr_a, label_end });
         _ = aux.emit(v, .Goto, .{ 0, addr_eof_b });
     }
@@ -1876,7 +1889,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.Pars
     // The merge loop.
     if (permute) |pm| _ = aux.emit4(v, .Permutation, .{}, .{ .intarray = pm });
     aux.place(v, label_cmpr);
-    _ = aux.emit4(v, .Compare, .{ Reg.from(dest_a.i_sdst), Reg.from(dest_b.i_sdst), n_order_by }, if (key_merge) |k| .{ .keyinfo = k } else .notused);
+    _ = aux.emit4(v, .Compare, .{ dest_a.i_sdst, dest_b.i_sdst, n_order_by }, if (key_merge) |k| .{ .keyinfo = k } else .notused);
     if (permute != null) aux.changeP5(v, OPFLAG.PERMUTE);
     // P1 and P3 of OP_Jump are addresses too.
     _ = aux.emit(v, .Jump, .{ addr_alt_b, addr_aeq_b, addr_agt_b });
@@ -3194,7 +3207,7 @@ fn analyzeAggFuncArgs(agg: *AggInfo, nc: *NameContext) void {
 /// chosen indexes, analyze the aggregate function arguments again so that
 /// the indexed expressions among them become columns of those indexes.
 fn optimizeAggregateUseOfIndexedExpr(s: *Select, agg: *AggInfo, nc: *NameContext) void {
-    std.debug.assert(agg.i_first_reg == 0);
+    std.debug.assert(agg.i_first_reg.isNone());
     agg.cols.shrinkRetainingCapacity(@intCast(agg.n_accumulator));
     if (agg.n_sorting_column > 0) {
         var mx: i32 = @as(i32, @intCast(s.group_by.?.len())) - 1;
@@ -3228,7 +3241,7 @@ fn aggregateConvertIndexedExprRefToColumn(agg: *AggInfo) void {
 /// Port of assignAggregateRegisters(): one register per AggInfo column
 /// and function.
 fn assignAggregateRegisters(p: *Parse, agg: *AggInfo) void {
-    agg.i_first_reg = p.newRegs(@intCast(agg.cols.items.len + agg.funcs.items.len)).int();
+    agg.i_first_reg = p.newRegs(@intCast(agg.cols.items.len + agg.funcs.items.len));
 }
 
 /// Port of resetAccumulator(): code NULLs into the accumulators, and open
@@ -3238,7 +3251,7 @@ fn resetAccumulator(p: *Parse, agg: *AggInfo) void {
     const n_reg: i32 = @intCast(agg.funcs.items.len + agg.cols.items.len);
     if (n_reg == 0) return;
     if (p.n_err != 0) return;
-    const first: Reg = .from(agg.i_first_reg);
+    const first = agg.i_first_reg;
     _ = aux.emit(v, .Null, .{ 0, first, first.at(n_reg - 1) });
     for (agg.funcs.items) |*f| {
         if (f.i_distinct >= 0) {
@@ -3248,11 +3261,11 @@ fn resetAccumulator(p: *Parse, agg: *AggInfo) void {
                 f.i_distinct = -1;
             } else {
                 const ki = keyInfoFromExprList(p, e.x.list.?, 0, 0);
-                f.i_dist_addr = aux.emit4(v, .OpenEphemeral, .{Cursor.from(f.i_distinct)}, if (ki) |k| .{ .keyinfo = k } else .notused).int();
+                f.i_dist_addr = aux.emit4(v, .OpenEphemeral, .{Cursor.from(f.i_distinct)}, if (ki) |k| .{ .keyinfo = k } else .notused);
                 _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}(DISTINCT)", .{f.func.?.name});
             }
         }
-        if (f.i_ob_tab >= 0) {
+        if (f.i_ob_tab) |ob_tab| {
             const ob_list = f.f_expr.left.?.x.list.?;
             var n_extra: usize = 0;
             if (!f.b_ob_unique) n_extra += 1;
@@ -3260,7 +3273,7 @@ fn resetAccumulator(p: *Parse, agg: *AggInfo) void {
             if (f.b_use_subtype) n_extra += f.f_expr.x.list.?.len();
             const ki = keyInfoFromExprList(p, ob_list, 0, n_extra);
             if (!f.b_ob_unique and p.n_err == 0) ki.?.n_key_field += 1;
-            _ = aux.emit4(v, .OpenEphemeral, .{ Cursor.from(f.i_ob_tab), ob_list.len() + n_extra }, if (ki) |k| .{ .keyinfo = k } else .notused);
+            _ = aux.emit4(v, .OpenEphemeral, .{ ob_tab, ob_list.len() + n_extra }, if (ki) |k| .{ .keyinfo = k } else .notused);
             _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}(ORDER BY)", .{f.func.?.name});
         }
     }
@@ -3273,9 +3286,8 @@ fn finalizeAggFunctions(p: *Parse, agg: *AggInfo) void {
     for (agg.funcs.items, 0..) |*f, i| {
         if (p.n_err != 0) return;
         const list = f.f_expr.x.list;
-        if (f.i_ob_tab >= 0) {
+        if (f.i_ob_tab) |ob_tab| {
             // Feed the rows of the ORDER BY table to OP_AggStep in order.
-            const ob_tab: Cursor = .from(f.i_ob_tab);
             const n_arg: i32 = @intCast(list.?.len());
             const reg_agg: Reg = expr_mod.getTempRange(p, n_arg);
             var n_key: i32 = 0;
@@ -3296,14 +3308,14 @@ fn finalizeAggFunctions(p: *Parse, agg: *AggInfo) void {
                 }
                 expr_mod.releaseTempReg(p, reg_subtype);
             }
-            _ = aux.emit(v, .AggStep, .{ 0, reg_agg, Reg.from(agg.funcReg(i)) });
+            _ = aux.emit(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) });
             aux.appendP4(v, .{ .funcdef = f.func.? });
             aux.changeP5(v, @intCast(n_arg));
             _ = aux.emit(v, .Next, .{ ob_tab, top.plus(1) });
             aux.landHere(v, top);
             expr_mod.releaseTempRange(p, reg_agg, n_arg);
         }
-        _ = aux.emit(v, .AggFinal, .{ Reg.from(agg.funcReg(i)), if (list) |l| l.len() else 0 });
+        _ = aux.emit(v, .AggFinal, .{ agg.funcReg(i), if (list) |l| l.len() else 0 });
         aux.appendP4(v, .{ .funcdef = f.func.? });
     }
 }
@@ -3339,7 +3351,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
             next = filtered;
             ec.exprIfFalse(p, filter, .of(filtered), vi.SQLITE_JUMPIFNULL);
         }
-        if (f.i_ob_tab >= 0) {
+        if (f.i_ob_tab) |ob_tab| {
             // The arguments go to the ORDER BY table; OP_AggStep runs at
             // the end.
             n_arg = @intCast(list.?.len());
@@ -3354,7 +3366,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
             _ = ec.codeExprList(p, ob_list, reg_agg, .none, ec.ECEL_DUP);
             var jj: i32 = @intCast(ob_list.len());
             if (!f.b_ob_unique) {
-                _ = aux.emit(v, .Sequence, .{ Cursor.from(f.i_ob_tab), reg_agg.at(jj) });
+                _ = aux.emit(v, .Sequence, .{ ob_tab, reg_agg.at(jj) });
                 jj += 1;
             }
             if (f.b_ob_payload) {
@@ -3378,13 +3390,13 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
         }
         if (f.i_distinct >= 0 and list != null) {
             if (next == null) next = aux.newLabel(p);
-            f.i_distinct = codeDistinct(p, e_distinct_type, .from(f.i_distinct), .from(next.?.int()), list.?, reg_distinct);
+            f.i_distinct = codeDistinct(p, e_distinct_type, .from(f.i_distinct), .of(next.?), list.?, reg_distinct);
         }
-        if (f.i_ob_tab >= 0) {
+        if (f.i_ob_tab) |ob_tab| {
             // A row of the ORDER BY table.
             const record = reg_agg.at(reg_agg_sz - 1);
             _ = aux.emit(v, .MakeRecord, .{ reg_agg, reg_agg_sz - 1, record });
-            _ = aux.emitInt(v, .IdxInsert, .{ Cursor.from(f.i_ob_tab), record, reg_agg }, reg_agg_sz - 1);
+            _ = aux.emitInt(v, .IdxInsert, .{ ob_tab, record, reg_agg }, reg_agg_sz - 1);
             expr_mod.releaseTempRange(p, reg_agg, reg_agg_sz);
         } else {
             if (f.func.?.func_flags.NEEDCOLL) {
@@ -3398,7 +3410,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
                 }
                 _ = aux.emit4(v, .CollSeq, .{reg_hit}, .{ .collseq = c orelse coll_mod.dfltColl(p.db) });
             }
-            _ = aux.emit(v, .AggStep, .{ 0, reg_agg, Reg.from(agg.funcReg(i)) });
+            _ = aux.emit(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) });
             aux.appendP4(v, .{ .funcdef = f.func.? });
             aux.changeP5(v, @intCast(n_arg));
             expr_mod.releaseTempRange(p, reg_agg, n_arg);
@@ -3409,7 +3421,7 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
     if (reg_hit.isNone() and agg.n_accumulator != 0) reg_hit = reg_acc;
     if (!reg_hit.isNone()) addr_hit_test = aux.emit(v, .If, .{reg_hit});
     for (agg.cols.items[0..@intCast(agg.n_accumulator)], 0..) |c, i| {
-        ec.exprCode(p, c.c_expr, .from(agg.columnReg(i)));
+        ec.exprCode(p, c.c_expr, agg.columnReg(i));
         if (p.n_err != 0) return;
     }
     agg.direct_mode = false;
@@ -3906,7 +3918,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
         const subq = item.u4.subq.?;
         const sub = subq.select;
         // Only once.
-        if (subq.addr_fill_sub != 0) continue;
+        if (subq.addr_fill_sub != null) continue;
         p.n_height += expr_mod.selectExprHeight(s);
 
         // Copy WHERE-clause terms of the outer query into the subquery
@@ -3927,42 +3939,42 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             // A co-routine returning one row per call.
             const addr_top = aux.here(v).plus(1);
             const reg_return = p.newReg();
-            subq.reg_return = reg_return.int();
+            subq.reg_return = reg_return;
             const addr_init = aux.emit(v, .InitCoroutine, .{ reg_return, 0, addr_top });
-            subq.addr_fill_sub = addr_top.int();
-            var d = selectDestInit(SRT.Coroutine, subq.reg_return);
+            subq.addr_fill_sub = addr_top;
+            var d = selectDestInit(SRT.Coroutine, .{ .reg = reg_return });
             _ = aux.explain(p, true, "CO-ROUTINE {f}", .{util.srcItemNameNoAlias(item)});
             select(p, sub, &d) catch {};
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             item.fg.via_coroutine = true;
             subq.reg_result = d.i_sdst;
-            aux.endCoroutine(v, .from(subq.reg_return));
-            subq.xq_end = aux.currentAddr(v);
+            aux.endCoroutine(v, reg_return);
+            subq.xq_end = aux.here(v);
             aux.landHere(v, addr_init);
             expr_mod.clearTempRegCache(p);
-        } else if (item.fg.is_cte and item.u2.cte_use.?.addr_m9e > 0) {
+        } else if (item.fg.is_cte and item.u2.cte_use.?.addr_m9e != null) {
             // A CTE already materialized: run its subroutine and use a
             // copy of its table.
             const use = item.u2.cte_use.?;
-            _ = aux.emit(v, .Gosub, .{ Reg.from(use.reg_rtn), Jump.from(use.addr_m9e) });
-            if (item.i_cursor != use.i_cur) _ = aux.emit(v, .OpenDup, .{ Cursor.from(item.i_cursor), Cursor.from(use.i_cur) });
+            _ = aux.emit(v, .Gosub, .{ use.reg_rtn, use.addr_m9e.? });
+            if (item.i_cursor != use.i_cur.int()) _ = aux.emit(v, .OpenDup, .{ Cursor.from(item.i_cursor), use.i_cur });
             sub.n_select_row = use.n_row_est;
         } else if (isSelfJoinView(tab_list, item, 0, i)) |prior| {
             // Materialized by an earlier term of this FROM clause.
             const prior_subq = prior.u4.subq.?;
-            if (prior_subq.addr_fill_sub != 0) _ = aux.emit(v, .Gosub, .{ Reg.from(prior_subq.reg_return), Jump.from(prior_subq.addr_fill_sub) });
+            if (prior_subq.addr_fill_sub) |a| _ = aux.emit(v, .Gosub, .{ prior_subq.reg_return, a });
             _ = aux.emit(v, .OpenDup, .{ Cursor.from(item.i_cursor), Cursor.from(prior.i_cursor) });
             sub.n_select_row = prior_subq.select.n_select_row;
         } else {
             // Materialize, in a subroutine that later uses can call.
             const reg_return = p.newReg();
-            subq.reg_return = reg_return.int();
+            subq.reg_return = reg_return;
             const top_addr = aux.emit(v, .Goto, .{});
-            subq.addr_fill_sub = top_addr.plus(1).int();
+            subq.addr_fill_sub = top_addr.plus(1);
             item.fg.is_materialized = true;
             // An uncorrelated subquery is computed once.
             const once: ?Addr = if (!item.fg.is_correlated) aux.emit(v, .Once, .{}) else null;
-            var d = selectDestInit(SRT.EphemTab, item.i_cursor);
+            var d = selectDestInit(SRT.EphemTab, .{ .cursor = .from(item.i_cursor) });
             const addr_explain = aux.explain(p, true, "MATERIALIZE {f}", .{util.srcItemNameNoAlias(item)});
             select(p, sub, &d) catch {};
             item.s_tab.?.n_row_log_est = sub.n_select_row;
@@ -3976,7 +3988,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 const use = item.u2.cte_use.?;
                 use.addr_m9e = subq.addr_fill_sub;
                 use.reg_rtn = subq.reg_return;
-                use.i_cur = item.i_cursor;
+                use.i_cur = .from(item.i_cursor);
                 use.n_row_est = sub.n_select_row;
             }
         }
@@ -4016,7 +4028,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
 
     // The output table.
     if (dest.e_dest == SRT.EphemTab) {
-        _ = aux.emit(v, .OpenEphemeral, .{ Cursor.from(dest.i_sd_parm), e_list.len() });
+        _ = aux.emit(v, .OpenEphemeral, .{ dest.parm.cursor, e_list.len() });
         if (s.sel_flags.NestedFrom) {
             // Unused result columns are dropped or NULL.
             var ii = e_list.len() - 1;
@@ -4033,7 +4045,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
     const end = aux.newLabel(p);
     if (!s.sel_flags.FixedLimit) s.n_select_row = 320;
     if (s.limit != null) computeLimitRegisters(p, s, end);
-    if (s.i_limit == 0 and sort.addr_sort_index != null) {
+    if (s.i_limit.isNone() and sort.addr_sort_index != null) {
         aux.changeOpcode(v, sort.addr_sort_index.?, OP.SorterOpen);
         sort.sort_flags |= SORTFLAG_UseSorter;
     }
@@ -4078,7 +4090,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             const brk = aux.newLabel(p);
             const reg_gosub = p.newReg();
 
-            window.windowCodeStep(p, s, w, reg_gosub.int(), addr_gosub.int());
+            window.windowCodeStep(p, s, w, reg_gosub, addr_gosub);
 
             _ = aux.emit(v, .Goto, .{ 0, brk });
             aux.place(v, addr_gosub);
@@ -4146,7 +4158,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
 
             // The sorter of the GROUP BY (made a no-op if not needed).
             const sorting_idx = p.newCursor();
-            agg.sorting_idx = sorting_idx.int();
+            agg.sorting_idx = sorting_idx;
             const key_info = keyInfoFromExprList(p, gb, 0, agg.cols.items.len);
             const addr_sorting_idx = aux.emit4(v, .SorterOpen, .{ sorting_idx, agg.n_sorting_column }, if (key_info) |k| .{ .keyinfo = k } else .notused);
 
@@ -4216,7 +4228,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 expr_mod.releaseTempRange(p, reg_base, n_col);
                 where_mod.whereEnd(w);
                 sort_ptab = p.newCursor();
-                agg.sorting_idx_ptab = sort_ptab.int();
+                agg.sorting_idx_ptab = sort_ptab;
                 sort_out = expr_mod.getTempReg(p);
                 aux.scanStatusCounters(v, addr_exp, aux.currentAddr(v), 0);
                 _ = aux.emit(v, .OpenPseudo, .{ sort_ptab, sort_out, n_col });
@@ -4311,7 +4323,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
 
             if (!dist_flag.isEmpty() and e_dist != int.WHERE_DISTINCT.NOOP) {
                 const f = &agg.funcs.items[0];
-                fixDistinctOpenEph(p, e_dist, f.i_distinct, .from(f.i_dist_addr));
+                fixDistinctOpenEph(p, e_dist, f.i_distinct, f.i_dist_addr);
             }
         } else {
             // Aggregates without GROUP BY.
@@ -4343,7 +4355,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 _ = aux.emitInt(v, .OpenRead, .{ csr, i_root, i_db }, 1);
                 if (key_info) |k| aux.changeP4(v, null, .{ .keyinfo = k });
                 assignAggregateRegisters(p, agg);
-                _ = aux.emit(v, .Count, .{ csr, Reg.from(agg.funcReg(0)) });
+                _ = aux.emit(v, .Count, .{ csr, agg.funcReg(0) });
                 _ = aux.emit(v, .Close, .{csr});
                 explainSimpleCount(p, t, best);
             } else {
@@ -4374,7 +4386,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 updateAccumulator(p, reg_acc, agg, e_dist);
                 if (e_dist != int.WHERE_DISTINCT.NOOP and agg.funcs.items.len > 0) {
                     const f = &agg.funcs.items[0];
-                    fixDistinctOpenEph(p, e_dist, f.i_distinct, .from(f.i_dist_addr));
+                    fixDistinctOpenEph(p, e_dist, f.i_distinct, f.i_dist_addr);
                 }
                 if (!reg_acc.isNone()) _ = aux.emit(v, .Integer, .{ 1, reg_acc });
                 if (!min_max_flag.isEmpty()) where_mod.minMaxOptEarlyOut(v, w);

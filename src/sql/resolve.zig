@@ -372,8 +372,8 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                             e_new_op = TK.REGISTER;
                             e.op2 = TK.COLUMN;
                             e.i_column = @intCast(i_col);
-                            e.i_table = n.u_nc.i_base_reg + (@as(i32, @intCast(tb.cols.len)) + 1) * e.i_table +
-                                build.tableColumnToStorage(tb, @intCast(i_col)) + 1;
+                            e.i_table = n.u_nc.i_base_reg.at((@as(i32, @intCast(tb.cols.len)) + 1) * e.i_table +
+                                build.tableColumnToStorage(tb, @intCast(i_col)) + 1).int();
                         } else {
                             e.i_column = @intCast(i_col);
                             e_new_op = TK.TRIGGER;

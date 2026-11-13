@@ -402,8 +402,8 @@ pub fn multiValuesEnd(p: *Parse, val: ?*Select) void {
     const item = s.src.?.at(0);
     if (item.fg.is_subquery) {
         const subq = item.u4.subq.?;
-        aux.endCoroutine(p.vdbe.?, .from(subq.reg_return));
-        aux.landHere(p.vdbe.?, .from(subq.addr_fill_sub - 1));
+        aux.endCoroutine(p.vdbe.?, subq.reg_return);
+        aux.landHere(p.vdbe.?, subq.addr_fill_sub.?.plus(-1));
     }
 }
 
@@ -464,14 +464,15 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Selec
         item.u1 = .{ .n_row = 2 };
         try build.srcItemAttachSubquery(p, item, left);
         const subq = item.u4.subq.?;
-        subq.addr_fill_sub = aux.currentAddr(v) + 1;
-        subq.reg_return = p.newReg().int();
-        _ = aux.emit(v, .InitCoroutine, .{ Reg.from(subq.reg_return), 0, Addr.from(subq.addr_fill_sub) });
-        var dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
+        const addr_fill = aux.here(v).plus(1);
+        subq.addr_fill_sub = addr_fill;
+        subq.reg_return = p.newReg();
+        _ = aux.emit(v, .InitCoroutine, .{ subq.reg_return, 0, addr_fill });
+        var dest = select_mod.selectDestInit(SRT.Coroutine, .{ .reg = subq.reg_return });
         // Two unused registers before the output, so that insert() can
         // use them as they are (rowid and the row of a virtual table).
         dest.n_sdst = @intCast(left.e_list.?.len());
-        dest.i_sdst = p.newRegs(2 + dest.n_sdst).at(2).int();
+        dest.i_sdst = p.newRegs(2 + dest.n_sdst).at(2);
         left.sel_flags.MultiValue = true;
         p.xq_values_coroutine = true;
         select_mod.select(p, left, &dest) catch {};
@@ -487,8 +488,8 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row_arg: ?*ExprList) Oom!*Selec
         if (subq.select.e_list.?.len() != row.len()) {
             select_mod.selectWrongNumTermsError(p, subq.select);
         } else {
-            _ = ec.codeExprList(p, row, .from(subq.reg_result), .none, 0);
-            _ = aux.emit(p.vdbe.?, .Yield, .{Reg.from(subq.reg_return)});
+            _ = ec.codeExprList(p, row, subq.reg_result, .none, 0);
+            _ = aux.emit(p.vdbe.?, .Yield, .{subq.reg_return});
         }
     }
     return left;
@@ -592,8 +593,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             // (multiValues()).
             const item = s.src.?.at(0);
             const subq = item.u4.subq.?;
-            dest = select_mod.selectDestInit(SRT.Coroutine, subq.reg_return);
-            select_reg = .from(subq.reg_result);
+            dest = select_mod.selectDestInit(SRT.Coroutine, .{ .reg = subq.reg_return });
+            select_reg = subq.reg_result;
             n_column = @intCast(subq.select.e_list.?.len());
             _ = aux.explain(p, false, "SCAN {f}", .{util.srcItemName(item)});
             if (b_id_list_in_order and n_column == t.cols.len) {
@@ -605,14 +606,14 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             const yield_reg = p.newReg();
             const addr_top = aux.here(v).plus(1);
             _ = aux.emit(v, .InitCoroutine, .{ yield_reg, 0, addr_top });
-            dest = select_mod.selectDestInit(SRT.Coroutine, yield_reg.int());
-            dest.i_sdst = if (b_id_list_in_order) data_reg.int() else 0;
+            dest = select_mod.selectDestInit(SRT.Coroutine, .{ .reg = yield_reg });
+            dest.i_sdst = if (b_id_list_in_order) data_reg else .none;
             dest.n_sdst = @intCast(t.cols.len);
             const saved_values = p.xq_insert_values;
             if (s.sel_flags.Values) p.xq_insert_values = s;
             const rc = select_mod.select(p, s, &dest);
             p.xq_insert_values = saved_values;
-            select_reg = .from(dest.i_sdst);
+            select_reg = dest.i_sdst;
             rc catch return;
             if (p.n_err != 0) return;
             if (typing.active(db)) {
@@ -632,7 +633,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             const rec: Reg = expr_mod.getTempReg(p);
             const temp_rowid: Reg = expr_mod.getTempReg(p);
             _ = aux.emit(v, .OpenEphemeral, .{ src_tab.?, n_column });
-            const addr_l = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
+            const addr_l = aux.emit(v, .Yield, .{dest.parm.reg});
             _ = aux.emit(v, .MakeRecord, .{ select_reg, n_column, rec });
             _ = aux.emit(v, .NewRowid, .{ src_tab.?, temp_rowid });
             _ = aux.emit(v, .Insert, .{ src_tab.?, rec, temp_rowid });
@@ -732,7 +733,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         addr_ins_top = aux.emit(v, .Rewind, .{src_tab.?});
         addr_cont = aux.here(v);
     } else if (sel != null) {
-        addr_cont = aux.emit(v, .Yield, .{Reg.from(dest.i_sd_parm)});
+        addr_cont = aux.emit(v, .Yield, .{dest.parm.reg});
         addr_ins_top = addr_cont;
         // An INTEGER PRIMARY KEY from the SELECT goes to the rowid slot
         // now, before its column slot is set to NULL.

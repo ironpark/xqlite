@@ -456,8 +456,8 @@ c3ae2e9045ce5cea e1a8d6c43abd0bf4 SELECT json_valid('{"x":-01.5}'), NOT json_err
 226b8da5fa8fd790 e1a8d6c43abd0bf4 SELECT json_valid('{"x":+0}'), NOT json_error_position('{"x":+0}')
 7b87c485c624bbcf e1a8d6c43abd0bf4 SELECT json_valid('{"x":+5}'), NOT json_error_position('{"x":+5}')
 90a4e2c8a289c433 e1a8d6c43abd0bf4 SELECT json_valid('{"x":+5.5}'), NOT json_error_position('{"x":+5.5}')
-63f1a153f856753c 3fb1a2a6722acd48 WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x20) SELECT x FROM c WHERE json_valid(printf('{"a":"x%sz"}', char(x))) ORDER BY x
-fa367c272a8a2f1a 0bb333a196f128ff WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x1f) SELECT sum(json_valid(json_quote('a'||char(x)||'z'))) FROM c ORDER BY x
+680dd105c137834b 3fb1a2a6722acd48 WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x20) SELECT x FROM c WHERE json_valid(printf('{"a":"x%sz"}', char(x))) ORDER BY x
+57f08b6fdd306f7f 0bb333a196f128ff WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x1f) SELECT sum(json_valid(json_quote('a'||char(x)||'z'))) FROM c ORDER BY x
 ----
 df3f4a010a19004d f9d39680f4a9bea0 SELECT id, x->'a' AS '->', CASE WHEN subtype(x->'a') THEN 'json' ELSE typeof(x->'a') END AS 'type', x->>'a' AS '->>', CASE WHEN subtype(x->>'a') THEN 'json' ELSE typeof(x->>'a') END AS 'type', json_extract(x,'$.a') AS 'json_extract', CASE WHEN subtype(json_extract(x,'$.a')) THEN 'json' ELSE typeof(json_extract(x,'$.a')) END AS 'type' FROM t1 ORDER BY id
 ----
@@ -1409,7 +1409,7 @@ d104d7bacd557d1f f0740ecb6b8bac6e SELECT * FROM json_each('[5,1,3]') AS j JOIN d
 cfc995e1eaa7abbc 6bcaac8088077cec SELECT * FROM doc WHERE id = (SELECT max(value) FROM json_each('[1,3,5]'))
 9388d398dd239c0b c71697a4d9a4a87d SELECT doc.id, (SELECT json_group_array(value) FROM json_each(doc.body, '$.tags') ORDER BY value DESC) FROM doc
 10ded8f074ad3bb7 75e68fbe6845dc6f WITH x AS (SELECT value AS v FROM json_each('[1,2,3,4]')) SELECT * FROM x, doc WHERE doc.id = x.v
-36fceab9942f7330 d382d7c17de4d85f WITH RECURSIVE r(n, j) AS (SELECT 1, '[[1],[2,[3]]]' UNION ALL SELECT n+1, value FROM r, json_each(r.j) WHERE type = 'array') SELECT * FROM r
+e0440c6b5cae5ca5 d382d7c17de4d85f WITH RECURSIVE r(n, j) AS (SELECT 1, '[[1],[2,[3]]]' UNION ALL SELECT n+1, value FROM r, json_each(r.j) WHERE type = 'array') SELECT * FROM r
 e1e0080a36393eb4 7c1f4cbeb701335e SELECT * FROM (SELECT * FROM json_each('[3,1,2]') ORDER BY value) LIMIT 2
 179a4a27d1173db1 30db5367e09473fd SELECT * FROM json_each('[3,1,2]') UNION ALL SELECT * FROM json_each('[4]')
 10e7865eae92fded b58bf941c29c1eea SELECT value FROM json_each('[3,1,2]') UNION SELECT value FROM json_each('[2,4]')

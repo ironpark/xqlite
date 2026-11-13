@@ -2659,6 +2659,9 @@ pub const Sqlite3 = struct {
     /// PMAs the sorters of the connection wrote, for tests that check
     /// that a sort spilled (C has no such counter; tests only).
     n_pma_written: if (@import("builtin").is_test) u64 else void = if (@import("builtin").is_test) 0 else {},
+    /// Chunks the queues of recursive CTEs wrote to their temporary files
+    /// (vdbe/queue.zig; tests only).
+    n_queue_spilled: if (@import("builtin").is_test) u64 else void = if (@import("builtin").is_test) 0 else {},
     /// Page size for new databases, as set by PRAGMA page_size.
     next_pagesize: u32 = 0,
     /// Schema resets are deferred while this is nonzero.

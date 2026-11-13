@@ -559,6 +559,8 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
   - 레지스터와 커서는 `e.reg(op.p3)`, `e.regsFrom(op.p2)`, `e.regRange(op.p2, n)`, `e.csr(op.p1)`, `e.csrIfOpen(op.p1)`로 꺼냅니다. 앞뒤 명령의 피연산자는 `e.opAt(.SeekGE, e.pc + 1)`처럼 그 opcode의 타입으로 읽습니다.
   - 피연산자 종류가 다른 opcode를 함께 맡는 처리기(`OP_Last`와 `OP_SeekEnd`, `OP_IdxRowid`와 `OP_DeferredSeek`)는 `op: anytype`과 opcode를 받아 opcode마다 그 종류로 받고, 피연산자를 읽지 않는 처리기(`OP_Noop` ...)는 `OpOf(null)`을 받습니다.
   - 어떤 쓰임에서만 레지스터인 `int` 피연산자는 처리기가 그 쓰임을 가리는 자리(`p2_is_reg`를 본 뒤)에서 `Reg.from()`으로 바꿉니다.
+- **커서 종류**: `VdbeCursor.kind`는 C의 `eCurType`과 `uc`를 합친 태그 붙은 공용체입니다. `btree`(테이블, 인덱스, 임시 테이블), `sorter`(`src/vdbe/sorter.zig`), `vtab`, `pseudo`(레코드를 담은 레지스터)에 SQLite에 없는 `queue`(재귀 CTE의 FIFO, `src/vdbe/queue.zig`)가 있습니다. 종류에 맞지 않게 꺼내면 Debug·ReleaseSafe에서 공용체 태그 검사로 멈춥니다.
+- **SQLite에 없는 opcode**: `OP_OpenQueue`, `OP_QueuePush`, `OP_QueuePop`(`ORDER BY` 없는 재귀 CTE의 큐, [differences.md](sqlite/differences.md#내부-구현의-차이)). 번호는 SQLite의 마지막 opcode 다음(191부터)입니다.
 
 ## VFS
 

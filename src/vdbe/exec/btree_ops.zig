@@ -1,6 +1,7 @@
 //! Opcodes that read and change b-tree content (vdbe.c): new rowids,
 //! inserting and deleting rows and index entries, whole rows
-//! (OP_RowData), counting, and the sorter's writes and reads.
+//! (OP_RowData), counting, the sorter's writes and reads, and the queue
+//! of a recursive CTE.
 
 const std = @import("std");
 const core = @import("../exec.zig");
@@ -37,6 +38,8 @@ pub const handlers = .{
     .{ .ops = .{.SorterData}, .f = opSorterData },
     .{ .ops = .{.SorterInsert}, .f = opSorterInsert },
     .{ .ops = .{.ResetSorter}, .f = opResetSorter },
+    .{ .ops = .{.QueuePush}, .f = opQueuePush },
+    .{ .ops = .{.QueuePop}, .f = opQueuePop },
 };
 
 /// The largest rowid (MAX_ROWID).
@@ -306,11 +309,36 @@ pub fn opSorterInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow 
 pub fn opResetSorter(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     const c = e.csr(op.p1);
     switch (c.kind) {
-        .sorter => sorter.reset(e.db, c),
+        .sorter => sorter.reset(c),
         else => {
             const b = &c.kind.btree;
             _ = try b.cursor.bt.clearTable(b.pgno_root);
         },
     }
+    return .next;
+}
+
+/// OP_QueuePush (not in C): append the record in register P2 to queue P1.
+pub fn opQueuePush(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
+    const q = e.csr(op.p1).kind.queue;
+    const in2 = e.reg(op.p2);
+    std.debug.assert(in2.flags.Blob);
+    if (in2.flags.Zero) try mem.expandBlob(in2);
+    try q.push(in2.bytes());
+    return .next;
+}
+
+/// OP_QueuePop (not in C): move the oldest record of queue P1 into the
+/// register of pseudo cursor P3, whose column cache it invalidates (as
+/// OP_NullRow and OP_RowData did), or jump to P2 if the queue is empty.
+pub fn opQueuePop(e: *Exec, op: *OpOf(.{ .cursor, .jump, .cursor })) Error!Flow {
+    const q = e.csr(op.p1).kind.queue;
+    const c = e.csr(op.p3);
+    const record = c.kind.pseudo;
+    std.debug.assert(record != .none);
+    const out = e.reg(record);
+    if (out.isDynamic()) mem.setNull(out);
+    if (!try q.pop(out)) return .jump_p2;
+    c.cache_status = vi.cache_stale;
     return .next;
 }

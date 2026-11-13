@@ -1030,7 +1030,7 @@ pub fn freeCursor(v: *Vdbe, cx: ?*VdbeCursor) void {
 pub fn freeCursorNN(v: *Vdbe, cx: *VdbeCursor) void {
     switch (cx.kind) {
         .btree => |b| b.cursor.close(),
-        .sorter => |s| @import("sorter.zig").close(v.db, s),
+        .sorter => |s| @import("sorter.zig").close(s),
         .vtab => |vc| {
             const vtab = vc.vtab;
             const module = vtab.module;
@@ -1039,6 +1039,7 @@ pub fn freeCursorNN(v: *Vdbe, cx: *VdbeCursor) void {
             _ = module.x_close.?(vc);
         },
         .pseudo => {},
+        .queue => |q| q.deinit(),
     }
     const box: *vi.CursorBox = @fieldParentPtr("vc", cx);
     v.db.gpa.free(box.cache);

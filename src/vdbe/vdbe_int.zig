@@ -495,7 +495,8 @@ pub const COLNAME_N = 2;
 // =============================================================== cursors
 
 /// What a cursor reads (CURTYPE_*): the tag of VdbeCursor.kind.
-pub const CurType = enum(u8) { btree = 0, sorter = 1, vtab = 2, pseudo = 3 };
+/// `queue` is not in C (OP_OpenQueue, queue.zig).
+pub const CurType = enum(u8) { btree = 0, sorter = 1, vtab = 2, pseudo = 3, queue = 4 };
 
 /// A cursor of the VM (VdbeCursor). What only one kind of cursor has is
 /// in `kind`; the rest, OP_Column's cache of the record above all, is
@@ -539,6 +540,9 @@ pub const VdbeCursor = struct {
         /// none for the cursor of OP_NullRow that only has NULL rows (C:
         /// seekResult 0, IsNullCursor()).
         pseudo: operand.Reg,
+        /// The FIFO of a recursive CTE (OP_OpenQueue). It reads no record:
+        /// OP_QueuePop hands each one to a pseudo cursor.
+        queue: *@import("queue.zig").Queue,
     };
 
     pub fn curType(c: *const VdbeCursor) CurType {

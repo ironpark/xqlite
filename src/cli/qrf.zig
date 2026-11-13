@@ -1783,7 +1783,8 @@ fn eqpRender(p: *Qrf) Error!void {
 /// bodies of loops indented.
 fn explain(p: *Qrf) Error!void {
     const next_ops = [_][]const u8{ "Next", "Prev", "VPrev", "VNext", "SorterNext", "Return" };
-    const yield_ops = [_][]const u8{ "Yield", "SeekLT", "SeekGT", "RowSetRead", "Rewind" };
+    // OP_QueuePop is not in C: the top of the loop of a recursive CTE.
+    const yield_ops = [_][]const u8{ "Yield", "SeekLT", "SeekGT", "RowSetRead", "Rewind", "QueuePop" };
     const inArray = struct {
         fn f(z: []const u8, list: []const []const u8) bool {
             for (list) |x| if (std.mem.eql(u8, z, x)) return true;

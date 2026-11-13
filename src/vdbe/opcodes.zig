@@ -208,6 +208,10 @@ pub const OP = enum(u8) {
     Noop = 188,
     Explain = 189,
     Abortable = 190,
+    // Not in SQLite: the queue of a recursive CTE (queue.zig).
+    OpenQueue = 191,
+    QueuePush = 192,
+    QueuePop = 193,
 
     /// The number of the opcode (u8).
     pub inline fn int(op: OP) u8 {
@@ -482,6 +486,14 @@ const table: std.enums.EnumFieldStruct(OP, Info, null) = blk: {
         .OpenEphemeral = .{ .p = .{ c, i, r }, .props = .{ .ncycle = true } },
         .OpenDup = .{ .p = .{ c, c, i }, .props = .{ .ncycle = true } },
         .OpenPseudo = .{ .p = .{ c, r, i } },
+        // Not in SQLite (queue.zig): OP_OpenQueue opens P1 as an empty
+        // FIFO of records, or empties it if it is open; OP_QueuePush
+        // appends the record in register P2; OP_QueuePop moves the oldest
+        // record into the register of pseudo cursor P3, or jumps to P2 if
+        // there is none.
+        .OpenQueue = .{ .p = .{ c, i, i }, .props = .{ .ncycle = true } },
+        .QueuePush = .{ .p = .{ c, r, i }, .props = .{ .in2 = true } },
+        .QueuePop = .{ .p = .{ c, j, c }, .props = .{ .ncycle = true } },
         .Close = .{ .p = .{ c, i, i }, .props = .{ .ncycle = true } },
         .ColumnsUsed = .{ .p = .{ c, i, i } },
         .NullRow = .{ .p = .{ c, i, i } },

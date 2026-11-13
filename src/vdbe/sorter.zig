@@ -5,14 +5,24 @@
 //! mxPmaSize bytes (derived from the page size and cache_size of the main
 //! database). Then they are sorted and written to a temporary file as a
 //! "Packed Memory Array" (PMA). Rewind() writes the last PMA and merges
-//! all of them through a tree of MergeEngine and IncrMerger objects, at
-//! most SORTER_MAX_MERGE_COUNT PMAs at a time. When nothing was spilled,
-//! the records are sorted and read in memory.
+//! all of them with one MergeEngine. When nothing was spilled, the records
+//! are sorted and read in memory.
 //!
 //! Only the single-threaded sorter is ported: the worker threads of the C
 //! code (PRAGMA threads) are not, and the sort runs as with threads=0
 //! whatever that pragma says. Nor is the memory-mapped reading of the
 //! temporary files.
+//!
+//! Not as in C: past SORTER_MAX_MERGE_COUNT (16) PMAs, C builds a tree of
+//! MergeEngines of at most 16 inputs each, joined by IncrMergers that
+//! write the output of each sub-tree to a second temporary file and read
+//! it back; that cap is there for the worker threads. Single-threaded, C
+//! still opens a reader with its page-sized buffer on every PMA at once,
+//! so the cap saves no memory, and each level of the tree costs a write
+//! and a read of every record. Here one MergeEngine takes all the PMAs:
+//! the same readers without the IncrMergers, their readers and their
+//! file, and one pass over the data. The order is the same (see
+//! mergeEngineStep()).
 //!
 //! The in-memory sort is C's list merge sort and the merge of the PMAs
 //! prefers the older PMA on ties, so rows with equal keys come out in the
@@ -54,9 +64,6 @@ const max_pmasz: i64 = 1 << 29;
 /// SQLITE_SORTER_PMASZ (sqlite3GlobalConfig.szPma): the least memory used
 /// before spilling, in pages.
 const sorter_pmasz: i64 = 250;
-
-/// SORTER_MAX_MERGE_COUNT: the most PMAs one MergeEngine merges.
-const max_merge_count = 16;
 
 /// sizeof(SorterRecord), the header C puts before each record held in
 /// memory. It counts towards mxPmaSize as in C, so that PMAs are cut
@@ -125,8 +132,18 @@ pub const Sorter = struct {
     /// How normKey() maps the first field, from the KeyInfo.
     norm_desc: bool = false,
     norm_bignull: bool = false,
-    /// The one task (aTask[0]).
-    task: SortSubtask,
+    /// Number of PMAs in `file` (SortSubtask.nPMA: the one task of C is
+    /// folded in here).
+    n_pma: u32 = 0,
+    /// The second record of a comparison, unpacked into `cells`.
+    unpacked: UnpackedRecord,
+    /// A comparison met a corrupt record. As in C (errCode), the sort
+    /// goes on and fails at its end.
+    corrupt: bool = false,
+    /// The comparator (SortSubtask.xCompare).
+    cmp: Cmp = .general,
+    /// Temp file for the PMAs.
+    file: SorterFile = .{},
     /// Space to unpack a record into.
     cells: []Mem,
 
@@ -138,23 +155,24 @@ pub const Sorter = struct {
     }
 };
 
-const CompareFn = *const fn (t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32;
+const CompareFn = *const fn (s: *Sorter, key2_cached: *bool, key1: []const u8, key2: []const u8) i32;
 
-/// SortSubtask: the comparator and its unpacked record, and the
-/// temporary files.
-const SortSubtask = struct {
-    sorter: *Sorter,
-    /// Number of PMAs in `file`.
-    n_pma: u32 = 0,
-    unpacked: UnpackedRecord,
-    /// A comparison met a corrupt record. As in C (errCode), the sort
-    /// goes on and fails at its end.
-    corrupt: bool = false,
-    cmp: CompareFn = compareGeneral,
-    /// Temp file for level-0 PMAs.
-    file: SorterFile = .{},
-    /// Space for the output of IncrMergers.
-    file2: SorterFile = .{},
+/// The comparators: C's vdbeSorterCompare() and its fast variants for a
+/// first field that is always an integer, a TEXT or a number.
+const Cmp = enum {
+    general,
+    int,
+    text,
+    real,
+
+    fn func(comptime k: Cmp) CompareFn {
+        return switch (k) {
+            .general => compareGeneral,
+            .int => compareInt,
+            .text => compareText,
+            .real => compareReal,
+        };
+    }
 };
 
 /// MergeEngine: merges the PMAs of `readers` with a tournament tree.
@@ -164,13 +182,12 @@ const SortSubtask = struct {
 const MergeEngine = struct {
     /// Used size of tree and readers (a power of 2).
     n_tree: u32,
-    task: ?*SortSubtask = null,
     tree: []u32,
     readers: []PmaReader,
 };
 
-/// PmaReader: reads the records of a PMA, or of an IncrMerger, in order.
-/// The next key is `key`. fd is null at EOF.
+/// PmaReader: reads the records of a PMA in order. The next key is `key`.
+/// fd is null at EOF.
 const PmaReader = struct {
     read_off: i64 = 0,
     /// One byte past the end of the PMA.
@@ -181,23 +198,8 @@ const PmaReader = struct {
     fd: ?vfs.File = null,
     /// The read buffer, a page in size.
     buffer: []u8 = &.{},
-    incr: ?*IncrMerger = null,
     /// The normalized key of `key`, if the sorter uses them and it has one.
     norm: ?u64 = null,
-};
-
-/// IncrMerger, single-threaded: owns `mx_sz` bytes of task.file2 at
-/// `start_off`, which it refills from `merger` whenever its PmaReader has
-/// read them all.
-const IncrMerger = struct {
-    task: *SortSubtask,
-    merger: *MergeEngine,
-    start_off: i64 = 0,
-    mx_sz: i64,
-    /// The merge is finished.
-    eof: bool = false,
-    /// files[0] for reading, files[1] for writing.
-    files: [2]SorterFile = .{ .{}, .{} },
 };
 
 /// PmaWriter: buffers the writes of a PMA so that they are made in
@@ -228,7 +230,6 @@ pub fn tempInMemory(db: *const int.Sqlite3) bool {
 fn pmaReaderClear(gpa: Allocator, p: *PmaReader) void {
     gpa.free(p.alloc);
     gpa.free(p.buffer);
-    if (p.incr) |incr| incrFree(gpa, incr);
     p.* = .{};
 }
 
@@ -289,15 +290,14 @@ fn pmaReadVarint(gpa: Allocator, p: *PmaReader) Error!u64 {
 }
 
 /// Port of vdbePmaReaderSeek(): attach `p` to `file` at offset `off`.
-fn pmaReaderSeek(t: *SortSubtask, p: *PmaReader, file: *const SorterFile, off: i64) Error!void {
-    std.debug.assert(p.incr == null or !p.incr.?.eof);
+fn pmaReaderSeek(s: *Sorter, p: *PmaReader, file: *const SorterFile, off: i64) Error!void {
     p.read_off = off;
     p.eof = file.eof;
     p.fd = file.fd;
 
-    const pgsz: usize = t.sorter.pgsz;
+    const pgsz: usize = s.pgsz;
     const i_buf: usize = @intCast(@mod(p.read_off, @as(i64, @intCast(pgsz))));
-    if (p.buffer.len == 0) p.buffer = try t.sorter.gpa.alloc(u8, pgsz);
+    if (p.buffer.len == 0) p.buffer = try s.gpa.alloc(u8, pgsz);
     if (i_buf != 0) {
         var n_read: i64 = @intCast(pgsz - i_buf);
         if (p.read_off + n_read > p.eof) n_read = p.eof - p.read_off;
@@ -305,83 +305,73 @@ fn pmaReaderSeek(t: *SortSubtask, p: *PmaReader, file: *const SorterFile, off: i
     }
 }
 
-/// Port of vdbePmaReaderNext(): advance to the next key, refilling an
-/// IncrMerger's space when it has all been read.
-fn pmaReaderNext(t: *SortSubtask, p: *PmaReader) Error!void {
-    const gpa = t.sorter.gpa;
+/// Port of vdbePmaReaderNext(): advance to the next key; at the end of
+/// the PMA, free the reader's buffers (fd null).
+fn pmaReaderNext(s: *Sorter, p: *PmaReader) Error!void {
+    const gpa = s.gpa;
     if (p.read_off >= p.eof) {
-        var at_eof = true;
-        if (p.incr) |incr| {
-            try incrSwap(incr);
-            if (!incr.eof) {
-                try pmaReaderSeek(incr.task, p, &incr.files[0], incr.start_off);
-                at_eof = false;
-            }
-        }
-        if (at_eof) {
-            pmaReaderClear(gpa, p);
-            return;
-        }
+        pmaReaderClear(gpa, p);
+        return;
     }
     const n_rec = try pmaReadVarint(gpa, p);
     if (n_rec > std.math.maxInt(i32)) return error.Corrupt;
     p.key = try pmaReadBlob(gpa, p, @intCast(n_rec));
-    p.norm = if (t.sorter.norm_on) normKey(t.sorter, p.key) else null;
+    p.norm = if (s.norm_on) normKey(s, p.key) else null;
 }
 
 /// Port of vdbePmaReaderInit(): read the PMA of `file` that starts at
 /// `start`, leaving `p` on its first key. Adds the PMA size to `n_byte`.
-fn pmaReaderInit(t: *SortSubtask, file: *const SorterFile, start: i64, p: *PmaReader, n_byte: *i64) Error!void {
+fn pmaReaderInit(s: *Sorter, file: *const SorterFile, start: i64, p: *PmaReader, n_byte: *i64) Error!void {
     std.debug.assert(file.eof > start);
     std.debug.assert(p.alloc.len == 0 and p.buffer.len == 0);
-    try pmaReaderSeek(t, p, file, start);
-    const n = try pmaReadVarint(t.sorter.gpa, p);
+    try pmaReaderSeek(s, p, file, start);
+    const n = try pmaReadVarint(s.gpa, p);
     p.eof = p.read_off + @as(i64, @intCast(n));
     n_byte.* += @intCast(n);
-    try pmaReaderNext(t, p);
+    try pmaReaderNext(s, p);
 }
 
 // ============================================================ comparators
 
-fn unpackKey2(t: *SortSubtask, key2_cached: *bool, key2: []const u8) void {
+fn unpackKey2(s: *Sorter, key2_cached: *bool, key2: []const u8) void {
     if (!key2_cached.*) {
-        t.unpacked.fields = t.unpacked.fields.ptr[0..t.sorter.key_info.n_key_field];
-        serial.recordUnpack(key2, &t.unpacked);
+        s.unpacked.fields = s.unpacked.fields.ptr[0..s.key_info.n_key_field];
+        serial.recordUnpack(key2, &s.unpacked);
         key2_cached.* = true;
     }
 }
 
 /// Port of vdbeSorterCompare().
-fn compareGeneral(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
-    unpackKey2(t, key2_cached, key2);
-    return serial.recordCompare(key1, &t.unpacked) catch corrupt(t);
+fn compareGeneral(s: *Sorter, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
+    unpackKey2(s, key2_cached, key2);
+    return serial.recordCompare(key1, &s.unpacked) catch corrupt(s);
 }
 
 /// Port of vdbeSorterCompareTail(): the first fields are equal.
-fn compareTail(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
-    unpackKey2(t, key2_cached, key2);
-    return serial.recordCompareWithSkip(key1, &t.unpacked, true) catch corrupt(t);
+fn compareTail(s: *Sorter, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
+    unpackKey2(s, key2_cached, key2);
+    return serial.recordCompareWithSkip(key1, &s.unpacked, true) catch corrupt(s);
 }
 
 /// A comparison of a corrupt record: noted, and 0 (equal) to go on with.
-fn corrupt(t: *SortSubtask) i32 {
+fn corrupt(s: *Sorter) i32 {
     @branchHint(.cold);
-    t.corrupt = true;
+    s.corrupt = true;
     return 0;
 }
 
 /// The end of the fast comparators: break ties on the first field with
 /// the rest, or apply DESC.
-fn finishCompare(t: *SortSubtask, res: i32, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
+fn finishCompare(s: *Sorter, res: i32, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
     if (res == 0) {
-        if (t.sorter.key_info.n_key_field > 1) return compareTail(t, key2_cached, key1, key2);
+        if (s.key_info.n_key_field > 1) return compareTail(s, key2_cached, key1, key2);
         return 0;
     }
-    return if (t.sorter.key_info.sort_flags[0] != 0) -res else res;
+    return if (s.key_info.sort_flags[0] != 0) -res else res;
 }
 
 /// Port of vdbeSorterCompareText(): both first fields are TEXT, BINARY.
-fn compareText(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
+fn compareText(s: *Sorter, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
     const n1 = record_fmt.getVarint32(key1, 1).value;
     const n2 = record_fmt.getVarint32(key2, 1).value;
     const len = (@min(n1, n2) - 13) / 2;
@@ -390,11 +380,11 @@ fn compareText(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []co
     const c = record_fmt.memcmp(v1, v2);
     var res: i32 = if (c < 0) -1 else @intFromBool(c > 0);
     if (res == 0) res = @as(i32, @intCast(n1)) - @as(i32, @intCast(n2));
-    return finishCompare(t, res, key2_cached, key1, key2);
+    return finishCompare(s, res, key2_cached, key1, key2);
 }
 
 /// Port of vdbeSorterCompareInt(): both first fields are integers.
-fn compareInt(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
+fn compareInt(s: *Sorter, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
     const s1: i32 = key1[1];
     const s2: i32 = key2[1];
     const v1 = key1[key1[0]..];
@@ -426,7 +416,7 @@ fn compareInt(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []con
             if (v2[0] & 0x80 != 0) res = 1;
         }
     }
-    return finishCompare(t, res, key2_cached, key1, key2);
+    return finishCompare(s, res, key2_cached, key1, key2);
 }
 
 /// vdbeSorterGetReal(): the first field, a REAL or an integer.
@@ -437,52 +427,56 @@ fn getReal(p: []const u8) f64 {
 }
 
 /// Port of vdbeSorterCompareReal() and vdbeSorterCompareRealInt().
-fn compareReal(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
+fn compareReal(s: *Sorter, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
     // 64-bit integers do not convert to doubles exactly.
     if ((key1[1] != 7 or key2[1] != 7) and (key1[1] == 6 or key2[1] == 6)) {
-        return compareGeneral(t, key2_cached, key1, key2);
+        return compareGeneral(s, key2_cached, key1, key2);
     }
     const r1 = getReal(key1);
     const r2 = getReal(key2);
     const res: i32 = if (r1 < r2) -1 else if (r1 > r2) 1 else 0;
-    return finishCompare(t, res, key2_cached, key1, key2);
+    return finishCompare(s, res, key2_cached, key1, key2);
 }
 
 /// Port of vdbeSorterGetCompare().
-fn getCompare(s: *const Sorter) CompareFn {
+fn getCompare(s: *const Sorter) Cmp {
     const mask = s.type_mask;
-    if (mask & type_integer != 0) return compareInt;
-    if (mask & type_text != 0) return compareText;
-    if (mask & type_real != 0) return compareReal;
-    return compareGeneral;
+    if (mask & type_integer != 0) return .int;
+    if (mask & type_text != 0) return .text;
+    if (mask & type_real != 0) return .real;
+    return .general;
 }
 
 /// Compare two records by their normalized keys `n1` and `n2`, calling
 /// `cmp` only when those do not decide. Keys equal but for the exact bit
 /// tell nothing; equal exact keys mean equal first fields, so that only
 /// the other fields are left to compare.
-inline fn normCompare(cmp: CompareFn, t: *SortSubtask, key2_cached: *bool, n1: u64, n2: u64, key1: []const u8, key2: []const u8) i32 {
+inline fn normCompare(comptime cmp: CompareFn, s: *Sorter, key2_cached: *bool, n1: u64, n2: u64, key1: []const u8, key2: []const u8) i32 {
     if (n1 >> 1 != n2 >> 1) return if (n1 < n2) -1 else 1;
     if (n1 & n2 & 1 != 0) {
-        if (t.sorter.key_info.n_key_field == 1) return 0;
+        if (s.key_info.n_key_field == 1) return 0;
         // compareTail() reads the header size as one byte, as in C.
-        if (key1[0] < 0x80) return compareTail(t, key2_cached, key1, key2);
+        if (key1[0] < 0x80) return compareTail(s, key2_cached, key1, key2);
     }
-    return @call(.auto, cmp, .{ t, key2_cached, key1, key2 });
+    return @call(.auto, cmp, .{ s, key2_cached, key1, key2 });
 }
 
 /// The comparison of the keys of two PmaReaders that are not at EOF.
-fn readerCompare(t: *SortSubtask, key2_cached: *bool, p1: *const PmaReader, p2: *const PmaReader) i32 {
-    if (p1.norm) |n1| if (p2.norm) |n2| return normCompare(t.cmp, t, key2_cached, n1, n2, p1.key, p2.key);
-    return t.cmp(t, key2_cached, p1.key, p2.key);
+fn readerCompare(s: *Sorter, key2_cached: *bool, p1: *const PmaReader, p2: *const PmaReader) i32 {
+    switch (s.cmp) {
+        inline else => |k| {
+            if (p1.norm) |n1| if (p2.norm) |n2| return normCompare(k.func(), s, key2_cached, n1, n2, p1.key, p2.key);
+            return k.func()(s, key2_cached, p1.key, p2.key);
+        },
+    }
 }
 
 // ========================================================= in-memory sort
 
 /// Port of vdbeSorterMerge(): merge two sorted lists, taking from `p1`
-/// on ties. `cmp` is t.cmp, fixed so that it can be called directly.
-inline fn sorterMerge(comptime cmp: CompareFn, comptime use_norm: bool, t: *SortSubtask, p1_arg: u32, p2_arg: u32) u32 {
-    const s = t.sorter;
+/// on ties. `cmp` is that of s.cmp, fixed so that it can be called
+/// directly.
+inline fn sorterMerge(comptime cmp: CompareFn, comptime use_norm: bool, s: *Sorter, p1_arg: u32, p2_arg: u32) u32 {
     const links = s.links.items.ptr;
     const records = s.records.items.ptr;
     const data = s.data.items.ptr;
@@ -498,9 +492,9 @@ inline fn sorterMerge(comptime cmp: CompareFn, comptime use_norm: bool, t: *Sort
         const key1 = data[r1.start..r1.end];
         const key2 = data[r2.start..r2.end];
         const res = if (use_norm)
-            normCompare(cmp, t, &key2_cached, norms[p1], norms[p2], key1, key2)
+            normCompare(cmp, s, &key2_cached, norms[p1], norms[p2], key1, key2)
         else
-            @call(.auto, cmp, .{ t, &key2_cached, key1, key2 });
+            @call(.auto, cmp, .{ s, &key2_cached, key1, key2 });
         const take = if (res <= 0) p1 else p2;
         if (tail) |tl| tl.* = take else first = take;
         tail = &links[take];
@@ -524,33 +518,21 @@ inline fn sorterMerge(comptime cmp: CompareFn, comptime use_norm: bool, t: *Sort
 
 /// Port of vdbeSorterSort(): sort the in-memory list. Returns its first
 /// record; `links` holds the order.
-fn sorterSort(t: *SortSubtask) Error!u32 {
-    const s = t.sorter;
+fn sorterSort(s: *Sorter) Error!u32 {
     const n = s.records.items.len;
     try s.links.resize(s.gpa, n);
-    t.cmp = getCompare(s);
+    s.cmp = getCompare(s);
     // Keys that are all the same decide nothing, unless they are exact.
     const use_norm = s.norm_on and s.norm_ok and n > 0 and (s.norm_varied or s.norms.items[0] & 1 != 0);
-    const p = if (use_norm) sortWithCompare(true, t) else sortWithCompare(false, t);
-    if (t.corrupt) return error.Corrupt;
+    const p = switch (s.cmp) {
+        inline else => |k| if (use_norm) sorterSortWith(k.func(), true, s) else sorterSortWith(k.func(), false, s),
+    };
+    if (s.corrupt) return error.Corrupt;
     return p;
 }
 
-/// sorterSortWith() for t.cmp.
-fn sortWithCompare(comptime use_norm: bool, t: *SortSubtask) u32 {
-    return if (t.cmp == &compareInt)
-        sorterSortWith(compareInt, use_norm, t)
-    else if (t.cmp == &compareText)
-        sorterSortWith(compareText, use_norm, t)
-    else if (t.cmp == &compareReal)
-        sorterSortWith(compareReal, use_norm, t)
-    else
-        sorterSortWith(compareGeneral, use_norm, t);
-}
-
 /// The body of sorterSort() for the comparator `cmp`.
-fn sorterSortWith(comptime cmp: CompareFn, comptime use_norm: bool, t: *SortSubtask) u32 {
-    const s = t.sorter;
+fn sorterSortWith(comptime cmp: CompareFn, comptime use_norm: bool, s: *Sorter) u32 {
     const links = s.links.items;
     // The C list is newest first.
     var slots: [64]u32 = @splat(end_of_list);
@@ -561,7 +543,7 @@ fn sorterSortWith(comptime cmp: CompareFn, comptime use_norm: bool, t: *SortSubt
         links[p] = end_of_list;
         var i: usize = 0;
         while (slots[i] != end_of_list) : (i += 1) {
-            p = sorterMerge(cmp, use_norm, t, p, slots[i]);
+            p = sorterMerge(cmp, use_norm, s, p, slots[i]);
             slots[i] = end_of_list;
         }
         slots[i] = p;
@@ -569,7 +551,7 @@ fn sorterSortWith(comptime cmp: CompareFn, comptime use_norm: bool, t: *SortSubt
     var p: u32 = end_of_list;
     for (slots) |slot| {
         if (slot == end_of_list) continue;
-        p = if (p == end_of_list) slot else sorterMerge(cmp, use_norm, t, p, slot);
+        p = if (p == end_of_list) slot else sorterMerge(cmp, use_norm, s, p, slot);
     }
     return p;
 }
@@ -644,24 +626,23 @@ fn pmaWriteVarint(p: *PmaWriter, value: u64) void {
 
 /// Port of vdbeSorterOpenTempFile(): open a temporary file that is
 /// deleted when closed.
-fn openTempFile(db: *int.Sqlite3) Error!vfs.File {
+pub fn openTempFile(db: *int.Sqlite3) vfs.Error!vfs.File {
     return db.vfs.?.open(null, .{ .kind = .temp_journal });
 }
 
 /// Port of vdbeSorterListToPMA(): sort the in-memory list and append it
-/// to the task's file as a level-0 PMA. A PMA is a varint with the size
-/// of its content, then each record as a varint size and the record.
-fn listToPMA(t: *SortSubtask) Error!void {
-    const s = t.sorter;
+/// to the sorter's file as a PMA. A PMA is a varint with the size of its
+/// content, then each record as a varint size and the record.
+fn listToPMA(s: *Sorter) Error!void {
     std.debug.assert(s.sz_pma > 0);
-    if (t.file.fd == null) {
-        t.file.fd = try openTempFile(s.db);
-        std.debug.assert(t.file.eof == 0 and t.n_pma == 0);
+    if (s.file.fd == null) {
+        s.file.fd = try openTempFile(s.db);
+        std.debug.assert(s.file.eof == 0 and s.n_pma == 0);
     }
-    const head = try sorterSort(t);
+    const head = try sorterSort(s);
 
-    var writer = pmaWriterInit(s.gpa, t.file.fd.?, s.pgsz, t.file.eof);
-    t.n_pma += 1;
+    var writer = pmaWriterInit(s.gpa, s.file.fd.?, s.pgsz, s.file.eof);
+    s.n_pma += 1;
     if (@import("builtin").is_test) s.db.n_pma_written += 1;
     pmaWriteVarint(&writer, @intCast(s.sz_pma));
     var p = head;
@@ -671,21 +652,21 @@ fn listToPMA(t: *SortSubtask) Error!void {
         pmaWriteBlob(&writer, rec);
     }
     listClear(s);
-    try pmaWriterFinish(s.gpa, &writer, &t.file.eof);
+    try pmaWriterFinish(s.gpa, &writer, &s.file.eof);
 }
 
 /// Port of vdbeSorterFlushPMA() with no worker threads.
 fn flushPMA(s: *Sorter) Error!void {
     s.use_pma = true;
-    return listToPMA(&s.task);
+    return listToPMA(s);
 }
 
 // ================================================================ merging
 
 /// Port of vdbeMergeEngineNew(): a MergeEngine for up to `n_reader`
-/// PmaReaders, rounded up to a power of two.
+/// PmaReaders, rounded up to a power of two (any number of them, not at
+/// most SORTER_MAX_MERGE_COUNT as in C).
 fn mergeEngineNew(gpa: Allocator, n_reader: u32) Error!*MergeEngine {
-    std.debug.assert(n_reader <= max_merge_count);
     var n: u32 = 2;
     while (n < n_reader) n += n;
     const m = try gpa.create(MergeEngine);
@@ -707,22 +688,26 @@ fn mergeEngineFree(gpa: Allocator, m: *MergeEngine) void {
     gpa.destroy(m);
 }
 
-/// Port of vdbeIncrFree().
-fn incrFree(gpa: Allocator, incr: *IncrMerger) void {
-    mergeEngineFree(gpa, incr.merger);
-    gpa.destroy(incr);
-}
-
 /// Port of vdbeMergeEngineStep(): advance to the next entry. Returns
 /// true at the end of all the inputs.
-fn mergeEngineStep(m: *MergeEngine) Error!bool {
-    const t = m.task.?;
+///
+/// Each entry of the tree is the reader with the smallest key among those
+/// below it, and of equal keys the one with the lowest index (here, and
+/// in mergeEngineCompare()). The readers are the PMAs in the order they
+/// were written, so records come out by key, then by PMA, then by place in
+/// the PMA: the order of insertion for equal keys, since each PMA holds
+/// records inserted after those of the PMAs before it and is itself
+/// sorted stably. C's tree of MergeEngines, each over 16 consecutive
+/// PMAs or sub-trees and breaking ties the same way, orders by the same
+/// three things, so the output of one MergeEngine over every PMA is the
+/// same.
+fn mergeEngineStep(s: *Sorter, m: *MergeEngine) Error!bool {
     const i_prev = m.tree[1];
-    try pmaReaderNext(t, &m.readers[i_prev]);
+    try pmaReaderNext(s, &m.readers[i_prev]);
 
     // Update the tree, from the reader just advanced up.
-    var r1: u32 = i_prev & 0xfffe;
-    var r2: u32 = i_prev | 0x0001;
+    var r1: u32 = i_prev & ~@as(u32, 1);
+    var r2: u32 = i_prev | 1;
     var key2_cached = false;
     var i = (m.n_tree + i_prev) / 2;
     while (i > 0) : (i /= 2) {
@@ -733,7 +718,7 @@ fn mergeEngineStep(m: *MergeEngine) Error!bool {
         else if (p2.fd == null)
             -1
         else
-            readerCompare(t, &key2_cached, p1, p2);
+            readerCompare(s, &key2_cached, p1, p2);
 
         // On a tie, the older PMA (the lower reader) comes first. If
         // reader 2 won, the unpacked record still holds its key.
@@ -747,71 +732,13 @@ fn mergeEngineStep(m: *MergeEngine) Error!bool {
             r1 = m.tree[i ^ 0x0001];
         }
     }
-    if (t.corrupt) return error.Corrupt;
+    if (s.corrupt) return error.Corrupt;
     return m.readers[m.tree[1]].fd == null;
-}
-
-/// Port of vdbeIncrPopulate(): fill files[1] of `incr` from its merger,
-/// in PMA format without the leading size varint.
-fn incrPopulate(incr: *IncrMerger) Error!void {
-    std.debug.assert(!incr.eof);
-    const start = incr.start_off;
-    const out = &incr.files[1];
-    const t = incr.task;
-    const m = incr.merger;
-    const gpa = t.sorter.gpa;
-    var writer = pmaWriterInit(gpa, out.fd.?, t.sorter.pgsz, start);
-    var failed: ?Error = null;
-    while (true) {
-        const reader = &m.readers[m.tree[1]];
-        const n_key = reader.key.len;
-        const eof = writer.write_off + @as(i64, @intCast(writer.buf_end));
-
-        // Stop when the output is full or the input is used up.
-        if (reader.fd == null) break;
-        if (eof + @as(i64, @intCast(n_key)) + varint.len(n_key) > start + incr.mx_sz) break;
-
-        pmaWriteVarint(&writer, n_key);
-        pmaWriteBlob(&writer, reader.key);
-        std.debug.assert(m.task == t);
-        _ = mergeEngineStep(m) catch |err| {
-            failed = err;
-            break;
-        };
-    }
-    const rc2 = pmaWriterFinish(gpa, &writer, &out.eof);
-    if (failed) |err| return err;
-    return rc2;
-}
-
-/// Port of vdbeIncrSwap(), single-threaded: refill the space of `incr`
-/// once its PmaReader has read it all.
-fn incrSwap(incr: *IncrMerger) Error!void {
-    try incrPopulate(incr);
-    incr.files[0] = incr.files[1];
-    if (incr.files[0].eof == incr.start_off) incr.eof = true;
-}
-
-/// Port of vdbeIncrMergerNew(): an IncrMerger reading from `m`. Frees `m`
-/// on failure.
-fn incrMergerNew(t: *SortSubtask, m: *MergeEngine) Error!*IncrMerger {
-    const gpa = t.sorter.gpa;
-    const incr = gpa.create(IncrMerger) catch {
-        mergeEngineFree(gpa, m);
-        return error.OutOfMemory;
-    };
-    incr.* = .{
-        .task = t,
-        .merger = m,
-        .mx_sz = @max(t.sorter.mx_keysize + 9, @divTrunc(t.sorter.mx_pma_size, 2)),
-    };
-    t.file2.eof += incr.mx_sz;
-    return incr;
 }
 
 /// Port of vdbeMergeEngineCompare(): recompute tree[i_out] from the two
 /// entries or readers below it.
-fn mergeEngineCompare(m: *MergeEngine, i_out: u32) void {
+fn mergeEngineCompare(s: *Sorter, m: *MergeEngine, i_out: u32) void {
     std.debug.assert(i_out < m.n_tree and i_out > 0);
     var i_1: u32 = undefined;
     var i_2: u32 = undefined;
@@ -830,134 +757,59 @@ fn mergeEngineCompare(m: *MergeEngine, i_out: u32) void {
     } else if (p2.fd == null) {
         res = i_1;
     } else {
-        const t = m.task.?;
         var key2_cached = false;
-        res = if (readerCompare(t, &key2_cached, p1, p2) <= 0) i_1 else i_2;
+        res = if (readerCompare(s, &key2_cached, p1, p2) <= 0) i_1 else i_2;
     }
     m.tree[i_out] = res;
 }
 
-/// Port of vdbeMergeEngineInit() with INCRINIT_NORMAL: initialize the
-/// readers of `m`, so that its first key can be read.
-fn mergeEngineInit(t: *SortSubtask, m: *MergeEngine) Error!void {
-    std.debug.assert(m.task == null);
-    m.task = t;
-    for (m.readers) |*r| try pmaReaderIncrInit(r);
+/// Port of vdbeMergeEngineInit() with INCRINIT_NORMAL: build the
+/// tournament tree of `m`, whose readers are on their first keys.
+fn mergeEngineInit(s: *Sorter, m: *MergeEngine) Error!void {
     var i = m.n_tree - 1;
-    while (i > 0) : (i -= 1) mergeEngineCompare(m, i);
-    if (t.corrupt) return error.Corrupt;
+    while (i > 0) : (i -= 1) mergeEngineCompare(s, m, i);
+    if (s.corrupt) return error.Corrupt;
 }
 
-/// Port of vdbePmaReaderIncrMergeInit() with INCRINIT_NORMAL: initialize
-/// the tree below the IncrMerger of `p`, give it its share of
-/// task.file2, and move `p` to the first key.
-fn pmaReaderIncrMergeInit(p: *PmaReader) Error!void {
-    const incr = p.incr.?;
-    const t = incr.task;
-    try mergeEngineInit(t, incr.merger);
-    if (t.file2.fd == null) {
-        std.debug.assert(t.file2.eof > 0);
-        t.file2.fd = try openTempFile(t.sorter.db);
-        t.file2.eof = 0;
-    }
-    incr.files[1].fd = t.file2.fd;
-    incr.start_off = t.file2.eof;
-    t.file2.eof += incr.mx_sz;
-    try pmaReaderNext(t, p);
-}
-
-/// Port of vdbePmaReaderIncrInit(), single-threaded.
-fn pmaReaderIncrInit(p: *PmaReader) Error!void {
-    if (p.incr != null) try pmaReaderIncrMergeInit(p);
-}
-
-/// Port of vdbeMergeEngineLevel0(): a MergeEngine over `n_pma` level-0
-/// PMAs of task.file, starting at `off`, which is moved past them.
-fn mergeEngineLevel0(t: *SortSubtask, n_pma: u32, off: *i64) Error!*MergeEngine {
-    const gpa = t.sorter.gpa;
-    const m = try mergeEngineNew(gpa, n_pma);
-    errdefer mergeEngineFree(gpa, m);
-    var i_off = off.*;
-    for (m.readers[0..n_pma]) |*r| {
-        var n_dummy: i64 = 0;
-        try pmaReaderInit(t, &t.file, i_off, r, &n_dummy);
-        i_off = r.eof;
-    }
-    off.* = i_off;
-    return m;
-}
-
-/// Port of vdbeSorterTreeDepth(): the depth of a tree of `n_pma` PMAs
-/// with a fanout of SORTER_MAX_MERGE_COUNT, not counting the leaves.
-fn treeDepth(n_pma: u32) u32 {
-    var n_depth: u32 = 0;
-    var n_div: i64 = max_merge_count;
-    while (n_div < n_pma) {
-        n_div *= max_merge_count;
-        n_depth += 1;
-    }
-    return n_depth;
-}
-
-/// Port of vdbeSorterAddToTree(): add `leaf`, the `i_seq`th leaf, to the
-/// merge tree of depth `n_depth` at `root`. Frees `leaf` on failure.
-fn addToTree(t: *SortSubtask, n_depth: u32, i_seq: u32, root: *MergeEngine, leaf: *MergeEngine) Error!void {
-    const gpa = t.sorter.gpa;
-    const incr = try incrMergerNew(t, leaf);
-    errdefer incrFree(gpa, incr);
-
-    var n_div: u32 = 1;
-    var i: u32 = 1;
-    while (i < n_depth) : (i += 1) n_div *= max_merge_count;
-
-    var p = root;
-    i = 1;
-    while (i < n_depth) : (i += 1) {
-        const r = &p.readers[(i_seq / n_div) % max_merge_count];
-        if (r.incr == null) {
-            const new = try mergeEngineNew(gpa, max_merge_count);
-            r.incr = try incrMergerNew(t, new);
-        }
-        p = r.incr.?.merger;
-        n_div /= max_merge_count;
-    }
-    p.readers[i_seq % max_merge_count].incr = incr;
-}
-
-/// Port of vdbeSorterMergeTreeBuild(), single-threaded: the tree of
-/// MergeEngine, IncrMerger and PmaReader objects that merges every PMA.
-fn mergeTreeBuild(s: *Sorter) Error!*MergeEngine {
-    const t = &s.task;
-    const gpa = s.gpa;
-    std.debug.assert(t.n_pma > 0);
-    const n_depth = treeDepth(t.n_pma);
-    var read_off: i64 = 0;
-    if (t.n_pma <= max_merge_count) return mergeEngineLevel0(t, t.n_pma, &read_off);
-
-    const root = try mergeEngineNew(gpa, max_merge_count);
-    errdefer mergeEngineFree(gpa, root);
-    var i: u32 = 0;
-    var i_seq: u32 = 0;
-    while (i < t.n_pma) : (i += max_merge_count) {
-        const n_reader = @min(t.n_pma - i, max_merge_count);
-        const merger = try mergeEngineLevel0(t, n_reader, &read_off);
-        try addToTree(t, n_depth, i_seq, root, merger);
-        i_seq += 1;
-    }
-    return root;
-}
-
-/// Port of vdbeSorterSetupMerge(), single-threaded: set up `merger` to
-/// read every record in order.
+/// Port of vdbeSorterSetupMerge(), single-threaded, with one MergeEngine
+/// over every PMA (vdbeMergeEngineLevel0() for all of them; see the top
+/// of the file): set up `merger` to read every record in order.
 fn setupMerge(s: *Sorter) Error!void {
+    std.debug.assert(s.n_pma > 0);
     // As in a build with worker threads, the comparator is picked again.
-    s.task.cmp = getCompare(s);
-    const main = try mergeTreeBuild(s);
-    s.merger = main;
-    try mergeEngineInit(&s.task, main);
+    s.cmp = getCompare(s);
+    const m = try mergeEngineNew(s.gpa, s.n_pma);
+    s.merger = m;
+    var off: i64 = 0;
+    for (m.readers[0..s.n_pma]) |*r| {
+        var n_dummy: i64 = 0;
+        try pmaReaderInit(s, &s.file, off, r, &n_dummy);
+        off = r.eof;
+    }
+    try mergeEngineInit(s, m);
 }
 
 // ============================================================= interface
+
+/// The most memory a sorter holds before it writes a PMA (mxPmaSize), in
+/// bytes: the cache size of the main database, at least
+/// SQLITE_SORTER_PMASZ pages and at most SQLITE_MAX_PMASZ; 0 if it never
+/// spills (temp_store=MEMORY, or no main b-tree). The queue of a recursive
+/// CTE (queue.zig) spills at the same size.
+pub fn maxMemory(db: *const int.Sqlite3) i64 {
+    if (tempInMemory(db) or db.dbs.items.len == 0) return 0;
+    const bt = db.dbs.items[0].bt orelse return 0;
+    const pgsz: i64 = bt.getPageSize();
+    var mx_cache: i64 = db.dbs.items[0].schema.cache_size;
+    if (mx_cache < 0) {
+        // A negative cache size is in KiB.
+        mx_cache = mx_cache * -1024;
+    } else {
+        mx_cache = mx_cache * pgsz;
+    }
+    mx_cache = @min(mx_cache, max_pmasz);
+    return @max(sorter_pmasz * pgsz, mx_cache);
+}
 
 /// Port of sqlite3VdbeSorterInit(). If `n_field` is not zero, a stable
 /// sort on that many leading fields is enough.
@@ -979,23 +831,15 @@ pub fn init(db: *int.Sqlite3, n_field: i32, ki: *const vi.KeyInfo) Error!*Sorter
         .pgsz = pgsz,
         .key_info = ki.*,
         .cells = cells,
-        .task = .{ .sorter = s, .unpacked = undefined },
+        .unpacked = .{ .key_info = &s.key_info, .fields = cells.ptr[0..0] },
     };
     // Without worker threads, the sort may stop at n_field fields.
     if (n_field != 0) s.key_info.n_key_field = @intCast(n_field);
-    s.task.unpacked = .{ .key_info = &s.key_info, .fields = s.cells.ptr[0..s.key_info.n_key_field] };
+    s.unpacked.fields = s.cells.ptr[0..s.key_info.n_key_field];
 
-    if (main_bt != null and !tempInMemory(db)) {
+    s.mx_pma_size = maxMemory(db);
+    if (s.mx_pma_size > 0) {
         s.mn_pma_size = sorter_pmasz * pgsz;
-        var mx_cache: i64 = db.dbs.items[0].schema.cache_size;
-        if (mx_cache < 0) {
-            // A negative cache size is in KiB.
-            mx_cache = mx_cache * -1024;
-        } else {
-            mx_cache = mx_cache * pgsz;
-        }
-        mx_cache = @min(mx_cache, max_pmasz);
-        s.mx_pma_size = @max(s.mn_pma_size, mx_cache);
         // C starts list.aMemory at a page.
         s.data.ensureTotalCapacity(gpa, pgsz) catch {};
     }
@@ -1011,26 +855,19 @@ pub fn init(db: *int.Sqlite3, n_field: i32, ki: *const vi.KeyInfo) Error!*Sorter
     return s;
 }
 
-/// Port of vdbeSortSubtaskCleanup().
-fn subtaskCleanup(t: *SortSubtask) void {
-    if (t.file.fd) |fd| fd.close();
-    if (t.file2.fd) |fd| fd.close();
-    t.file = .{};
-    t.file2 = .{};
-    t.n_pma = 0;
-    t.corrupt = false;
-}
-
 /// Port of sqlite3VdbeSorterReset(): drop every record and PMA.
-pub fn reset(db: *int.Sqlite3, c: *VdbeCursor) void {
-    _ = db;
+pub fn reset(c: *VdbeCursor) void {
     resetSorter(get(c));
 }
 
 fn resetSorter(s: *Sorter) void {
     if (s.merger) |m| mergeEngineFree(s.gpa, m);
     s.merger = null;
-    subtaskCleanup(&s.task);
+    // vdbeSortSubtaskCleanup().
+    if (s.file.fd) |fd| fd.close();
+    s.file = .{};
+    s.n_pma = 0;
+    s.corrupt = false;
     listClear(s);
     s.sz_pma = 0;
     s.use_pma = false;
@@ -1039,8 +876,7 @@ fn resetSorter(s: *Sorter) void {
 }
 
 /// Port of sqlite3VdbeSorterClose().
-pub fn close(db: *int.Sqlite3, s: *Sorter) void {
-    _ = db;
+pub fn close(s: *Sorter) void {
     resetSorter(s);
     s.data.deinit(s.gpa);
     s.records.deinit(s.gpa);
@@ -1187,7 +1023,7 @@ pub fn rewind(c: *VdbeCursor) Error!bool {
     // Nothing spilled: sort in memory.
     if (!s.use_pma) {
         if (s.records.items.len == 0) return true;
-        s.cur = try sorterSort(&s.task);
+        s.cur = try sorterSort(s);
         return false;
     }
     // Write the rest to a last PMA, which is never empty: write() always
@@ -1200,10 +1036,9 @@ pub fn rewind(c: *VdbeCursor) Error!bool {
 }
 
 /// Port of sqlite3VdbeSorterNext(). Returns false at the end.
-pub fn next(db: *int.Sqlite3, c: *VdbeCursor) Error!bool {
-    _ = db;
+pub fn next(c: *VdbeCursor) Error!bool {
     const s = get(c);
-    if (s.use_pma) return !try mergeEngineStep(s.merger.?);
+    if (s.use_pma) return !try mergeEngineStep(s, s.merger.?);
     s.cur = s.links.items[s.cur];
     return s.cur != end_of_list;
 }
@@ -1373,10 +1208,12 @@ fn expectIndexOrder(c: *Conn, idx: []const u8, cols: []const u8) !void {
     try testing.expectEqualStrings(by_sort, by_index);
 }
 
-test "sorter: more PMAs than one merge takes" {
+test "sorter: more PMAs than one merge of C takes" {
     var c: Conn = undefined;
     try openSpilling(&c, 16000);
     defer c.close();
+    // SORTER_MAX_MERGE_COUNT of C.
+    const max_merge_count = 16;
     try testing.expect(try expectSameSpilled(&c, "SELECT b, i, pad FROM t ORDER BY b") > max_merge_count);
     try testing.expect(try expectSameSpilled(&c, "SELECT a, b, pad, i FROM t ORDER BY a DESC") > max_merge_count);
     try testing.expect(try expectSameSpilled(&c, "SELECT b, count(*), sum(i) FROM (SELECT b, i, pad FROM t UNION ALL SELECT b, i, pad FROM t) GROUP BY b, pad") > max_merge_count);
@@ -1384,14 +1221,6 @@ test "sorter: more PMAs than one merge takes" {
     try c.exec("CREATE INDEX t_ab ON t(a, b, pad)");
     try testing.expect(c.db.n_pma_written - before > max_merge_count);
     try expectIndexOrder(&c, "t_ab", "a, b, pad");
-}
-
-test "sorter: tree depth" {
-    try testing.expectEqual(@as(u32, 0), treeDepth(1));
-    try testing.expectEqual(@as(u32, 0), treeDepth(16));
-    try testing.expectEqual(@as(u32, 1), treeDepth(17));
-    try testing.expectEqual(@as(u32, 1), treeDepth(256));
-    try testing.expectEqual(@as(u32, 2), treeDepth(257));
 }
 
 /// Sort the rows of v by each ORDER BY clause into s, and check that
@@ -1486,4 +1315,35 @@ test "sorter: normalized keys keep the order of the merge" {
         \\CREATE TABLE s(n INTEGER PRIMARY KEY, x, k, pad);
     );
     try testing.expect(try expectNormOrder(&c) > 8 * 2);
+}
+
+test "sorter: one merge over many PMAs keeps the order of equal keys" {
+    // 50 distinct keys; v shows the order among equal keys. Each PMA of
+    // the ORDER BY holds 2666 rows: 17, 18 and 100 PMAs (C merged more
+    // than 16 through a tree of MergeEngines).
+    for ([_]u32{ 17, 18, 100 }) |n_pma| {
+        var c: Conn = undefined;
+        try c.open();
+        defer c.close();
+        try c.exec("PRAGMA page_size=512; PRAGMA cache_size=10");
+        try c.exec("CREATE TABLE t(id INTEGER PRIMARY KEY, k INT, v INT, pad TEXT)");
+        var buf: [400]u8 = undefined;
+        try c.exec(try std.fmt.bufPrint(&buf,
+            \\WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<{d})
+            \\INSERT INTO t SELECT i, 10 + (i*7919)%50, 100000 + (i*104729)%900000, printf('%020d', (i*31)%1000) FROM s
+        , .{2666 * n_pma}));
+        try testing.expectEqual(@as(u64, n_pma), try expectSameSpilled(&c, "SELECT k, v, pad FROM t ORDER BY k"));
+        try testing.expect(try expectSameSpilled(&c, "SELECT k, v FROM t ORDER BY k DESC") > 1);
+        try testing.expect(try expectSameSpilled(&c, "SELECT k, count(*), group_concat(v) FROM t GROUP BY k") > 1);
+        try testing.expect(try expectSameSpilled(&c, "SELECT k, v, row_number() OVER (PARTITION BY k) FROM t") > 1);
+        const before = c.db.n_pma_written;
+        try c.exec("CREATE INDEX t_k ON t(k, pad)");
+        try testing.expect(c.db.n_pma_written - before > 1);
+        try c.expectRows("PRAGMA integrity_check", "ok\n");
+        const by_index = try c.query("SELECT k, pad, id FROM t INDEXED BY t_k WHERE k > 0");
+        defer testing.allocator.free(by_index);
+        const by_sort = try c.query("SELECT k, pad, id FROM t NOT INDEXED ORDER BY k, pad, id");
+        defer testing.allocator.free(by_sort);
+        try testing.expectEqualStrings(by_sort, by_index);
+    }
 }

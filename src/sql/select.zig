@@ -723,17 +723,28 @@ fn innerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, disti
     }
 
     switch (e_dest) {
-        SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
+        SRT.Fifo, SRT.DistFifo => {
+            // Append the row to the queue of a recursive CTE (ORDER BY is
+            // ignored here: there is no sorter).
+            std.debug.assert(sort == null);
+            const queue = dest.parm.cursor;
+            const r1 = expr_mod.getTempReg(p);
+            _ = aux.emit(v, .MakeRecord, .{ result, n_result_col, r1 });
+            var skip: ?Addr = null;
+            if (e_dest == SRT.DistFifo) {
+                // The cursor after the queue holds the rows ever queued.
+                skip = aux.emitInt(v, .Found, .{ queue.at(1), 0, r1 }, 0);
+                _ = aux.emitInt(v, .IdxInsert, .{ queue.at(1), r1, result }, n_result_col);
+            }
+            _ = aux.emit(v, .QueuePush, .{ queue, r1 });
+            if (skip) |a| aux.landHere(v, a);
+            expr_mod.releaseTempReg(p, r1);
+        },
+        SRT.Table, SRT.EphemTab => {
             // Store the row as data with a new rowid.
             const tab = dest.parm.cursor;
             const r1 = expr_mod.getTempRange(p, n_prefix_reg + 1);
             _ = aux.emit(v, .MakeRecord, .{ result, n_result_col, r1.at(n_prefix_reg) });
-            if (e_dest == SRT.DistFifo) {
-                // The cursor after `tab` holds the rows already written.
-                const addr = aux.here(v).plus(4);
-                _ = aux.emitInt(v, .Found, .{ tab.at(1), addr, r1 }, 0);
-                _ = aux.emitInt(v, .IdxInsert, .{ tab.at(1), r1, result }, n_result_col);
-            }
             if (sort) |so| {
                 pushOntoSorter(p, so, s, r1.at(n_prefix_reg), orig, 1, n_prefix_reg);
             } else {
@@ -1358,9 +1369,13 @@ fn multiSelectByMergeKeyInfo(p: *Parse, s: *Select, n_extra: usize) ?*KeyInfo {
 }
 
 /// Port of generateWithRecursiveQuery(): code a recursive CTE
-/// "<setup> UNION [ALL] <recursive>": rows go through a Queue table, one
-/// at a time becoming the content of the recursive table (Current) for a
-/// run of the recursive part.
+/// "<setup> UNION [ALL] <recursive>": rows go through a Queue, one at a
+/// time becoming the content of the recursive table (Current) for a run
+/// of the recursive part. Not as in C without ORDER BY: the Queue is then
+/// a FIFO cursor (OP_OpenQueue, OP_QueuePush, OP_QueuePop; queue.zig)
+/// rather than an ephemeral table, and OP_QueuePop hands each row to
+/// Current in one instruction. With ORDER BY it is the ephemeral index of
+/// C, a priority queue.
 fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     const src = s.src.?;
     var n_col: i32 = @intCast(s.e_list.?.len());
@@ -1421,7 +1436,8 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
         _ = aux.emit4(v, .OpenEphemeral, .{ queue, ob.len() + 2 }, if (ki) |k| .{ .keyinfo = k } else .notused);
         dest_queue.order_by = ob;
     } else {
-        _ = aux.emit(v, .OpenEphemeral, .{ queue, n_col });
+        // Not in C, which uses an ephemeral table: a FIFO (queue.zig).
+        _ = aux.emit(v, .OpenQueue, .{ queue, 0 });
     }
     if (distinct) |tab| {
         // Keeps the recursive part's output distinct.
@@ -1456,14 +1472,13 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     rc catch return;
 
     // Move the next row of the Queue to Current and output it.
-    const addr_top = aux.emit(v, .Rewind, .{ queue, done });
-    _ = aux.emit(v, .NullRow, .{current});
-    if (order_by) |ob| {
+    const addr_top = if (order_by) |ob| top: {
+        const top = aux.emit(v, .Rewind, .{ queue, done });
+        _ = aux.emit(v, .NullRow, .{current});
         _ = aux.emit(v, .Column, .{ queue, ob.len() + 1, reg_current });
-    } else {
-        _ = aux.emit(v, .RowData, .{ queue, reg_current });
-    }
-    _ = aux.emit(v, .Delete, .{queue});
+        _ = aux.emit(v, .Delete, .{queue});
+        break :top top;
+    } else aux.emit(v, .QueuePop, .{ queue, done, current });
 
     const cont = aux.newLabel(p);
     codeOffset(v, offset_reg, cont);
@@ -1636,15 +1651,23 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
     codeOffset(v, s.i_offset, cont);
 
     switch (dest.e_dest) {
-        SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
+        SRT.Fifo, SRT.DistFifo => {
+            // The queue of a recursive CTE.
+            const r1 = expr_mod.getTempReg(p);
+            const queue = dest.parm.cursor;
+            _ = aux.emit(v, .MakeRecord, .{ row, in.n_sdst, r1 });
+            if (dest.e_dest == SRT.DistFifo) {
+                // Populate the uniqueness index of the recursive phase.
+                _ = aux.emitInt(v, .IdxInsert, .{ queue.at(1), r1, row }, in.n_sdst);
+            }
+            _ = aux.emit(v, .QueuePush, .{ queue, r1 });
+            expr_mod.releaseTempReg(p, r1);
+        },
+        SRT.Table, SRT.EphemTab => {
             const r1 = expr_mod.getTempReg(p);
             const r2 = expr_mod.getTempReg(p);
             const tab = dest.parm.cursor;
             _ = aux.emit(v, .MakeRecord, .{ row, in.n_sdst, r1 });
-            if (dest.e_dest == SRT.DistFifo) {
-                // Populate the uniqueness index of the recursive phase.
-                _ = aux.emitInt(v, .IdxInsert, .{ tab.at(1), r1, row }, in.n_sdst);
-            }
             _ = aux.emit(v, .NewRowid, .{ tab, r2 });
             _ = aux.emit(v, .Insert, .{ tab, r1, r2 });
             aux.changeP5(v, vi.InsertP5{ .append = true });

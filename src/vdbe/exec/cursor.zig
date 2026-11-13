@@ -9,6 +9,7 @@ const mem = @import("../mem.zig");
 const aux = @import("../aux.zig");
 const serial = @import("../serial.zig");
 const sorter = @import("../sorter.zig");
+const queue = @import("../queue.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const util = @import("../../sql/util.zig");
 const btree = @import("xqlite_storage").btree;
@@ -36,6 +37,7 @@ pub const handlers = .{
     .{ .ops = .{.OpenDup}, .f = opOpenDup },
     .{ .ops = .{ .OpenAutoindex, .OpenEphemeral }, .f = opOpenEphemeral },
     .{ .ops = .{.SorterOpen}, .f = opSorterOpen },
+    .{ .ops = .{.OpenQueue}, .f = opOpenQueue },
     .{ .ops = .{.SequenceTest}, .f = opSequenceTest },
     .{ .ops = .{.OpenPseudo}, .f = opOpenPseudo },
     .{ .ops = .{.Close}, .f = opClose },
@@ -270,10 +272,28 @@ pub fn opSorterOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     const ki = op.p4As(.keyinfo);
     const s = try sorter.init(e.db, op.p3, ki);
     const c = allocateCursor(e, op.p1, op.p2, .{ .sorter = s }) catch |err| {
-        sorter.close(e.db, s);
+        sorter.close(s);
         return err;
     };
     c.key_info = ki;
+    return .next;
+}
+
+/// OP_OpenQueue (not in C): open cursor P1 as an empty queue
+/// (queue.zig), or empty the queue it is.
+pub fn opOpenQueue(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+    if (e.csrIfOpen(op.p1)) |cx| switch (cx.kind) {
+        .queue => |q| {
+            q.clear();
+            return .next;
+        },
+        else => {},
+    };
+    const q = try queue.Queue.init(e.db);
+    _ = allocateCursor(e, op.p1, 0, .{ .queue = q }) catch |err| {
+        q.deinit();
+        return err;
+    };
     return .next;
 }
 
@@ -629,7 +649,7 @@ pub fn opIfEmpty(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
 
 pub fn opSorterNext(e: *Exec, op: *OpWithP5(.{ .cursor, .jump, .int }, StmtStatus)) Error!Flow {
     const c = e.csr(op.p1);
-    const more = try sorter.next(e.db, c);
+    const more = try sorter.next(c);
     return nextTail(e, op.p5, c, more);
 }
 

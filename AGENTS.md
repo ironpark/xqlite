@@ -4,7 +4,7 @@
 
 ## 프로젝트
 
-- xqlite는 SQLite 3.54.1을 순수 Zig(0.17)로 옮긴 것입니다. 파일 형식과 바이트코드가 SQLite와 호환됩니다.
+- xqlite는 SQLite 3.54.1을 순수 Zig(0.17)로 옮긴 것입니다. 파일 형식과 실행 결과가 SQLite와 호환됩니다.
 - 3.54.1 뒤의 SQLite 업스트림은 따라가지 않습니다. 코드는 업스트림에서 다시 생성하지 않고(lemon 문법 대신 손으로 쓴 파서, `src/dialect/sqlite/parser.zig`) 고쳐 나갑니다. 아래의 SQLite 방언 호환 규칙은 그대로입니다.
 - 방언은 sqlite, postgres, mariadb, mssql, oracle입니다. 각 방언은 `src/dialect/<방언>/`에 있습니다.
 - 그 밖에 sqlite3 C ABI, WASI/wasm 대상, 와이어 서버(`src/server`: PostgreSQL v3, MySQL), sqlite3용 확장([docs/extension.md](docs/extension.md))이 있습니다.

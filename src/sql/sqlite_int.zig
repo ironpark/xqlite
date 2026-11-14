@@ -48,15 +48,24 @@ pub const Explain = enum(u2) {
     explain = 1,
     query_plan = 2,
 
-    /// The names of the result columns of the listing (C:
-    /// azExplainColNames8, from 0 for EXPLAIN and 8 for EXPLAIN QUERY
-    /// PLAN, 12 - 4 * explain of them); none when the statement runs.
-    pub fn columnNames(x: Explain) []const [:0]const u8 {
+    /// Where the names of the result columns of the listing start in
+    /// explain_column_names (C: azExplainColNames8, 8 * (explain - 1)).
+    pub fn firstColumn(x: Explain) usize {
         return switch (x) {
-            .none => &.{},
-            .explain => explain_column_names[0..8],
-            .query_plan => explain_column_names[8..12],
+            .none, .explain => 0,
+            .query_plan => 8,
         };
+    }
+
+    /// The names of the result columns of the listing (12 - 4 * explain
+    /// of them); none when the statement runs.
+    pub fn columnNames(x: Explain) []const [:0]const u8 {
+        const n: usize = switch (x) {
+            .none => 0,
+            .explain => 8,
+            .query_plan => 4,
+        };
+        return explain_column_names[x.firstColumn()..][0..n];
     }
 };
 
@@ -85,10 +94,22 @@ pub const PrepFlags = packed struct(u8) {
     /// again on a schema change (all but the legacy sqlite3_prepare()).
     save_sql: bool = false,
 
-    /// The flags of sqlite3_prepare_v3()'s argument that it takes
-    /// (SQLITE_PREPARE_MASK, 0x3f).
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const with = ops.with;
+
+    /// The flags sqlite3_prepare_v3() takes from its argument
+    /// (SQLITE_PREPARE_MASK): all but save_sql, and the bit C reserves.
+    const c_mask: PrepFlags = .{ .persistent = true, .normalize = true, .no_vtab = true, ._3 = 1, .dont_log = true, .from_ddl = true };
+
+    /// The flags of sqlite3_prepare_v3()'s argument that it takes.
     pub fn fromC(bits: c_uint) PrepFlags {
-        return @bitCast(@as(u8, @truncate(bits)) & 0x3f);
+        return ops.only(ops.fromInt(@truncate(bits)), c_mask);
+    }
+
+    comptime {
+        flags.checkBits(PrepFlags, .{ .persistent = 0x01, .normalize = 0x02, .no_vtab = 0x04, .dont_log = 0x10, .from_ddl = 0x20, .save_sql = 0x80 });
+        std.debug.assert(c_mask.int() == 0x3f);
     }
 };
 

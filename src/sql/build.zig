@@ -1208,8 +1208,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         // sqlite_schema is open on cursor 0.
         _ = aux.emit(v, .NewRowid, .{ Cursor.first, reg1 });
         _ = aux.emitStr(v, .Blob, .{ 6, reg3 }, &null_row);
-        _ = aux.emit(v, .Insert, .{ Cursor.first, reg3, reg1 });
-        aux.changeP5(v, vi.InsertP5{ .append = true });
+        _ = aux.emit5(v, .Insert, .{ Cursor.first, reg3, reg1 }, .{ .append = true });
         _ = aux.emit(v, .Close, .{Cursor.first});
     } else if (db.init.imposter_table != 0) {
         t.tab_flags.Imposter = true;
@@ -2003,9 +2002,7 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     const reg_rec = p.newReg();
     const reg_rowid = p.newReg();
     main_mod.mayAbort(p);
-    // P2 is the register of the root page.
-    _ = aux.emit(v, .OpenWrite, .{ csr, p.u1.cr.reg_root.int(), i_db });
-    aux.changeP5(v, vi.OpenP5{ .p2_is_reg = true });
+    _ = aux.emit(v, .OpenWriteReg, .{ csr, p.u1.cr.reg_root, i_db });
     // P3 of OP_InitCoroutine is the address the co-routine starts at.
     const addr_top = aux.here(v).plus(1);
     _ = aux.emit(v, .InitCoroutine, .{ reg_yield, 0, addr_top });
@@ -2024,12 +2021,10 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     _ = aux.emit(v, .MakeRecord, .{ dest.i_sdst, dest.n_sdst, reg_rec });
     insert_mod.tableAffinity(p, t, .none);
     _ = aux.emit(v, .NewRowid, .{ csr, reg_rowid });
-    _ = aux.emit(v, .Insert, .{ csr, reg_rec, reg_rowid });
     // xqlite: a dialect that counts the rows (Hooks.count_create_as).
-    if (@import("../dialect/dialect.zig").hooks(p.db).count_create_as) {
-        aux.changeP5(v, vi.InsertP5{ .nchange = true });
-        aux.countChanges(v);
-    }
+    const count_rows = @import("../dialect/dialect.zig").hooks(p.db).count_create_as;
+    _ = aux.emit5(v, .Insert, .{ csr, reg_rec, reg_rowid }, .{ .nchange = count_rows });
+    if (count_rows) aux.countChanges(v);
     _ = aux.emit(v, .Goto, .{ 0, addr_ins_loop });
     aux.landHere(v, addr_ins_loop);
     _ = aux.emit(v, .Close, .{csr});
@@ -2695,9 +2690,11 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: ?Reg) void {
     _ = aux.emit(v, .Next, .{ tab_cur, addr1.plus(1) });
     aux.landHere(v, addr1);
     if (mem_root_page == null) _ = aux.emit(v, .Clear, .{ tnum, i_db });
-    // P2 is the root page, or with p2_is_reg the register it is in.
-    _ = aux.emit4(v, .OpenWrite, .{ idx_cur, tnum, i_db }, key_p4);
-    aux.changeP5(v, vi.OpenP5{ .bulk_csr = true, .p2_is_reg = mem_root_page != null });
+    if (mem_root_page) |r| {
+        _ = aux.emit45(v, .OpenWriteReg, .{ idx_cur, r, i_db }, key_p4, .{ .bulk_csr = true });
+    } else {
+        _ = aux.emit45(v, .OpenWrite, .{ idx_cur, tnum, i_db }, key_p4, .{ .bulk_csr = true });
+    }
 
     // Then, sorted, to the index (checking uniqueness).
     addr1 = aux.emit(v, .SorterSort, .{sorter});
@@ -2716,8 +2713,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: ?Reg) void {
     }
     _ = aux.emit(v, .SorterData, .{ sorter, record, idx_cur });
     if (!idx.asc_key_bug) _ = aux.emit(v, .SeekEnd, .{idx_cur});
-    _ = aux.emit(v, .IdxInsert, .{ idx_cur, record });
-    aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
+    _ = aux.emit5(v, .IdxInsert, .{ idx_cur, record }, .{ .use_seek_result = true });
     expr_mod.releaseTempReg(p, record);
     _ = aux.emit(v, .SorterNext, .{ sorter, addr2 });
     aux.landHere(v, addr1);
@@ -2772,7 +2768,7 @@ pub fn openTempDatabase(p: *Parse) int.ParseError!void {
     if (db.dbs.items[1].bt == null and p.explain == .none) {
         const bt = btree.Btree.open(@import("malloc.zig").allocator, db.vfs.?, null, .{
             // temp_store=MEMORY: in memory (sqlite3TempInMemory()).
-            .memory = @import("../vdbe/sorter.zig").tempInMemory(db),
+            .memory = @import("../vdbe/vdbe_int.zig").tempInMemory(db),
             .mmap_size = db.sz_mmap,
             .cell_size_check = db.flags.CellSizeCk,
             .conn = main_mod.btreeConn(db),
@@ -2818,8 +2814,7 @@ pub fn beginWriteOperation(p: *Parse, set_statement: bool, i_db: usize) void {
 pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, constraint: vi.p5.Constraint) void {
     const v = getVdbe(p) orelse return;
     if (on_error == OE.Abort) main_mod.mayAbort(p);
-    _ = aux.emitStr(v, .Halt, .{ err_code, on_error.int() }, msg);
-    aux.changeP5(v, vi.HaltP5{ .constraint = constraint });
+    _ = aux.emitStr5(v, .Halt, .{ err_code, on_error.int() }, msg, .{ .constraint = constraint });
 }
 
 /// xqlite: haltConstraint() of the error of the dialect the statement is

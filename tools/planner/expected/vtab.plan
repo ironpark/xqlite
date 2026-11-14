@@ -156,7 +156,7 @@ a1832e866109c7fc 4364eedaa7e040d0 with c(x) as (select value from generate_serie
 cbdc19b192918471 2152b17b5752b76c with recursive r(n) as (select 1 union all select n+1 from r where n<3) select * from r, generate_series(1,r.n)
 1a1fff18f39a1c7a 7b4b8e709404ac93 select * from (select * from generate_series(1,10)) where value>7
 cfbdc7b806919bdb e3b0c44298fc1c14 create view vg as select value from generate_series(1,5)
-bcb1543fbbffc9eb 4364eedaa7e040d0 create table tg as select * from generate_series(1,3)
+53f625c645aca39c 4364eedaa7e040d0 create table tg as select * from generate_series(1,3)
 4e46fd8e2ae300a1 4364eedaa7e040d0 insert into t2 select value, value*100, value from generate_series(10,12)
 fe2eb8006a55cc90 c4285073f67fd618 update t2 set z=z+1 where x in (select value from generate_series(1,2))
 24b45f98865f6c3c c4285073f67fd618 delete from t2 where x in (select value from generate_series(1,2))
@@ -310,7 +310,7 @@ cff23badb67da05d f626091c49ea0c0e SELECT name FROM pragma_table_xinfo('t1')
 068e3e8c723fbb62 c7f0c7ef96e937b9 SELECT rowid, * FROM generate_series(0,32,5) ORDER BY +value DESC
 1be13207f4f97cfb 38e97dc762045e66 SELECT rowid, * FROM generate_series(0,32,5) ORDER BY value DESC
 d474663b32282403 f0ef1ddd6992c7e7 SELECT strict FROM pragma_table_list('t1')
-eab10998883eec59 3b29405e0f854a9e SELECT t4.name, t3.name FROM pragma_table_info('t4') t4 RIGHT JOIN pragma_table_info('t3') t3 ON (t4.name=t3.name)
+4ae17416498d90c5 3b29405e0f854a9e SELECT t4.name, t3.name FROM pragma_table_info('t4') t4 RIGHT JOIN pragma_table_info('t3') t3 ON (t4.name=t3.name)
 14bf24a04688cdba 57fc41ab5eb405b3 SELECT value FROM generate_series(-9223372036854760000,-9223372036854775808,-10000)
 dff4d7cad854b934 a8a77482a19b7e78 SELECT value FROM generate_series(-9223372036854760000,-9223372036854775808,-10000) WHERE value < -9223372036854770001
 80250ae3fc576e6d 99b6a4f42c3e548e SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 0 AND 6
@@ -387,7 +387,7 @@ bceb0c8b121be252 af2b7d335967f022 SELECT t0.c0, v0.c0, vt0.name FROM v0, t0 LEFT
 ----
 790a4414535a1cf2 790a4414535a1cf2 SELECT tbl, (flgs & 0x10)!=0 FROM pragma_stats WHERE tbl='t1' AND idx IS NULL
 ----
-2ddd369455e1cbbb d0268fe2bc06c4f6 CREATE TABLE t9 AS SELECT id, h, g, f, e, d, c, b, a FROM t1 NATURAL FULL JOIN t2 NATURAL FULL JOIN t3 NATURAL FULL JOIN t4 NATURAL FULL JOIN t5 NATURAL FULL JOIN t6 NATURAL FULL JOIN t7 NATURAL FULL JOIN t8
+73d5664bfd791b75 d0268fe2bc06c4f6 CREATE TABLE t9 AS SELECT id, h, g, f, e, d, c, b, a FROM t1 NATURAL FULL JOIN t2 NATURAL FULL JOIN t3 NATURAL FULL JOIN t4 NATURAL FULL JOIN t5 NATURAL FULL JOIN t6 NATURAL FULL JOIN t7 NATURAL FULL JOIN t8
 ----
 ba5480d85550efc4 3213166c1ed827f5 SELECT *, '|' FROM t1, generate_series(1,x) ORDER BY 1, 2
 ----
@@ -401,7 +401,7 @@ ffb8b34440c48083 e590f1e68a9928bb SELECT b FROM t600 WHERE a IN generate_series(
 ----
 e5b805248c230615 aadc7b30b3ca9a3a SELECT name FROM temp.pragma_table_info('t5_1')
 ----
-b25c35c8de99c3e7 7d1cbf5e7af9795d SELECT t1.value, t2.value FROM t1 RIGHT JOIN generate_series(1,3,1) AS t2 USING(value)
+01b23b406b68aead 7d1cbf5e7af9795d SELECT t1.value, t2.value FROM t1 RIGHT JOIN generate_series(1,3,1) AS t2 USING(value)
 ----
 73c7c45b7863bb40 c5a5bd8ca1f130fb SELECT t.name, f."table", f."from", i.name, i.pk FROM pragma_table_list() AS t JOIN pragma_foreign_key_list(t.name, t.schema) AS f JOIN pragma_table_info(f."table", t.schema) AS i WHERE i.pk
 ----

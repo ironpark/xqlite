@@ -282,7 +282,7 @@ pub fn columnNameOf(v: *Vdbe, i: usize, var_: usize) ?[:0]const u8 {
         if (var_ != vi.COLNAME_NAME) return null;
         return v.explain.columnNames()[i];
     }
-    return valueText(colNameMem(v, i, var_) orelse return null);
+    return valueText(v.colNameSlot(i, var_) orelse return null);
 }
 
 const explain_names = int.explain_column_names;
@@ -298,18 +298,6 @@ const explain_names16 = blk: {
     }
     break :blk out;
 };
-
-/// The slot of name `var_` (COLNAME_*) of column `i`: the COLNAME_NAME and
-/// COLNAME_DECLTYPE slots of every statement, the origin slots of a
-/// statement compiled with column metadata (Vdbe.col_meta).
-fn colNameMem(v: *Vdbe, i: usize, var_: usize) ?*Mem {
-    if (var_ < vi.COLNAME_N) {
-        if (v.col_names.len == 0) return null;
-        return &v.col_names[i + var_ * v.nColNames()];
-    }
-    if (v.col_meta.len == 0) return null;
-    return &v.col_meta[i + (var_ - vi.COLNAME_N) * v.nColNames()];
-}
 
 pub fn columnName(v: *Vdbe, i: usize) ?[:0]const u8 {
     return columnNameOf(v, i, vi.COLNAME_NAME);
@@ -383,10 +371,9 @@ pub fn columnName16(v: *Vdbe, i: usize, var_: usize) ?[*]const u8 {
     if (v.explain != .none) {
         // The fixed EXPLAIN names (azExplainColNames16data).
         if (var_ != vi.COLNAME_NAME) return null;
-        const k = if (v.explain == .query_plan) i + 8 else i;
-        return @ptrCast(explain_names16[k].ptr);
+        return @ptrCast(explain_names16[v.explain.firstColumn() + i].ptr);
     }
-    const m = colNameMem(v, i, var_) orelse return null;
+    const m = v.colNameSlot(i, var_) orelse return null;
     return valueText16(m, @import("utf.zig").UTF16NATIVE);
 }
 
@@ -839,10 +826,10 @@ pub fn notPureFunc(ctx: *Context) bool {
     const op = &v.prog[@intCast(ctx.i_op)];
     if (op.opcode == vi.OP.PureFunc) {
         // P5 holds the NC_SelfRef flags of the expression (resolveExprStep()).
-        const nc = int.NC.fromInt(op.p5);
-        const z_context = if (nc.IsCheck)
+        const nc = op.p5As(vi.FuncP5);
+        const z_context = if (nc.is_check)
             "a CHECK constraint"
-        else if (nc.GenCol)
+        else if (nc.gen_col)
             "a generated column"
         else
             "an index";

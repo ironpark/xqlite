@@ -616,8 +616,7 @@ fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, tab: Cursor, repeat:
             const r1 = expr_mod.getTempReg(p);
             _ = aux.emitInt(v, .Found, .{ tab, repeat, elem }, n_result_col);
             _ = aux.emit(v, .MakeRecord, .{ elem, n_result_col, r1 });
-            _ = aux.emitInt(v, .IdxInsert, .{ tab, r1, elem }, n_result_col);
-            aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
+            _ = aux.emit45(v, .IdxInsert, .{ tab, r1, elem }, .{ .int32 = n_result_col }, .{ .use_seek_result = true });
             expr_mod.releaseTempReg(p, r1);
             return .{ .table = tab };
         },
@@ -642,7 +641,25 @@ fn fixDistinctOpenEph(p: *Parse, d: int.Distinct, open_eph: Addr) void {
     }
 }
 
-/// Port of selectInnerLoop(): the inside of the loop of a SELECT: compute
+/// Append the `n` registers from `row`, as a record, to the queue of a
+/// recursive CTE on cursor `queue` (SRT_Fifo; not in C, see queue.zig).
+/// If `distinct` (SRT_DistFifo), the record also goes into the index of
+/// the rows ever queued, the cursor after the queue; if `skip_seen`, a
+/// record found there already is not queued again.
+fn pushOntoQueue(p: *Parse, v: *Vdbe, queue: Cursor, distinct: bool, skip_seen: bool, row: Reg, n: i32) void {
+    const r1 = expr_mod.getTempReg(p);
+    _ = aux.emit(v, .MakeRecord, .{ row, n, r1 });
+    var skip: ?Addr = null;
+    if (distinct) {
+        if (skip_seen) skip = aux.emitInt(v, .Found, .{ queue.at(1), 0, r1 }, 0);
+        _ = aux.emitInt(v, .IdxInsert, .{ queue.at(1), r1, row }, n);
+    }
+    _ = aux.emit(v, .QueuePush, .{ queue, r1 });
+    if (skip) |a| aux.landHere(v, a);
+    expr_mod.releaseTempReg(p, r1);
+}
+
+/// Port of selectInnerLoop():the inside of the loop of a SELECT: compute
 /// the row (or read it from `src_tab` if there is one), apply DISTINCT,
 /// OFFSET and LIMIT, and send it to `dest` (or the sorter). `continue_to`
 /// is where the next row starts, `break_to` where the loop ends; each is
@@ -727,18 +744,7 @@ fn innerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, disti
             // Append the row to the queue of a recursive CTE (ORDER BY is
             // ignored here: there is no sorter).
             std.debug.assert(sort == null);
-            const queue = dest.parm.cursor;
-            const r1 = expr_mod.getTempReg(p);
-            _ = aux.emit(v, .MakeRecord, .{ result, n_result_col, r1 });
-            var skip: ?Addr = null;
-            if (e_dest == SRT.DistFifo) {
-                // The cursor after the queue holds the rows ever queued.
-                skip = aux.emitInt(v, .Found, .{ queue.at(1), 0, r1 }, 0);
-                _ = aux.emitInt(v, .IdxInsert, .{ queue.at(1), r1, result }, n_result_col);
-            }
-            _ = aux.emit(v, .QueuePush, .{ queue, r1 });
-            if (skip) |a| aux.landHere(v, a);
-            expr_mod.releaseTempReg(p, r1);
+            pushOntoQueue(p, v, dest.parm.cursor, e_dest == SRT.DistFifo, true, result, n_result_col);
         },
         SRT.Table, SRT.EphemTab => {
             // Store the row as data with a new rowid.
@@ -750,8 +756,7 @@ fn innerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, disti
             } else {
                 const r2 = expr_mod.getTempReg(p);
                 _ = aux.emit(v, .NewRowid, .{ tab, r2 });
-                _ = aux.emit(v, .Insert, .{ tab, r1, r2 });
-                aux.changeP5(v, vi.InsertP5{ .append = true });
+                _ = aux.emit5(v, .Insert, .{ tab, r1, r2 }, .{ .append = true });
                 expr_mod.releaseTempReg(p, r2);
             }
             expr_mod.releaseTempRange(p, r1, n_prefix_reg + 1);
@@ -830,8 +835,7 @@ fn innerLoop(p: *Parse, s: *Select, src_tab: ?Cursor, sort_arg: ?*SortCtx, disti
             }
             _ = aux.emit(v, .MakeRecord, .{ result, n_result_col, r3 });
             if (e_dest == SRT.DistQueue) {
-                _ = aux.emit(v, .IdxInsert, .{ queue.at(1), r3 });
-                aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
+                _ = aux.emit5(v, .IdxInsert, .{ queue.at(1), r3 }, .{ .use_seek_result = true });
             }
             for (so.slice(), 0..) |item, i| {
                 _ = aux.emit(v, .SCopy, .{ result.at(@as(i32, item.u.x.order_by_col) - 1), r2.at(i) });
@@ -948,8 +952,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
             const out = dest.parm.cursor;
             _ = aux.emit(v, .Column, .{ sort_tab, n_key + b_seq, row });
             _ = aux.emit(v, .NewRowid, .{ out, rowid });
-            _ = aux.emit(v, .Insert, .{ out, row, rowid });
-            aux.changeP5(v, vi.InsertP5{ .append = true });
+            _ = aux.emit5(v, .Insert, .{ out, row, rowid }, .{ .append = true });
         },
         SRT.Set => {
             _ = aux.emitStr(v, .MakeRecord, .{ row, n_column, rowid }, dest.aff_sdst.?);
@@ -1652,16 +1655,8 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
 
     switch (dest.e_dest) {
         SRT.Fifo, SRT.DistFifo => {
-            // The queue of a recursive CTE.
-            const r1 = expr_mod.getTempReg(p);
-            const queue = dest.parm.cursor;
-            _ = aux.emit(v, .MakeRecord, .{ row, in.n_sdst, r1 });
-            if (dest.e_dest == SRT.DistFifo) {
-                // Populate the uniqueness index of the recursive phase.
-                _ = aux.emitInt(v, .IdxInsert, .{ queue.at(1), r1, row }, in.n_sdst);
-            }
-            _ = aux.emit(v, .QueuePush, .{ queue, r1 });
-            expr_mod.releaseTempReg(p, r1);
+            // The queue of a recursive CTE; the rows are distinct already.
+            pushOntoQueue(p, v, dest.parm.cursor, dest.e_dest == SRT.DistFifo, false, row, in.n_sdst);
         },
         SRT.Table, SRT.EphemTab => {
             const r1 = expr_mod.getTempReg(p);
@@ -1669,8 +1664,7 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
             const tab = dest.parm.cursor;
             _ = aux.emit(v, .MakeRecord, .{ row, in.n_sdst, r1 });
             _ = aux.emit(v, .NewRowid, .{ tab, r2 });
-            _ = aux.emit(v, .Insert, .{ tab, r1, r2 });
-            aux.changeP5(v, vi.InsertP5{ .append = true });
+            _ = aux.emit5(v, .Insert, .{ tab, r1, r2 }, .{ .append = true });
             expr_mod.releaseTempReg(p, r2);
             expr_mod.releaseTempReg(p, r1);
         },
@@ -3342,9 +3336,8 @@ fn finalizeAggFunctions(p: *Parse, agg: *AggInfo) void {
                 }
                 expr_mod.releaseTempReg(p, reg_subtype);
             }
-            _ = aux.emit(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) });
+            _ = aux.emit5(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) }, @intCast(n_arg));
             aux.appendP4(v, .{ .funcdef = f.func.? });
-            aux.changeP5(v, @as(u16, @intCast(n_arg)));
             _ = aux.emit(v, .Next, .{ ob_tab, top.plus(1) });
             aux.landHere(v, top);
             expr_mod.releaseTempRange(p, reg_agg, n_arg);
@@ -3447,9 +3440,8 @@ fn updateAccumulator(p: *Parse, reg_acc: Reg, agg: *AggInfo, e_distinct_type: in
                 }
                 _ = aux.emit4(v, .CollSeq, .{reg_hit}, .{ .collseq = c orelse coll_mod.dfltColl(p.db) });
             }
-            _ = aux.emit(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) });
+            _ = aux.emit5(v, .AggStep, .{ 0, reg_agg, agg.funcReg(i) }, @intCast(n_arg));
             aux.appendP4(v, .{ .funcdef = f.func.? });
-            aux.changeP5(v, @as(u16, @intCast(n_arg)));
             expr_mod.releaseTempRange(p, reg_agg, n_arg);
         }
         if (next) |l| aux.place(v, l);
@@ -4089,8 +4081,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
         const tab = p.newCursor();
         distinct.tab_tnct = tab;
         const ki = keyInfoFromExprList(p, s.e_list.?, 0, 0);
-        distinct.addr_tnct = aux.emit4(v, .OpenEphemeral, .{tab}, if (ki) |k| .{ .keyinfo = k } else .notused);
-        aux.changeP5(v, BTREE_UNORDERED);
+        distinct.addr_tnct = aux.emit45(v, .OpenEphemeral, .{tab}, if (ki) |k| .{ .keyinfo = k } else .notused, BTREE_UNORDERED);
         distinct.e_tnct_type = int.WHERE_DISTINCT.UNORDERED;
     } else {
         distinct.e_tnct_type = int.WHERE_DISTINCT.NOOP;

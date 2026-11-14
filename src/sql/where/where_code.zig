@@ -1072,9 +1072,6 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         _ = aux.emitInt(v, .IdxInsert, .{ rj.i_match, r, r.at(1) }, n_pk);
         if (!rj.reg_bloom.isNone()) {
             _ = aux.emitInt(v, .FilterAdd, .{ rj.reg_bloom, 0, r.at(1) }, n_pk);
-            // As in C, the OP_IdxInsert's flag lands on OP_FilterAdd,
-            // which does not read P5.
-            aux.changeP5(v, vi.p5.int(vi.InsertP5{ .use_seek_result = true }));
         }
         aux.landHere(v, jmp1);
         expr_mod.releaseTempRange(p, r, n_pk + 1);
@@ -1665,9 +1662,6 @@ pub fn rightJoinLoop(w: *WhereInfo, i_level: usize, level: *WhereLevel) Oom!void
         expr_mod.releaseTempReg(p, r2);
         if (!rj.reg_bloom.isNone()) {
             _ = aux.emitInt(v, .FilterAdd, .{ rj.reg_bloom, 0, r }, n_pk);
-            // As in C, the OP_IdxInsert's flag lands on OP_FilterAdd,
-            // which does not read P5.
-            aux.changeP5(v, vi.p5.int(vi.InsertP5{ .use_seek_result = true }));
         }
 
         // Output the row with NULLs for the tables to the left.

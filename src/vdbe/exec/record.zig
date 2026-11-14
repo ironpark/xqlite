@@ -18,8 +18,7 @@ const record_fmt = @import("xqlite_storage").record;
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const OpOf = vi.OpOf;
-const OpWithP5 = vi.OpWithP5;
+const OpFor = vi.OpFor;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const ENC = vi.ENC;
@@ -28,15 +27,13 @@ const Reg = @import("../operand.zig").Reg;
 const RC = int.RC;
 const Aff = int.Aff;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
-pub const handlers = .{
-    .{ .ops = .{.IsType}, .f = opIsType },
-    // The most frequent opcode (3-6% on column-heavy loops in line).
-    .{ .ops = .{.Column}, .f = opColumn, .call = .always_inline },
-    .{ .ops = .{.TypeCheck}, .f = opTypeCheck },
-    .{ .ops = .{.Affinity}, .f = opAffinity },
-    .{ .ops = .{.MakeRecord}, .f = opMakeRecord, .call = .always_inline },
-};
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
+pub const handlers = .{};
+
+/// OP_Column is the most frequent opcode (3-6% on column-heavy loops
+/// in line).
+pub const inlined = .{ .Column, .MakeRecord };
 
 /// vdbeMemTypeName().
 fn memTypeName(m: *const Mem) []const u8 {
@@ -47,30 +44,36 @@ fn memTypeName(m: *const Mem) []const u8 {
 /// sqlite3StdType.
 pub const std_type = [_][]const u8{ "ANY", "BLOB", "INT", "INTEGER", "REAL", "TEXT" };
 
-pub fn opIsType(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
-    // P1 is a cursor, whose column P3 is tested, or -1, and P3 the
-    // register to test.
-    const type_mask: u16 = if (op.p1 >= 0) blk: {
-        const c = e.csr(.from(op.p1));
-        if (op.p3 >= c.n_hdr_parsed) break :blk @as(u16, 1) << @intCast(op.p4As(.int32) - 1);
+pub fn opIsType(e: *Exec, op: *OpFor(.IsType)) Flow {
+    const T = vi.TypeMaskP5;
+    const c = e.csr(op.p1);
+    const type_mask: T = if (op.p3 >= c.n_hdr_parsed) .of(op.p4As(.int32)) else blk: {
         const st = c.types[@intCast(op.p3)];
-        if (st >= 12) break :blk if (st & 1 != 0) 0x04 else 0x08;
-        const masks = [_]u16{ 0x10, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x2, 0x01, 0x01, 0x10, 0x10 };
+        if (st >= 12) break :blk if (st & 1 != 0) .{ .text = true } else .{ .blob = true };
+        // The serial types 0 .. 11: NULL, six integers, a REAL, the
+        // integers 0 and 1, and two reserved ones.
+        const masks = [_]T{ .{ .null = true }, .{ .integer = true }, .{ .integer = true }, .{ .integer = true }, .{ .integer = true }, .{ .integer = true }, .{ .integer = true }, .{ .float = true }, .{ .integer = true }, .{ .integer = true }, .{ .null = true }, .{ .null = true } };
         break :blk masks[st];
-    } else @as(u16, 1) << @intCast(mem.valueType(e.reg(.from(op.p3))) - 1);
-    return if (type_mask & op.p5 != 0) .jump_p2 else .next;
+    };
+    return if (type_mask.intersects(op.p5)) .jump_p2 else .next;
+}
+
+pub fn opIsTypeReg(e: *Exec, op: *OpFor(.IsTypeReg)) Flow {
+    const type_mask: vi.TypeMaskP5 = .of(mem.valueType(e.reg(op.p3)));
+    return if (type_mask.intersects(op.p5)) .jump_p2 else .next;
 }
 
 // ================================================================ OP_Column
 
 /// The op_column_corrupt exit.
 fn columnCorrupt(e: *Exec) Error!Flow {
-    if (e.ops[0].p3 > 0) return .goto(@intCast(e.ops[0].p3));
+    const init = e.opAt(.Init, 0);
+    if (init.p3 > 0) return .goto(@intCast(init.p3));
     return error.Corrupt;
 }
 
 /// Port of OP_Column.
-pub fn opColumn(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .reg }, vi.ColumnP5)) Error!Flow {
+pub fn opColumn(e: *Exec, op: *OpFor(.Column)) Error!Flow {
     const v = e.v;
     var c = e.csr(op.p1);
     var p2: u32 = @intCast(op.p2);
@@ -288,7 +291,7 @@ fn columnFromOverflow(e: *Exec, c: *VdbeCursor, t: u32, offset: u32, dest: *Mem)
 
 // ===================================================== affinity and types
 
-pub fn opTypeCheck(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
+pub fn opTypeCheck(e: *Exec, op: *OpFor(.TypeCheck)) Error!Flow {
     const tab = op.p4As(.table);
     const cols = tab.cols;
     var in1 = op.p1;
@@ -340,7 +343,7 @@ pub fn opTypeCheck(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opAffinity(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
+pub fn opAffinity(e: *Exec, op: *OpFor(.Affinity)) Error!Flow {
     const aff = std.mem.span(op.p4As(.z));
     for (e.regRange(op.p1, aff.len), aff) |*m, a| {
         try mem.applyAffinity(m, a, e.encoding);
@@ -355,7 +358,7 @@ pub fn opAffinity(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
 
 // ============================================================ OP_MakeRecord
 
-pub fn opMakeRecord(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Error!Flow {
+pub fn opMakeRecord(e: *Exec, op: *OpFor(.MakeRecord)) Error!Flow {
     const n_field: usize = @intCast(op.p2);
     const recs = e.regRange(op.p1, n_field);
     const out = e.reg(op.p3);

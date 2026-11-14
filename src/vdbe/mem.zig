@@ -523,6 +523,14 @@ pub fn setZeroBlob(m: *Mem, n: i32) void {
     m.z = null;
 }
 
+/// A BLOB that is a copy of `bytes`, in the buffer of `m`.
+pub fn setBlobCopy(m: *Mem, bytes: []const u8) Oom!void {
+    try clearAndResize(m, bytes.len);
+    @memcpy(m.z.?[0..bytes.len], bytes);
+    m.n = @intCast(bytes.len);
+    m.setTypeFlag(.{ .Blob = true });
+}
+
 /// Port of sqlite3VdbeMemSetInt64().
 pub fn setInt64(m: *Mem, val: i64) void {
     if (m.isDynamic()) setNull(m);

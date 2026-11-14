@@ -25,9 +25,8 @@ const Flags = struct {
     legacy: bool = false,
 
     fn stored(f: Flags) c.int.PrepFlags {
-        var flags: c.int.PrepFlags = .fromC(f.v3);
-        flags.save_sql = !f.legacy;
-        return flags;
+        const flags: c.int.PrepFlags = .fromC(f.v3);
+        return if (f.legacy) flags else flags.with(.{ .save_sql = true });
     }
 };
 

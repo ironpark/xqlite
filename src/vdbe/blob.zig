@@ -73,7 +73,7 @@ fn seekToRow(p: *Incrblob, i_row: i64, err: *?[:0]u8) i32 {
     }
     if (rc == RC.ROW) {
         const c = v.csr[0].?;
-        std.debug.assert(c.curType() == .btree);
+        std.debug.assert(c.kind == .btree);
         const t: u32 = if (c.n_hdr_parsed > p.i_col) c.types[p.i_col] else 0;
         if (t < 12) {
             msg = std.fmt.allocPrintSentinel(db.gpa, "cannot open value of type {s}", .{
@@ -229,8 +229,7 @@ fn compile(db: *Sqlite3, blob: *Incrblob, database: ?[]const u8, table: []const 
     const row_cur: operand.Cursor = .first;
     // The rowid, set by seekToRow(), then the imaginary column below.
     const reg: operand.Reg = .from(1);
-    _ = aux.emitInt(v, .Transaction, .{ i_db, wr_flag, schema.schema_cookie }, schema.i_generation);
-    aux.changeP5(v, 1);
+    _ = aux.emit45(v, .Transaction, .{ i_db, wr_flag, schema.schema_cookie }, .{ .int32 = schema.i_generation }, 1);
     // Acquire a read or write lock (shared cache only). (C copies the name,
     // P4_TRANSIENT; the statement only runs the lock while the schema
     // stays.)

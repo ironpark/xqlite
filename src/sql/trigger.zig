@@ -730,8 +730,7 @@ pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: Reg, orco
     // Without `ignore_jump` (a foreign key action, which never does
     // RAISE(IGNORE)) P2 is 0.
     const ignore: Jump = if (ignore_jump) |l| .of(l) else .none;
-    _ = aux.emit4(v, .Program, .{ reg, ignore, p.newReg() }, .{ .subprogram = prg.program });
-    aux.changeP5(v, @intFromBool(recursive));
+    _ = aux.emit45(v, .Program, .{ reg, ignore, p.newReg() }, .{ .subprogram = prg.program }, @intFromBool(recursive));
 }
 
 /// Port of sqlite3CodeRowTrigger(): call the triggers in `trigger` that

@@ -70,7 +70,8 @@ fn openStatTable(p: *Parse, i_db: usize, stat_cur: Cursor, where: ?[]const u8, w
     const v = build.getVdbe(p) orelse return;
     const pdb = &db.dbs.items[i_db];
     var roots: [tables.len]u32 = @splat(0);
-    var create_tbl: [tables.len]vi.OpenP5 = @splat(.{});
+    // The register of the root page of a table created here.
+    var root_regs: [tables.len]?Reg = @splat(null);
 
     // Create new statistic tables if they do not exist, or clear them if
     // they do already exist.
@@ -93,15 +94,17 @@ fn openStatTable(p: *Parse, i_db: usize, stat_cur: Cursor, where: ?[]const u8, w
             // effect of CREATE TABLE is to leave the root page of the new
             // table in register u1.cr.reg_root, for the OpenWrite below.
             build.nestedParse(p, "CREATE TABLE %Q.%s(%s)", &.{ .{ .str = pdb.name }, .{ .str = st.name }, .{ .str = st.cols } });
-            roots[i] = @bitCast(p.u1.cr.reg_root.int());
-            create_tbl[i] = .{ .p2_is_reg = true };
+            root_regs[i] = p.u1.cr.reg_root;
         }
     }
 
     // Open the sqlite_stat1 table for writing.
     for (0..n_to_open) |i| {
-        _ = aux.emitInt(v, .OpenWrite, .{ stat_cur.at(i), @as(i32, @bitCast(roots[i])), i_db }, 3);
-        aux.changeP5(v, create_tbl[i]);
+        if (root_regs[i]) |r| {
+            _ = aux.emitInt(v, .OpenWriteReg, .{ stat_cur.at(i), r, i_db }, 3);
+        } else {
+            _ = aux.emitInt(v, .OpenWrite, .{ stat_cur.at(i), @as(i32, @bitCast(roots[i])), i_db }, 3);
+        }
     }
 }
 
@@ -244,7 +247,7 @@ const stat_get_funcdef: int.FuncDef = .{
 /// Port of callStatGet().
 fn callStatGet(p: *Parse, reg_stat: Reg, reg_out: Reg) void {
     std.debug.assert(reg_out != reg_stat and reg_out != reg_stat.at(1));
-    _ = aux.addFunctionCall(p, 0, reg_stat, reg_out, 1, &stat_get_funcdef, 0);
+    _ = aux.addFunctionCall(p, 0, reg_stat, reg_out, 1, &stat_get_funcdef, .{});
 }
 
 /// Port of analyzeOneTable(): code the analysis of the indexes of `t`
@@ -356,7 +359,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         std.debug.assert(reg_rowid == reg_stat.at(2));
         _ = aux.emit(v, .Integer, .{ idx.n_key_col, reg_rowid });
         _ = aux.emit(v, .Count, .{ idx_cur, reg_temp, db.optDisabled(opt_stat4) });
-        _ = aux.addFunctionCall(p, 0, reg_stat.at(1), reg_stat, 4, &stat_init_funcdef, 0);
+        _ = aux.addFunctionCall(p, 0, reg_stat.at(1), reg_stat, 4, &stat_init_funcdef, .{});
         // The jump past the scan of an empty index, until it has landed.
         var addr_goto_end: ?Addr = aux.emit(v, .Rewind, .{idx_cur});
 
@@ -387,8 +390,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
                 const cs = coll.locateCollSeq(p, idx.coll[ii]);
                 _ = aux.emit(v, .Integer, .{ i, reg_chng });
                 _ = aux.emit(v, .Column, .{ idx_cur, i, reg_temp });
-                g.* = aux.emit4(v, .Ne, .{ reg_temp, 0, reg_prev.at(i) }, if (cs) |c| .{ .collseq = c } else .notused);
-                aux.changeP5(v, vi.CmpP5{ .null_eq = true });
+                g.* = aux.emit45(v, .Ne, .{ reg_temp, 0, reg_prev.at(i) }, if (cs) |c| .{ .collseq = c } else .notused, .{ .null_eq = true });
             }
             _ = aux.emit(v, .Integer, .{ n_col_test, reg_chng });
             _ = aux.emit(v, .Goto, .{ 0, end_distinct_test });
@@ -412,7 +414,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         //   Next csr
         //   if !eof(csr) goto next_row;
         std.debug.assert(reg_chng == reg_stat.at(1));
-        _ = aux.addFunctionCall(p, 1, reg_stat, reg_temp, 2, &stat_push_funcdef, 0);
+        _ = aux.addFunctionCall(p, 1, reg_stat, reg_temp, 2, &stat_push_funcdef, .{});
         if (db.n_analysis_limit != 0) {
             const j1 = aux.emit(v, .IsNull, .{reg_temp});
             const j2 = aux.emit(v, .If, .{reg_temp});
@@ -435,8 +437,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         callStatGet(p, reg_stat, reg_stat1);
         _ = aux.emitStr(v, .MakeRecord, .{ reg_tabname, 3, reg_temp }, "BBB");
         _ = aux.emit(v, .NewRowid, .{ stat_cur, reg_new_rowid });
-        _ = aux.emit(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid });
-        aux.changeP5(v, vi.InsertP5{ .append = true });
+        _ = aux.emit5(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid }, .{ .append = true });
 
         // End of analysis.
         if (addr_goto_end) |a| aux.landHere(v, a);
@@ -450,8 +451,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, stat_cur: Cursor, fi
         _ = aux.emit(v, .Null, .{ 0, reg_idxname });
         _ = aux.emitStr(v, .MakeRecord, .{ reg_tabname, 3, reg_temp }, "BBB");
         _ = aux.emit(v, .NewRowid, .{ stat_cur, reg_new_rowid });
-        _ = aux.emit(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid });
-        aux.changeP5(v, vi.InsertP5{ .append = true });
+        _ = aux.emit5(v, .Insert, .{ stat_cur, reg_temp, reg_new_rowid }, .{ .append = true });
         aux.landHere(v, j_zero_rows);
     }
 }

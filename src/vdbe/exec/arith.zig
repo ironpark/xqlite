@@ -15,41 +15,25 @@ const aux = @import("../aux.zig");
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const OpOf = vi.OpOf;
-const OpWithP5 = vi.OpWithP5;
+const OpFor = vi.OpFor;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const OP = vi.OP;
 const RC = int.RC;
 const Aff = int.Aff;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
 pub const handlers = .{
-    .{ .ops = .{.Concat}, .f = opConcat },
     .{ .ops = .{ .Add, .Subtract, .Multiply, .Divide, .Remainder }, .f = opArith, .call = .always_inline },
-    .{ .ops = .{.CollSeq}, .f = opCollSeq },
     .{ .ops = .{ .BitAnd, .BitOr, .ShiftLeft, .ShiftRight }, .f = opBit },
-    .{ .ops = .{.AddImm}, .f = opAddImm },
-    .{ .ops = .{.MustBeInt}, .f = opMustBeInt },
-    .{ .ops = .{.RealAffinity}, .f = opRealAffinity },
-    .{ .ops = .{.Cast}, .f = opCast },
     .{ .ops = .{ .Eq, .Ne, .Lt, .Le, .Gt, .Ge }, .f = opCompareJump, .call = .always_inline },
-    .{ .ops = .{.ElseEq}, .f = opElseEq },
-    .{ .ops = .{.Compare}, .f = opCompare },
-    .{ .ops = .{.Jump}, .f = opJump },
     .{ .ops = .{ .And, .Or }, .f = opAndOr },
-    .{ .ops = .{.IsTrue}, .f = opIsTrue },
-    .{ .ops = .{.Not}, .f = opNot },
-    .{ .ops = .{.BitNot}, .f = opBitNot },
-    .{ .ops = .{.If}, .f = opIf, .call = .always_inline },
-    .{ .ops = .{.IfNot}, .f = opIfNot, .call = .always_inline },
-    .{ .ops = .{.IsNull}, .f = opIsNull, .call = .always_inline },
-    .{ .ops = .{.ZeroOrNull}, .f = opZeroOrNull },
-    .{ .ops = .{.NotNull}, .f = opNotNull, .call = .always_inline },
-    .{ .ops = .{.IfNullRow}, .f = opIfNullRow },
 };
 
-pub fn opConcat(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg })) Error!Flow {
+pub const inlined = .{ .If, .IfNot, .IsNull, .NotNull };
+
+pub fn opConcat(e: *Exec, op: *OpFor(.Concat)) Error!Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
     const out = e.reg(op.p3);
@@ -124,7 +108,7 @@ fn rangeError(e: *Exec, w: u16, v: ?i64) ?Error {
 /// that is not 0 is the width of the integer type of the result
 /// (dialect.Arith.range()): an integer result outside it is the
 /// dialect's error.
-pub fn opArith(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg }), comptime opc: OP) Error!Flow {
+pub fn opArith(e: *Exec, op: *OpFor(.Add), comptime opc: OP) Error!Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
     const out = e.reg(op.p3);
@@ -232,13 +216,13 @@ pub fn opArith(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg }), comptime opc: OP) Err
     return .next;
 }
 
-pub fn opCollSeq(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
+pub fn opCollSeq(e: *Exec, op: *OpFor(.CollSeq)) Flow {
     if (op.p1 != .none) mem.setInt64(e.reg(op.p1), 0);
     return .next;
 }
 
 /// OP_BitAnd, OP_BitOr, OP_ShiftLeft and OP_ShiftRight.
-pub fn opBit(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg }), comptime opc: OP) Flow {
+pub fn opBit(e: *Exec, op: *OpFor(.BitAnd), comptime opc: OP) Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
     const out = e.reg(op.p3);
@@ -278,14 +262,14 @@ pub fn opBit(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg }), comptime opc: OP) Flow 
     return .next;
 }
 
-pub fn opAddImm(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
+pub fn opAddImm(e: *Exec, op: *OpFor(.AddImm)) Flow {
     const in1 = e.reg(op.p1);
     mem.integerify(in1);
     in1.u = .{ .i = in1.u.i +% op.p2 };
     return .next;
 }
 
-pub fn opMustBeInt(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Error!Flow {
+pub fn opMustBeInt(e: *Exec, op: *OpFor(.MustBeInt)) Error!Flow {
     const in1 = e.reg(op.p1);
     if (!in1.flags.Int) {
         if (in1.flags.Real) {
@@ -309,13 +293,13 @@ pub fn opMustBeInt(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opRealAffinity(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
+pub fn opRealAffinity(e: *Exec, op: *OpFor(.RealAffinity)) Flow {
     const in1 = e.reg(op.p1);
     if (in1.flags.intersects(.{ .Int = true, .IntReal = true })) mem.realify(in1);
     return .next;
 }
 
-pub fn opCast(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
+pub fn opCast(e: *Exec, op: *OpFor(.Cast)) Error!Flow {
     const in1 = e.reg(op.p1);
     if (in1.flags.Zero) try mem.expandBlob(in1);
     try mem.cast(in1, @intCast(op.p2), e.encoding);
@@ -331,7 +315,7 @@ const cmp_eq = [6]bool{ false, true, false, true, false, true };
 const cmp_gt = [6]bool{ true, false, true, false, false, true };
 
 /// OP_Eq, OP_Ne, OP_Lt, OP_Le, OP_Gt and OP_Ge.
-pub fn opCompareJump(e: *Exec, op: *OpWithP5(.{ .reg, .jump, .reg }, vi.CmpP5), comptime opc: OP) Error!Flow {
+pub fn opCompareJump(e: *Exec, op: *OpFor(.Eq), comptime opc: OP) Error!Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
     var flags1 = in1.flags;
@@ -404,14 +388,14 @@ pub fn opCompareJump(e: *Exec, op: *OpWithP5(.{ .reg, .jump, .reg }, vi.CmpP5), 
     return if (res2) .jump_p2 else .next;
 }
 
-pub fn opElseEq(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
+pub fn opElseEq(e: *Exec, op: *OpFor(.ElseEq)) Flow {
     _ = op;
     return if (e.i_compare == 0) .jump_p2 else .next;
 }
 
-pub fn opCompare(e: *Exec, op: *OpWithP5(.{ .reg, .reg, .int }, vi.CompareP5)) Flow {
+pub fn opCompare(e: *Exec, op: *OpFor(.Compare)) Flow {
     // The OP_Permutation before, if P5 says so, orders the fields.
-    const permute: ?[]u32 = if (op.p5.permute) e.ops[e.pc - 1].p4IntArray() else null;
+    const permute: ?[]u32 = if (op.p5.permute) e.opAt(.Permutation, e.pc - 1).p4IntArray() else null;
     const n: usize = @intCast(op.p3);
     const ki = op.p4As(.keyinfo);
     for (0..n) |i| {
@@ -431,7 +415,7 @@ pub fn opCompare(e: *Exec, op: *OpWithP5(.{ .reg, .reg, .int }, vi.CompareP5)) F
     return .next;
 }
 
-pub fn opJump(e: *Exec, op: *OpOf(.{ .addr, .jump, .addr })) Flow {
+pub fn opJump(e: *Exec, op: *OpFor(.Jump)) Flow {
     const to = if (e.i_compare < 0) op.p1.int() else if (e.i_compare == 0) op.p2.int() else op.p3.int();
     return .goto(@intCast(to));
 }
@@ -448,7 +432,7 @@ fn boolOrNull(m: *Mem) usize {
 }
 
 /// OP_And and OP_Or.
-pub fn opAndOr(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg }), comptime opc: OP) Flow {
+pub fn opAndOr(e: *Exec, op: *OpFor(.And), comptime opc: OP) Flow {
     const v1 = boolOrNull(e.reg(op.p1));
     const v2 = boolOrNull(e.reg(op.p2));
     const r = if (opc == .And) and_logic[v1 * 3 + v2] else or_logic[v1 * 3 + v2];
@@ -462,12 +446,12 @@ pub fn opAndOr(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg }), comptime opc: OP) Flo
     return .next;
 }
 
-pub fn opIsTrue(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opIsTrue(e: *Exec, op: *OpFor(.IsTrue)) Flow {
     mem.setInt64(e.reg(op.p2), @intFromBool(mem.booleanValue(e.reg(op.p1), op.p3 != 0)) ^ op.p4As(.int32));
     return .next;
 }
 
-pub fn opNot(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opNot(e: *Exec, op: *OpFor(.Not)) Flow {
     const in1 = e.reg(op.p1);
     const out = e.reg(op.p2);
     if (!in1.flags.Null) {
@@ -478,7 +462,7 @@ pub fn opNot(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     return .next;
 }
 
-pub fn opBitNot(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opBitNot(e: *Exec, op: *OpFor(.BitNot)) Flow {
     const in1 = e.reg(op.p1);
     const out = e.reg(op.p2);
     mem.setNull(out);
@@ -489,19 +473,19 @@ pub fn opBitNot(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     return .next;
 }
 
-pub fn opIf(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opIf(e: *Exec, op: *OpFor(.If)) Flow {
     return if (mem.booleanValue(e.reg(op.p1), op.p3 != 0)) .jump_p2 else .next;
 }
 
-pub fn opIfNot(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opIfNot(e: *Exec, op: *OpFor(.IfNot)) Flow {
     return if (!mem.booleanValue(e.reg(op.p1), op.p3 == 0)) .jump_p2 else .next;
 }
 
-pub fn opIsNull(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opIsNull(e: *Exec, op: *OpFor(.IsNull)) Flow {
     return if (e.reg(op.p1).flags.Null) .jump_p2 else .next;
 }
 
-pub fn opZeroOrNull(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg })) Flow {
+pub fn opZeroOrNull(e: *Exec, op: *OpFor(.ZeroOrNull)) Flow {
     if (e.reg(op.p1).flags.Null or e.reg(op.p3).flags.Null) {
         mem.setNull(e.reg(op.p2));
     } else {
@@ -510,11 +494,11 @@ pub fn opZeroOrNull(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg })) Flow {
     return .next;
 }
 
-pub fn opNotNull(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opNotNull(e: *Exec, op: *OpFor(.NotNull)) Flow {
     return if (!e.reg(op.p1).flags.Null) .jump_p2 else .next;
 }
 
-pub fn opIfNullRow(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Flow {
+pub fn opIfNullRow(e: *Exec, op: *OpFor(.IfNullRow)) Flow {
     if (e.csrIfOpen(op.p1)) |c| if (c.null_row) {
         mem.setNull(e.reg(op.p3));
         return .jump_p2;

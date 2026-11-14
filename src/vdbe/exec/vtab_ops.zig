@@ -14,28 +14,17 @@ const cursor = @import("cursor.zig");
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const OpOf = vi.OpOf;
+const OpFor = vi.OpFor;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
 const OE = int.OE;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
-pub const handlers = .{
-    .{ .ops = .{.VBegin}, .f = opVBegin },
-    .{ .ops = .{.VCreate}, .f = opVCreate },
-    .{ .ops = .{.VDestroy}, .f = opVDestroy },
-    .{ .ops = .{.VOpen}, .f = opVOpen },
-    .{ .ops = .{.VCheck}, .f = opVCheck },
-    .{ .ops = .{.VInitIn}, .f = opVInitIn },
-    .{ .ops = .{.VFilter}, .f = opVFilter },
-    .{ .ops = .{.VColumn}, .f = opVColumn },
-    .{ .ops = .{.VNext}, .f = opVNext },
-    .{ .ops = .{.VRename}, .f = opVRename },
-    .{ .ops = .{.VUpdate}, .f = opVUpdate },
-};
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
+pub const handlers = .{};
 
-pub fn opVBegin(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opVBegin(e: *Exec, op: *OpFor(.VBegin)) Error!Flow {
     const vt: ?*int.VTable = if (op.p4type == .vtab) op.p4As(.vtab) else null;
     const rc = vtab_mod.begin(e.db, vt);
     if (vt) |t| if (t.vtab) |p| vtab_mod.importErrmsg(e.v, p);
@@ -43,7 +32,7 @@ pub fn opVBegin(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opVCreate(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opVCreate(e: *Exec, op: *OpFor(.VCreate)) Error!Flow {
     const db = e.db;
     // P2 is a static string, so the copy cannot fail.
     var s_mem: Mem = .{ .db = db, .flags = .{ .Null = true } };
@@ -56,7 +45,7 @@ pub fn opVCreate(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opVDestroy(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opVDestroy(e: *Exec, op: *OpFor(.VDestroy)) Error!Flow {
     const db = e.db;
     db.n_vdestroy += 1;
     const rc = vtab_mod.callDestroy(db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
@@ -65,15 +54,12 @@ pub fn opVDestroy(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opVOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+pub fn opVOpen(e: *Exec, op: *OpFor(.VOpen)) Error!Flow {
     const v = e.v;
     std.debug.assert(v.is_reader);
     if (e.csrIfOpen(op.p1)) |cur| {
         // Already open.
-        switch (cur.kind) {
-            .vtab => |vc| if (vc.vtab == op.p4As(.vtab).vtab.?) return .next,
-            else => {},
-        }
+        if (cur.kind.as(.vtab)) |vc| if (vc.*.vtab == op.p4As(.vtab).vtab.?) return .next;
     }
     const vtab = op.p4As(.vtab).vtab orelse return error.Locked;
     const module = vtab.module;
@@ -90,7 +76,7 @@ pub fn opVOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opVCheck(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opVCheck(e: *Exec, op: *OpFor(.VCheck)) Error!Flow {
     const db = e.db;
     const out = e.reg(op.p2);
     mem.setNull(out);
@@ -119,7 +105,7 @@ pub fn opVCheck(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opVInitIn(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
+pub fn opVInitIn(e: *Exec, op: *OpFor(.VInitIn)) Error!Flow {
     const c = e.csr(op.p1);
     const rhs = try malloc.allocator.create(vtab_mod.ValueList);
     rhs.* = .{ .csr = c.kind.btree.cursor, .out = e.reg(op.p3) };
@@ -129,7 +115,7 @@ pub fn opVInitIn(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     return .next;
 }
 
-pub fn opVFilter(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
+pub fn opVFilter(e: *Exec, op: *OpFor(.VFilter)) Error!Flow {
     const v = e.v;
     const query = e.reg(op.p3);
     const argc = e.reg(op.p3.at(1));
@@ -152,7 +138,7 @@ pub fn opVFilter(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
     return if (res) .jump_p2 else .next;
 }
 
-pub fn opVColumn(e: *Exec, op: *vi.OpWithP5(.{ .cursor, .int, .reg }, vi.ColumnP5)) Error!Flow {
+pub fn opVColumn(e: *Exec, op: *OpFor(.VColumn)) Error!Flow {
     const cur = e.csr(op.p1);
     const dest = e.reg(op.p3);
     if (cur.null_row) {
@@ -183,7 +169,7 @@ pub fn opVColumn(e: *Exec, op: *vi.OpWithP5(.{ .cursor, .int, .reg }, vi.ColumnP
     return .next;
 }
 
-pub fn opVNext(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opVNext(e: *Exec, op: *OpFor(.VNext)) Error!Flow {
     const cur = e.csr(op.p1);
     const vcur = cur.kind.vtab;
     if (cur.null_row) return .next;
@@ -197,7 +183,7 @@ pub fn opVNext(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
     return if (!res) .jump_p2_check else .next_check;
 }
 
-pub fn opVRename(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
+pub fn opVRename(e: *Exec, op: *OpFor(.VRename)) Error!Flow {
     const db = e.db;
     const is_legacy = db.flags.LegacyAlter;
     db.flags.LegacyAlter = true;
@@ -214,7 +200,7 @@ pub fn opVRename(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opVUpdate(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
+pub fn opVUpdate(e: *Exec, op: *OpFor(.VUpdate)) Error!Flow {
     const v = e.v;
     const db = e.db;
     // P5 is the OE_ code of the statement.

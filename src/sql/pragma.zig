@@ -478,6 +478,24 @@ const ck = struct {
 /// Port of integrityCheckResultRow(): output the row in register 3, count
 /// it against the error limit in register 1, and halt at the limit.
 /// Returns the address of the OP_IfPos.
+/// What an integrity check tests the type of: column `column` of the
+/// record of a cursor (OP_IsType), or the value in register `reg`
+/// (OP_IsTypeReg).
+const IsTypeOf = union(enum) {
+    column: i32,
+    reg: Reg,
+
+    /// The test: jump to `ok` if the type is one of `types`. `cur` is the
+    /// cursor of the record, and `dflt` the type (SQLITE_*) of the
+    /// column's default, for a record without the column.
+    fn emit(x: IsTypeOf, v: *Vdbe, cur: Cursor, ok: Label, dflt: i32, types: vi.TypeMaskP5) Addr {
+        return switch (x) {
+            .column => |col| aux.emit45(v, .IsType, .{ cur, ok, col }, .{ .int32 = dflt }, types),
+            .reg => |r| aux.emit5(v, .IsTypeReg, .{ 0, ok, r }, types),
+        };
+    }
+};
+
 fn integrityCheckResultRow(v: *Vdbe) Addr {
     _ = aux.emit(v, .ResultRow, .{ ck.msg, 1 });
     const addr = aux.emit(v, .IfPos, .{ ck.errs_left, aux.here(v).plus(2), 1 });
@@ -1216,8 +1234,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             aux.usesBtree(v, @intCast(i_db));
             if (right != null and !pn.flags.ReadOnly) {
                 _ = aux.emit(v, .Transaction, .{ i_db, 1 });
-                const set = aux.emit(v, .SetCookie, .{ i_db, cookie, atoi(right.?) });
-                aux.changeP5(v, 1);
+                const set = aux.emit5(v, .SetCookie, .{ i_db, cookie, atoi(right.?) }, 1);
                 // No schema_version=N in defensive mode.
                 if (cookie == @backingInt(btree.Meta.schema_version) and db.flags.Defensive) {
                     aux.changeOpcode(v, set, OP.Noop);
@@ -1512,8 +1529,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
 
         // The b-tree checks, which leave the entry count of each b-tree
         // in registers 8 and up.
-        _ = aux.emit4(v, .IntegrityCk, .{ ck.errs_left, n_root, ck.counts }, .{ .intarray = roots });
-        aux.changeP5(v, @as(u16, @intCast(i)));
+        _ = aux.emit45(v, .IntegrityCk, .{ ck.errs_left, n_root, ck.counts }, .{ .intarray = roots }, @intCast(i));
         var addr = aux.emit(v, .IsNull, .{ck.text});
         const in_db = try build.mprintf(p, "*** in database %s ***\n", &.{.{ .str = db.dbs.items[i].name }});
         _ = aux.loadString(v, ck.msg, in_db);
@@ -1666,16 +1682,14 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         const do_type_check = if (strict) col.e_ctype.int() > int.COLTYPE.ANY.int() else col.affinity > int.Aff.blob;
         if (col.not_null == .None and !do_type_check) continue;
 
-        // The operands of OP_IsType: P1 is a cursor and P3 a column of it,
-        // or P1 is -1 and P3 a register.
+        // What is tested: a column of the record of data_cur (with the
+        // type of its default, p4, if the record is shorter), or the
+        // value of a VIRTUAL column computed into ck.msg.
         var p4: i32 = vi.SQLITE_NULL;
-        var p1: i32 = undefined;
-        var p3: i32 = undefined;
-        if (col.col_flags.VIRTUAL) {
+        const tested: IsTypeOf = if (col.col_flags.VIRTUAL) virtual: {
             ec.codeGetColumnOfTable(v, t, data_cur, jc, ck.msg);
-            p1 = -1;
-            p3 = ck.msg.int();
-        } else {
+            break :virtual .{ .reg = ck.msg };
+        } else stored: {
             if (col.i_dflt != 0) {
                 const dflt = update.valueFromExpr(v, build.columnExpr(t, col), col.affinity) catch return error.OutOfMemory;
                 if (dflt) |m| {
@@ -1683,28 +1697,26 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                     mem.release(m);
                 }
             }
-            p1 = data_cur.int();
-            if (!t.hasRowid()) {
-                p3 = build.tableColumnToIndex(build.primaryKeyIndex(t).?, jc);
-            } else {
-                p3 = build.tableColumnToStorage(t, @intCast(jc));
-            }
-        }
+            break :stored .{ .column = if (!t.hasRowid())
+                build.tableColumnToIndex(build.primaryKeyIndex(t).?, jc)
+            else
+                build.tableColumnToStorage(t, @intCast(jc)) };
+        };
 
         const label_error = aux.newLabel(p);
         const label_ok = aux.newLabel(p);
         if (col.not_null != .None) {
             // (1) NOT NULL columns may not hold NULL.
-            const jmp2 = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
+            // Not NULL; a REAL in a column is checked below.
+            const not_null: vi.TypeMaskP5 = .{ .integer = true, .float = tested == .reg, .text = true, .blob = true };
+            const jmp2 = tested.emit(v, data_cur, label_ok, p4, not_null);
             var jmp3: Addr = undefined;
-            if (p1 < 0) {
-                aux.changeP5(v, 0x0f); // INT, REAL, TEXT or BLOB
+            if (tested == .reg) {
                 jmp3 = jmp2;
             } else {
-                aux.changeP5(v, 0x0d); // INT, TEXT or BLOB
                 // OP_IsType takes a NaN stored as REAL for a REAL, but it
                 // reads as NULL: load the value to be sure.
-                _ = aux.emit(v, .Column, .{ data_cur, p3, ck.msg });
+                _ = aux.emit(v, .Column, .{ data_cur, tested.column, ck.msg });
                 update.columnDefault(v, t, jc, ck.msg);
                 jmp3 = aux.emit(v, .NotNull, .{ ck.msg, label_ok });
             }
@@ -1718,16 +1730,16 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
         }
         if (strict and do_type_check) {
             // (2) Exact types in STRICT tables.
-            const std_type_mask = [_]u16{
-                0x1f, // ANY
-                0x18, // BLOB
-                0x11, // INT
-                0x11, // INTEGER
-                0x13, // REAL
-                0x14, // TEXT
+            const T = vi.TypeMaskP5;
+            const std_type_mask = [_]T{
+                .any,
+                .{ .null = true, .blob = true },
+                .{ .null = true, .integer = true },
+                .{ .null = true, .integer = true },
+                .{ .null = true, .integer = true, .float = true },
+                .{ .null = true, .text = true },
             };
-            _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
-            aux.changeP5(v, std_type_mask[col.e_ctype.stdTypeIndex()]);
+            _ = tested.emit(v, data_cur, label_ok, p4, std_type_mask[col.e_ctype.stdTypeIndex()]);
             const msg = try build.mprintf(p, "non-%s value in %s.%s", &.{
                 .{ .str = build.std_type[col.e_ctype.stdTypeIndex()] },
                 .{ .str = t.name },
@@ -1736,18 +1748,15 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
             _ = aux.loadString(v, ck.msg, msg);
         } else if (!strict and col.affinity == int.Aff.text) {
             // (3) TEXT columns hold NULL, TEXT or BLOB.
-            _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
-            aux.changeP5(v, 0x1c); // NULL, TEXT or BLOB
+            _ = tested.emit(v, data_cur, label_ok, p4, .{ .null = true, .text = true, .blob = true });
             const msg = try build.mprintf(p, "NUMERIC value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
             _ = aux.loadString(v, ck.msg, msg);
         } else if (!strict and col.affinity >= int.Aff.numeric) {
             // (4) Numeric columns hold no TEXT that looks like a number.
-            _ = aux.emitInt(v, .IsType, .{ p1, label_ok, p3 }, p4);
-            aux.changeP5(v, 0x1b); // NULL, INT, FLOAT or BLOB
-            if (p1 >= 0) ec.codeGetColumnOfTable(v, t, data_cur, jc, ck.msg);
+            _ = tested.emit(v, data_cur, label_ok, p4, .{ .null = true, .integer = true, .float = true, .blob = true });
+            if (tested == .column) ec.codeGetColumnOfTable(v, t, data_cur, jc, ck.msg);
             _ = aux.emit4(v, .Affinity, .{ ck.msg, 1 }, .{ .z = "C" });
-            _ = aux.emitInt(v, .IsType, .{ -1, label_ok, ck.msg.int() }, p4);
-            aux.changeP5(v, 0x1c); // NULL, TEXT or BLOB
+            _ = IsTypeOf.emit(.{ .reg = ck.msg }, v, data_cur, label_ok, p4, .{ .null = true, .text = true, .blob = true });
             const msg = try build.mprintf(p, "TEXT value in %s.%s", &.{ .{ .str = t.name }, .{ .str = col.name() } });
             _ = aux.loadString(v, ck.msg, msg);
         }

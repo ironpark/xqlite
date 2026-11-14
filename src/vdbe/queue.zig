@@ -15,13 +15,14 @@
 //! a queue that never holds many rows at once (the usual counter or walk)
 //! keeps one chunk.
 //!
-//! Memory is bounded as the ephemeral table of C is by its page cache:
-//! once the chunks in memory take `limit` bytes (the size at which a
-//! sorter writes a PMA, from cache_size, sorter.maxMemory()), full tail
-//! chunks are appended to a temporary file instead, and read back one at a
-//! time when the chunks in memory before them have been read. With PRAGMA
-//! temp_store=MEMORY there is no limit, as C's ephemeral table then lives
-//! in memory too.
+//! Memory is bounded. C's ephemeral table keeps its pages in the cache of
+//! its own temporary pager, and writes the rest to a temporary file. Here,
+//! once the chunks in memory take `limit` bytes, the size at which a
+//! sorter writes a PMA (vi.spillSize(), from the cache_size of the main
+//! database), full tail chunks are appended to a temporary file instead,
+//! and read back one at a time when the chunks in memory before them have
+//! been read. With PRAGMA temp_store=MEMORY there is no limit, as C's
+//! ephemeral table then lives in memory too.
 
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
@@ -54,6 +55,12 @@ const Chunk = struct {
     fn unread(c: *const Chunk) bool {
         return c.off < c.len;
     }
+
+    /// Empty it, to be filled from its start.
+    fn reset(c: *Chunk) void {
+        c.len = 0;
+        c.off = 0;
+    }
 };
 
 pub const Queue = struct {
@@ -69,9 +76,9 @@ pub const Queue = struct {
     spare: ?*Chunk = null,
     /// The size of the buffers of `first`..`last` and `tail`.
     in_memory: usize = 0,
-    /// Above this many bytes in memory, full chunks go to the file; 0: no
-    /// limit.
-    limit: usize,
+    /// Above this many bytes in memory, full chunks go to the file; null:
+    /// no limit.
+    limit: ?usize,
     /// The temporary file of the chunks between `last` and `tail`, each a
     /// u32 length and the bytes; read from `file_read`, written at
     /// `file_end`.
@@ -82,7 +89,7 @@ pub const Queue = struct {
     /// A new empty queue.
     pub fn init(db: *int.Sqlite3) Error!*Queue {
         const q = try db.gpa.create(Queue);
-        q.* = .{ .gpa = db.gpa, .db = db, .limit = @intCast(sorter.maxMemory(db)) };
+        q.* = .{ .gpa = db.gpa, .db = db, .limit = vi.spillSize(db) };
         return q;
     }
 
@@ -111,62 +118,81 @@ pub const Queue = struct {
         std.debug.assert(q.in_memory == 0);
     }
 
-    /// Append `record` at the tail.
-    pub fn push(q: *Queue, record: []const u8) Error!void {
+    /// Append `record` at the tail. Inline, for the run loop: only a full
+    /// tail calls out.
+    pub inline fn push(q: *Queue, record: []const u8) Error!void {
         const need = len_size + record.len;
-        const t = if (q.tail) |t| if (t.buf.len - t.len >= need) t else try q.retireTail(need) else try q.retireTail(need);
+        const t = room: {
+            if (q.tail) |t| if (t.buf.len - t.len >= need) break :room t;
+            break :room try q.retireTail(need);
+        };
         std.mem.writeInt(u32, t.buf[t.len..][0..len_size], @intCast(record.len), .native);
         @memcpy(t.buf[t.len + len_size ..][0..record.len], record);
         t.len += need;
     }
 
     /// Move the record at the head into `out`, as a BLOB. Returns false if
-    /// the queue is empty.
-    pub fn pop(q: *Queue, out: *Mem) Error!bool {
+    /// the queue is empty. Inline, for the run loop: the usual record, in
+    /// the first chunk of the list or in the tail with nothing before it,
+    /// is taken here, the rest in popSlow().
+    pub inline fn pop(q: *Queue, out: *Mem) Error!bool {
+        if (q.first) |c| {
+            if (c.unread()) {
+                try take(c, out);
+                return true;
+            }
+        } else if (q.file_read == q.file_end) if (q.tail) |t| if (t.unread()) {
+            try take(t, out);
+            // All read: fill it again from its start.
+            if (!t.unread()) t.reset();
+            return true;
+        };
+        return q.popSlow(out);
+    }
+
+    /// pop() when the record is not at hand: past the chunks of the list
+    /// that are read, in the file, or none.
+    noinline fn popSlow(q: *Queue, out: *Mem) Error!bool {
+        @branchHint(.cold);
         while (q.first) |c| {
-            if (c.unread()) return take(c, out);
+            if (c.unread()) {
+                try take(c, out);
+                return true;
+            }
             q.first = c.next;
             if (q.first == null) q.last = null;
             q.recycle(c);
         }
         if (q.file_read < q.file_end) {
-            const c = try q.load();
-            return take(c, out);
+            try take(try q.load(), out);
+            return true;
         }
         const t = q.tail orelse return false;
         if (!t.unread()) return false;
-        const ok = try take(t, out);
+        try take(t, out);
         // All read: fill it again from its start.
-        if (!t.unread()) {
-            t.len = 0;
-            t.off = 0;
-        }
-        return ok;
+        if (!t.unread()) t.reset();
+        return true;
     }
 
     /// Copy the record at the read position of `c` into `out`.
-    fn take(c: *Chunk, out: *Mem) Error!bool {
+    inline fn take(c: *Chunk, out: *Mem) Error!void {
         std.debug.assert(c.unread());
         const n: usize = std.mem.readInt(u32, c.buf[c.off..][0..len_size], .native);
-        const record = c.buf[c.off + len_size ..][0..n];
-        try mem.clearAndResize(out, n);
-        @memcpy(out.z.?[0..n], record);
-        out.n = @intCast(n);
-        out.setTypeFlag(.{ .Blob = true });
+        try mem.setBlobCopy(out, c.buf[c.off + len_size ..][0..n]);
         c.off += len_size + n;
-        return true;
     }
 
     /// Make room for `need` bytes: put the tail chunk, if any, where it
     /// is read from (the list, or the file), and return the new tail.
-    fn retireTail(q: *Queue, need: usize) Error!*Chunk {
+    noinline fn retireTail(q: *Queue, need: usize) Error!*Chunk {
+        @branchHint(.cold);
         if (q.tail) |t| {
             if (!t.unread()) {
                 // Nothing in it to keep: it is empty or all read.
-                t.len = 0;
-                t.off = 0;
+                t.reset();
                 if (t.buf.len >= need) return t;
-            } else if (q.file_read == q.file_end and (q.limit == 0 or q.in_memory < q.limit)) {
+            } else if (q.file_read == q.file_end and (if (q.limit) |l| q.in_memory < l else true)) {
                 // In memory, after the list.
                 if (q.last) |l| l.next = t else q.first = t;
                 q.last = t;
@@ -175,8 +201,7 @@ pub const Queue = struct {
                 // To the file, after the chunks already there (or because
                 // there are some: the order must hold).
                 try q.spill(t);
-                t.len = 0;
-                t.off = 0;
+                t.reset();
                 if (t.buf.len >= need) return t;
             }
             if (q.tail) |old| {
@@ -207,6 +232,7 @@ pub const Queue = struct {
 
     /// Read the next chunk of the file into the list, which is empty.
     fn load(q: *Queue) Error!*Chunk {
+        @branchHint(.cold);
         std.debug.assert(q.first == null and q.file_read < q.file_end);
         const f = q.file.?;
         var hdr: [len_size]u8 = undefined;
@@ -265,25 +291,6 @@ pub const Queue = struct {
 const testing = std.testing;
 const Conn = @import("../sql/sql_test.zig").Conn;
 
-/// Run `sql` with a small cache, so that big queues spill, then with
-/// temp_store=MEMORY, where they do not: the rows must be the same.
-/// Returns the number of chunks spilled.
-fn expectSameSpilled(c: *Conn, sql: []const u8, expected: []const u8) !u64 {
-    try c.exec("PRAGMA temp_store=0");
-    const before = c.db.n_queue_spilled;
-    const spilled = try c.query(sql);
-    defer testing.allocator.free(spilled);
-    const n = c.db.n_queue_spilled - before;
-    try c.exec("PRAGMA temp_store=2");
-    const in_memory = try c.query(sql);
-    defer testing.allocator.free(in_memory);
-    try c.exec("PRAGMA temp_store=0");
-    try testing.expectEqual(before + n, c.db.n_queue_spilled);
-    try testing.expectEqualStrings(in_memory, spilled);
-    try testing.expectEqualStrings(expected, spilled);
-    return n;
-}
-
 test "queue: rows come out in the order they went in" {
     var c: Conn = undefined;
     try c.open();
@@ -324,14 +331,14 @@ test "queue: a big frontier spills to a file" {
     try c.exec("PRAGMA page_size=512; PRAGMA cache_size=10");
     try c.exec("CREATE TABLE t(x)");
     // A frontier of 2^17 rows of ~60 bytes, in memory at once.
-    try testing.expect(try expectSameSpilled(&c,
+    try testing.expect(try c.expectSameSpilled(.n_queue_spilled,
         \\WITH RECURSIVE t(n, d, pad) AS (SELECT 1, 0, printf('%050d', 0) UNION ALL
         \\  SELECT n*2+k, d+1, printf('%050d', n*2+k) FROM t, (SELECT 0 AS k UNION ALL SELECT 1) WHERE d<17)
         \\SELECT count(*), sum(n), sum(n*(n%7)), min(pad), max(pad) FROM t
     , "262143|34359607296|103079084031|00000000000000000000000000000000000000000000000000|00000000000000000000000000000000000000000000262143\n") > 0);
     // The order of the rows, and a queue filled and emptied several
     // times over the spill.
-    try testing.expect(try expectSameSpilled(&c,
+    try testing.expect(try c.expectSameSpilled(.n_queue_spilled,
         \\WITH RECURSIVE t(n, d, pad) AS (SELECT 1, 0, zeroblob(40) UNION ALL
         \\  SELECT n*2+k, d+1, zeroblob(40) FROM t, (SELECT 0 AS k UNION ALL SELECT 1) WHERE d<15)
         \\SELECT count(*), sum(n = rn) FROM (SELECT n, row_number() OVER () AS rn FROM t)

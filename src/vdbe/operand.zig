@@ -1,9 +1,18 @@
 //! The operands of VDBE instructions as types of their own: a register,
 //! a cursor, a label and an address are all numbers in the program, but
-//! the code generator should not be able to pass one for another.
-//! `OP.kinds()` (opcodes.zig) says what each operand of each opcode is,
-//! and `aux.emit()` checks its arguments against it when the statement
-//! is compiled.
+//! code should not be able to take one for another. `OP.kinds()`
+//! (opcodes.zig) says what P1, P2 and P3 of each opcode are, and both
+//! ends are checked against it at compile time:
+//!
+//! - `aux.emit()` and its family check the arguments the code generator
+//!   passes for an opcode.
+//! - A handler of the run loop (exec.zig) takes its instruction with P1,
+//!   P2 and P3 of these types (and P5 of the type of the opcode's P5
+//!   family, p5.zig), and must take those of every opcode it runs. It
+//!   reaches registers and cursors through them (`e.reg(op.p3)`,
+//!   `e.regRange(op.p2, n)`, `e.csr(op.p1)`), and reads another
+//!   instruction as its opcode's (`e.opAt(.SeekGE, e.pc + 1)`), so that
+//!   reading a cursor where the opcode has a register does not compile.
 //!
 //! `.from()` and `.int()` convert where the number is all there is: the
 //! cursor and register fields of the parse tree (Expr.i_table,

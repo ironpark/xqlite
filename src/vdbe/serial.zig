@@ -387,6 +387,13 @@ pub fn recordCompare(key1: []const u8, r: *UnpackedRecord) CompareError!i32 {
     return recordCompareWithSkip(key1, r, false);
 }
 
+/// recordCompare() where a corrupt record compares equal: C ignores the
+/// comparator's errCode in sqlite3VdbeIdxKeyCompare() and
+/// sqlite3VdbeSorterCompare().
+pub fn recordCompareIgnoringCorrupt(key1: []const u8, r: *UnpackedRecord) i32 {
+    return recordCompare(key1, r) catch 0;
+}
+
 /// Port of vdbeRecordCompareInt(): when the first field of `r` is an
 /// integer and the header size fits in one byte.
 fn recordCompareInt(key1: []const u8, r: *UnpackedRecord) CompareError!i32 {
@@ -510,8 +517,7 @@ pub fn idxRowid(db: *int.Sqlite3, cur: *btree.Cursor) (mem.Error || btree.Error)
 }
 
 /// Port of sqlite3VdbeIdxKeyCompare(): compare the index entry under the
-/// cursor (ignoring its rowid) with `r`. A corrupt entry compares equal:
-/// C ignores the comparator's errCode here.
+/// cursor (ignoring its rowid) with `r`. A corrupt entry compares equal.
 pub fn idxKeyCompare(db: *int.Sqlite3, c: *VdbeCursor, r: *UnpackedRecord) (mem.Error || btree.Error)!i32 {
     const cur = c.kind.btree.cursor;
     const n_cell_key = cur.payloadSize();
@@ -519,7 +525,7 @@ pub fn idxKeyCompare(db: *int.Sqlite3, c: *VdbeCursor, r: *UnpackedRecord) (mem.
     var m: Mem = .{ .db = db, .flags = .{} };
     try mem.fromBtreeZeroOffset(cur, n_cell_key, &m);
     defer mem.releaseMalloc(&m);
-    return recordCompareWithSkip(m.bytes(), r, false) catch 0;
+    return recordCompareIgnoringCorrupt(m.bytes(), r);
 }
 
 /// Port of sqlite3VdbeFinishMoveto(): carry out a deferred seek.
@@ -564,9 +570,10 @@ pub const IndexKeyCtx = struct {
     r: *UnpackedRecord,
     cmp: RecordCompare,
 
-    /// Calls `cmp` through the function pointer.
+    /// The order of the stored key relative to the search key, from
+    /// `cmp` called through the function pointer.
     pub fn compare(self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
-        return order(try self.cmp(stored, self.r));
+        return std.math.order(try self.cmp(stored, self.r), 0);
     }
 
     /// compare() with the comparator fixed, so that the b-tree's call
@@ -574,17 +581,9 @@ pub const IndexKeyCtx = struct {
     fn compareWith(comptime cmp: RecordCompare) fn (self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
         return struct {
             fn f(self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
-                return order(try @call(.always_inline, cmp, .{ stored, self.r }));
+                return std.math.order(try @call(.always_inline, cmp, .{ stored, self.r }), 0);
             }
         }.f;
-    }
-
-    /// The b-tree wants the order of the stored key relative to the
-    /// search key.
-    inline fn order(c: i32) std.math.Order {
-        if (c < 0) return .lt;
-        if (c > 0) return .gt;
-        return .eq;
     }
 
     pub fn indexKey(self: *const IndexKeyCtx) btree.IndexKey {

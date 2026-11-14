@@ -11,6 +11,7 @@
 //! free number.
 
 const std = @import("std");
+const flags = @import("xqlite_base").flags;
 const TK = @import("../sql/tk.zig").TK;
 const Kind = @import("operand.zig").Kind;
 const P5Family = @import("p5.zig").Family;
@@ -212,6 +213,10 @@ pub const OP = enum(u8) {
     OpenQueue = 191,
     QueuePush = 192,
     QueuePop = 193,
+    // Not in SQLite: what C's OP_OpenWrite with OPFLAG_P2ISREG and
+    // OP_IsType with P1 -1 are.
+    OpenWriteReg = 194,
+    IsTypeReg = 195,
 
     /// The number of the opcode (u8).
     pub inline fn int(op: OP) u8 {
@@ -287,6 +292,12 @@ pub const Props = packed struct(u8) {
     ncycle: bool = false,
     /// The opcode may jump to P2 while P2 is still 0 (OPFLG_JUMP0).
     jump0: bool = false,
+
+    pub const int = flags.Ops(@This()).int;
+
+    comptime {
+        flags.checkBits(Props, .{ .jump = 0x01, .in1 = 0x02, .in2 = 0x04, .in3 = 0x08, .out2 = 0x10, .out3 = 0x20, .ncycle = 0x40, .jump0 = 0x80 });
+    }
 };
 
 /// What makes a statement one that reads or writes the database
@@ -303,16 +314,13 @@ pub const Access = enum {
 
 /// What is known of an opcode.
 pub const Info = struct {
-    /// What P1, P2 and P3 are (operand.zig). An operand that is a
-    /// register only in some uses of the opcode (OP_Clear's P3,
-    /// OP_OpenWrite's P2 with OpenP5.p2_is_reg) is `.int`.
+    /// What P1, P2 and P3 are (operand.zig).
     p: [3]Kind,
     /// The properties; `jump` is not written in `table` but follows from
     /// `p`.
     props: Props = .{},
-    /// The opcode opens a cursor on a b-tree of the schema, which
-    /// bytecode()'s tables_used lists (OP_OpenWrite only without
-    /// OpenP5.p2_is_reg).
+    /// The opcode opens a cursor on a b-tree of the schema whose root page
+    /// is P2, which bytecode()'s tables_used lists.
     opens_table: bool = false,
     access: Access = .none,
     /// What P5 is (p5.zig).
@@ -355,7 +363,8 @@ const table: std.enums.EnumFieldStruct(OP, Info, null) = blk: {
         .MaxPgcnt = .{ .p = .{ i, r, i }, .props = .{ .out2 = true } },
         .Destroy = .{ .p = .{ i, r, i }, .props = .{ .out2 = true } },
         .CreateBtree = .{ .p = .{ i, r, i }, .props = .{ .out2 = true } },
-        .Clear = .{ .p = .{ i, i, i } },
+        // P3, if any, is a register that counts the rows cleared.
+        .Clear = .{ .p = .{ i, i, r }, .p5 = .clear },
         .SqlExec = .{ .p = .{ i, i, i } },
         .ParseSchema = .{ .p = .{ i, i, i } },
         .LoadAnalysis = .{ .p = .{ i, i, i } },
@@ -466,8 +475,8 @@ const table: std.enums.EnumFieldStruct(OP, Info, null) = blk: {
         .Ge = .{ .p = .{ r, j, r }, .props = .{ .in1 = true, .in3 = true }, .p5 = .compare_jump },
 
         // Functions and aggregates.
-        .PureFunc = .{ .p = .{ i, r, r } },
-        .Function = .{ .p = .{ i, r, r } },
+        .PureFunc = .{ .p = .{ i, r, r }, .p5 = .func },
+        .Function = .{ .p = .{ i, r, r }, .p5 = .func },
         .AggInverse = .{ .p = .{ i, r, r } },
         .AggStep = .{ .p = .{ i, r, r } },
         .AggStep1 = .{ .p = .{ i, r, r } },
@@ -479,6 +488,9 @@ const table: std.enums.EnumFieldStruct(OP, Info, null) = blk: {
         // Opening and closing cursors.
         .OpenRead = .{ .p = .{ c, i, i }, .props = .{ .ncycle = true }, .opens_table = true, .p5 = .open },
         .OpenWrite = .{ .p = .{ c, i, i }, .opens_table = true, .p5 = .open },
+        // OP_OpenWrite on the root page in register P2: a b-tree just
+        // created (not in C, where it is OP_OpenWrite with OPFLAG_P2ISREG).
+        .OpenWriteReg = .{ .p = .{ c, r, i }, .p5 = .open },
         .ReopenIdx = .{ .p = .{ c, i, i }, .props = .{ .ncycle = true }, .opens_table = true, .p5 = .open },
         .SorterOpen = .{ .p = .{ c, i, i } },
         // P3, if any, is a register that is set to NULL.
@@ -534,7 +546,12 @@ const table: std.enums.EnumFieldStruct(OP, Info, null) = blk: {
         .Prev = .{ .p = .{ c, j, i }, .props = .{ .ncycle = true }, .p5 = .counter },
         .Next = .{ .p = .{ c, j, i }, .props = .{ .ncycle = true }, .p5 = .counter },
         .SeekScan = .{ .p = .{ i, i, i }, .props = .{ .ncycle = true } },
-        .IsType = .{ .p = .{ i, j, i } },
+        // Jump if the type of column P3 of cursor P1 (or of P4, the type
+        // of its default, if the record has not that many) is one of
+        // P5. OP_IsTypeReg (not in C, where it is OP_IsType with P1 -1):
+        // of the value in register P3.
+        .IsType = .{ .p = .{ c, j, i }, .p5 = .type_mask },
+        .IsTypeReg = .{ .p = .{ i, j, r }, .p5 = .type_mask },
 
         // Reading and writing rows.
         .Column = .{ .p = .{ c, i, r }, .props = .{ .ncycle = true }, .p5 = .column },
@@ -633,11 +650,10 @@ comptime {
     }
 }
 
-test "the properties are OPFLG_* of C" {
-    // Bits as sqlite3OpcodeProperty[] has them.
-    try std.testing.expectEqual(@as(u8, 0xc9), @as(u8, @bitCast(OP.SeekLT.props())));
-    try std.testing.expectEqual(@as(u8, 0x26), @as(u8, @bitCast(OP.Add.props())));
-    try std.testing.expectEqual(@as(u8, 0x83), @as(u8, @bitCast(OP.Yield.props())));
-    try std.testing.expectEqual(@as(u8, 0x12), @as(u8, @bitCast(OP.SetSubtype.props())));
+test "the properties are those of sqlite3OpcodeProperty[]" {
+    try std.testing.expectEqual(@as(u8, 0xc9), OP.SeekLT.props().int());
+    try std.testing.expectEqual(@as(u8, 0x26), OP.Add.props().int());
+    try std.testing.expectEqual(@as(u8, 0x83), OP.Yield.props().int());
+    try std.testing.expectEqual(@as(u8, 0x12), OP.SetSubtype.props().int());
     try std.testing.expectEqualStrings("SeekLT", OP.SeekLT.name());
 }

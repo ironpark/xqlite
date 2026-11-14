@@ -289,8 +289,7 @@ pub fn autoincrementBegin(p: *Parse) void {
         _ = aux.emit(v, .Null, .{ 0, ctr, ctr.at(2) });
         _ = aux.emit(v, .Rewind, .{ seq_cur, not_found });
         const loop = aux.emit(v, .Column, .{ seq_cur, 0, ctr });
-        _ = aux.emit(v, .Ne, .{ ctr.at(-1), next, ctr });
-        aux.changeP5(v, vi.CmpP5{ .jump_if_null = true });
+        _ = aux.emit5(v, .Ne, .{ ctr.at(-1), next, ctr }, .{ .jump_if_null = true });
         _ = aux.emit(v, .Rowid, .{ seq_cur, ctr.at(1) });
         _ = aux.emit(v, .Column, .{ seq_cur, 1, ctr });
         _ = aux.emit(v, .AddImm, .{ctr});
@@ -329,8 +328,7 @@ pub fn autoincrementEnd(p: *Parse) void {
         _ = aux.emit(v, .NewRowid, .{ seq_cur, ctr.at(1) });
         aux.place(v, has_rowid);
         _ = aux.emit(v, .MakeRecord, .{ ctr.at(-1), 2, i_rec });
-        _ = aux.emit(v, .Insert, .{ seq_cur, i_rec, ctr.at(1) });
-        aux.changeP5(v, vi.InsertP5{ .append = true });
+        _ = aux.emit5(v, .Insert, .{ seq_cur, i_rec, ctr.at(1) }, .{ .append = true });
         _ = aux.emit(v, .Close, .{seq_cur});
         expr_mod.releaseTempReg(p, i_rec);
     }
@@ -365,14 +363,14 @@ fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void 
 pub fn codeStore(p: *Parse, st: typing.Conv, val: Reg) void {
     const tmp = expr_mod.getTempReg(p);
     if (st.n_consts == 0) {
-        _ = aux.addFunctionCall(p, 0, val, tmp, 1, st.def, 0);
+        _ = aux.addFunctionCall(p, 0, val, tmp, 1, st.def, .{});
     } else {
         // The value and the constants after it.
         const n: i32 = 1 + @as(i32, st.n_consts);
         const base = expr_mod.getTempRange(p, n);
         _ = aux.emit(p.vdbe.?, .Copy, .{ val, base });
         for (st.consts[0..st.n_consts], 0..) |c, i| _ = aux.emit(p.vdbe.?, .Integer, .{ c, base.at(1 + i) });
-        _ = aux.addFunctionCall(p, 0, base, tmp, n, st.def, 0);
+        _ = aux.addFunctionCall(p, 0, base, tmp, n, st.def, .{});
         expr_mod.releaseTempRange(p, base, n);
     }
     _ = aux.emit(p.vdbe.?, .Move, .{ tmp, val, 1 });
@@ -886,8 +884,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
 
         if (t.isVirtual()) {
             vtab.makeWritable(p, t);
-            _ = aux.emit4(v, .VUpdate, .{ 1, t.cols.len + 2, ins_reg }, build.vtabP4(db, t));
-            aux.changeP5(v, (if (on_error == OE.Default) OE.Abort else on_error).int());
+            _ = aux.emit45(v, .VUpdate, .{ 1, t.cols.len + 2, ins_reg }, build.vtabP4(db, t), (if (on_error == OE.Default) OE.Abort else on_error).int());
             main_mod.mayAbort(p);
         } else {
             var is_replace = false;
@@ -1116,9 +1113,8 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         else
             .{ .nchange = true, .last_rowid = true, .append = true, .preformat = true };
         _ = aux.emit(v, .RowCell, .{ dest_cur, src_cur, rowid });
-        _ = aux.emit(v, .Insert, .{ dest_cur, data, rowid });
+        _ = aux.emit5(v, .Insert, .{ dest_cur, data, rowid }, ins_flags);
         if (!vacuum) aux.appendP4(v, .{ .table = dest });
-        aux.changeP5(v, ins_flags);
         _ = aux.emit(v, .Next, .{ src_cur, addr1 });
         _ = aux.emit(v, .Close, .{ src_cur, 0 });
         _ = aux.emit(v, .Close, .{ dest_cur, 0 });
@@ -1135,9 +1131,8 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         } else unreachable;
         _ = aux.emit(v, .OpenRead, .{ src_cur, src_idx.tnum, i_db_src });
         aux.setP4KeyInfo(p, src_idx);
-        _ = aux.emit(v, .OpenWrite, .{ dest_cur, dest_idx.tnum, i_db_dest });
+        _ = aux.emit5(v, .OpenWrite, .{ dest_cur, dest_idx.tnum, i_db_dest }, .{ .bulk_csr = true });
         aux.setP4KeyInfo(p, dest_idx);
-        aux.changeP5(v, vi.OpenP5{ .bulk_csr = true });
         const addr1 = aux.emit(v, .Rewind, .{ src_cur, 0 });
         if (vacuum) {
             // The destination is empty, and if every column collates with
@@ -1159,9 +1154,8 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
         if (!idx_ins_flags.preformat) {
             _ = aux.emit(v, .RowData, .{ src_cur, data, 1 });
         }
-        _ = aux.emit(v, .IdxInsert, .{ dest_cur, data });
         idx_ins_flags.append = true;
-        aux.changeP5(v, idx_ins_flags);
+        _ = aux.emit5(v, .IdxInsert, .{ dest_cur, data }, idx_ins_flags);
         _ = aux.emit(v, .Next, .{ src_cur, addr1.plus(1) });
         aux.landHere(v, addr1);
         _ = aux.emit(v, .Close, .{ src_cur, 0 });
@@ -1305,8 +1299,7 @@ fn generateConstraintChecksImpl(
                         }
                         if (on_error == OE.Abort) main_mod.mayAbort(p);
                         const msg = try std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, c.name() });
-                        _ = aux.emitStr(v, .HaltIfNull, .{ RC.CONSTRAINT_NOTNULL, on_error.int(), col_reg }, msg);
-                        aux.changeP5(v, vi.HaltP5{ .constraint = .not_null });
+                        _ = aux.emitStr5(v, .HaltIfNull, .{ RC.CONSTRAINT_NOTNULL, on_error.int(), col_reg }, msg, .{ .constraint = .not_null });
                     },
                     else => {
                         _ = aux.emit(v, .IsNull, .{ col_reg, ignore });
@@ -1483,8 +1476,7 @@ fn generateConstraintChecksImpl(
 
         // An UPDATE need not check an unchanged rowid.
         if (is_update) {
-            _ = aux.emit(v, .Eq, .{ new_data, rowid_ok, old_data });
-            aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
+            _ = aux.emit5(v, .Eq, .{ new_data, rowid_ok, old_data }, .{ .null_eq = true, .jump_if_null = true });
         }
 
         _ = aux.emit(v, .NotExists, .{ data_cur, rowid_ok, new_data });
@@ -1604,8 +1596,7 @@ fn generateConstraintChecksImpl(
                 _ = aux.emit(v, .IdxRowid, .{ this_cur, other_key });
                 // No conflict with the row being updated.
                 if (is_update) {
-                    _ = aux.emit(v, .Eq, .{ other_key, unique_ok, old_data });
-                    aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
+                    _ = aux.emit5(v, .Eq, .{ other_key, unique_ok, old_data }, .{ .null_eq = true, .jump_if_null = true });
                 }
             } else {
                 const k = pk.?;
@@ -1700,8 +1691,7 @@ fn generateConstraintChecksImpl(
         _ = aux.emit(v, .IfNot, .{ trig_cnt, lbl_recheck_ok.? });
         if (pk == null) {
             if (is_update) {
-                _ = aux.emit(v, .Eq, .{ new_data, addr_recheck.?, old_data });
-                aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
+                _ = aux.emit5(v, .Eq, .{ new_data, addr_recheck.?, old_data }, .{ .null_eq = true, .jump_if_null = true });
             }
             _ = aux.emit(v, .NotExists, .{ data_cur, addr_recheck.?, new_data });
             build.rowidConstraint(p, OE.Abort, t, new_data);
@@ -1727,7 +1717,7 @@ const IndexListTerm = struct { idx: *Index, ix: usize };
 /// an INSERT, else `is_update` (and `save_position`).
 pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor, new_data: Reg, reg_idx: []const Reg, update_flags: vi.InsertP5, append_bias: bool, use_seek_result: bool) void {
     const is_update = update_flags.is_update;
-    std.debug.assert(vi.p5.int(update_flags) == vi.p5.int(vi.InsertP5{ .is_update = is_update, .save_position = update_flags.save_position }));
+    std.debug.assert(update_flags.without(.{ .is_update = true, .save_position = true }).isEmpty());
     const v = p.vdbe.?;
     var i: usize = 0;
     var idx_opt = t.index;
@@ -1747,8 +1737,7 @@ pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor
             pik_flags.nchange = true;
             pik_flags.save_position = update_flags.save_position;
         }
-        _ = aux.emitInt(v, .IdxInsert, .{ idx_cur.at(i), rec, rec.at(1) }, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
-        aux.changeP5(v, pik_flags);
+        _ = aux.emit45(v, .IdxInsert, .{ idx_cur.at(i), rec, rec.at(1) }, .{ .int32 = if (idx.uniq_not_null) idx.n_key_col else idx.n_column }, pik_flags);
     }
     if (!t.hasRowid()) return;
     var pik_flags: vi.InsertP5 = .{ .append = append_bias, .use_seek_result = use_seek_result };
@@ -1761,9 +1750,8 @@ pub fn completeInsertion(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: Cursor
             pik_flags.last_rowid = true;
         }
     }
-    _ = aux.emit(v, .Insert, .{ data_cur, reg_idx[i], new_data });
+    _ = aux.emit5(v, .Insert, .{ data_cur, reg_idx[i], new_data }, pik_flags);
     if (p.nested == 0) aux.appendP4(v, .{ .table = t });
-    aux.changeP5(v, pik_flags);
 }
 
 /// The cursors openTableAndIndices() gives a virtual table, which opens

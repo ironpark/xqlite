@@ -16,53 +16,43 @@ const btree = @import("xqlite_storage").btree;
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const OpOf = vi.OpOf;
-const OpWithP5 = vi.OpWithP5;
+const OpFor = vi.OpFor;
 const InsertP5 = vi.InsertP5;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
-pub const handlers = .{
-    .{ .ops = .{.Count}, .f = opCount },
-    .{ .ops = .{.NewRowid}, .f = opNewRowid, .call = .always_inline },
-    .{ .ops = .{.Insert}, .f = opInsert, .call = .always_inline },
-    .{ .ops = .{.RowCell}, .f = opRowCell },
-    .{ .ops = .{.Delete}, .f = opDelete },
-    .{ .ops = .{.ResetCount}, .f = opResetCount },
-    .{ .ops = .{.RowData}, .f = opRowData, .call = .always_inline },
-    .{ .ops = .{.IdxInsert}, .f = opIdxInsert },
-    .{ .ops = .{.IdxDelete}, .f = opIdxDelete },
-    .{ .ops = .{.SorterCompare}, .f = opSorterCompare },
-    .{ .ops = .{.SorterData}, .f = opSorterData },
-    .{ .ops = .{.SorterInsert}, .f = opSorterInsert },
-    .{ .ops = .{.ResetSorter}, .f = opResetSorter },
-    .{ .ops = .{.QueuePush}, .f = opQueuePush },
-    .{ .ops = .{.QueuePop}, .f = opQueuePop },
-};
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
+pub const handlers = .{};
+
+pub const inlined = .{ .NewRowid, .Insert, .RowData, .QueuePush, .QueuePop };
 
 /// The largest rowid (MAX_ROWID).
 const max_rowid: i64 = std.math.maxInt(i64);
 
-/// The b-tree cursor's seek result for Cursor.insert, if
-/// `use_seek_result` says to use it. C passes seekResult, where 0 is
-/// both "no seek" and "on the entry": the b-tree then seeks itself, so
-/// .eq is passed as null.
-fn insertSeekResult(p5: InsertP5, b: *const vi.OnBtree) ?std.math.Order {
-    if (!p5.use_seek_result) return null;
-    const order = b.seek_result orelse return null;
-    return if (order == .eq) null else order;
+/// The options of the insert of OP_Insert and OP_IdxInsert into `b`.
+/// With `use_seek_result`, the result of the cursor's last seek: C passes
+/// seekResult, where 0 is both "no seek" and "on the entry": the b-tree
+/// then seeks itself, so .eq is passed as null.
+fn insertOptions(p5: InsertP5, b: *const vi.OnBtree) btree.Cursor.InsertOptions {
+    const seek_result = if (p5.use_seek_result) b.seek_result else null;
+    return .{
+        .append = p5.append,
+        .save_position = p5.save_position,
+        .seek_result = if (seek_result == .eq) null else seek_result,
+        .preformat = p5.preformat,
+    };
 }
 
-pub fn opCount(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
+pub fn opCount(e: *Exec, op: *OpFor(.Count)) Error!Flow {
     const cur = e.csr(op.p1).kind.btree.cursor;
     const n = try if (op.p3 != 0) cur.rowCountEst() else cur.count();
     e.out2Prerelease(op).u = .{ .i = n };
     return .next_check;
 }
 
-pub fn opNewRowid(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
+pub fn opNewRowid(e: *Exec, op: *OpFor(.NewRowid)) Error!Flow {
     const out = e.out2Prerelease(op);
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
@@ -110,7 +100,7 @@ pub fn opNewRowid(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
     return .next;
 }
 
-pub fn opInsert(e: *Exec, op: *OpWithP5(.{ .cursor, .reg, .reg }, InsertP5)) Error!Flow {
+pub fn opInsert(e: *Exec, op: *OpFor(.Insert)) Error!Flow {
     const v = e.v;
     const data = e.reg(op.p2);
     const c = e.csr(op.p1);
@@ -126,16 +116,10 @@ pub fn opInsert(e: *Exec, op: *OpWithP5(.{ .cursor, .reg, .reg }, InsertP5)) Err
         .data = data.bytes(),
         .n_zero = if (data.flags.Zero) @intCast(data.u.n_zero) else 0,
     };
-    const seek_result = insertSeekResult(op.p5, b);
     // Whether the insert fails or not (the b-tree does not read them).
     b.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
-    try b.cursor.insert(x, .{
-        .append = op.p5.append,
-        .save_position = op.p5.save_position,
-        .seek_result = seek_result,
-        .preformat = op.p5.preformat,
-    });
+    try b.cursor.insert(x, insertOptions(op.p5, b));
     if (e.db.update_hook) |f| if (op.p4type == .table) {
         const op_code: i32 = if (op.p5.is_update) update_op else insert_op;
         f(e.db.update_arg, op_code, e.db.dbs.items[@intCast(c.i_db)].name, op.p4As(.table).name, rowid);
@@ -152,7 +136,7 @@ const delete_op = 9;
 /// OP_RowCell: build the cell for the entry of cursor P2 in cursor P1,
 /// with the rowid in register P3 for tables, for the OP_Insert or
 /// OP_IdxInsert with InsertP5.preformat that follows.
-pub fn opRowCell(e: *Exec, op: *OpOf(.{ .cursor, .cursor, .reg })) Error!Flow {
+pub fn opRowCell(e: *Exec, op: *OpFor(.RowCell)) Error!Flow {
     if (std.debug.runtime_safety) {
         const next = e.ops[e.pc + 1];
         std.debug.assert(next.opcode == .Insert or next.opcode == .IdxInsert);
@@ -165,7 +149,7 @@ pub fn opRowCell(e: *Exec, op: *OpOf(.{ .cursor, .cursor, .reg })) Error!Flow {
     return .next;
 }
 
-pub fn opDelete(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, vi.DeleteP5)) Error!Flow {
+pub fn opDelete(e: *Exec, op: *OpFor(.Delete)) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
@@ -188,14 +172,14 @@ pub fn opDelete(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, vi.DeleteP5)) 
     return .next;
 }
 
-pub fn opResetCount(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
+pub fn opResetCount(e: *Exec, op: *OpFor(.ResetCount)) Flow {
     _ = op;
     aux.setChanges(e.db, e.v.n_change);
     e.v.n_change = 0;
     return .next;
 }
 
-pub fn opRowData(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
+pub fn opRowData(e: *Exec, op: *OpFor(.RowData)) Error!Flow {
     const out = e.out2Prerelease(op);
     const c = e.csr(op.p1);
     const cur = c.kind.btree.cursor;
@@ -206,7 +190,7 @@ pub fn opRowData(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opIdxInsert(e: *Exec, op: *OpWithP5(.{ .cursor, .reg, .reg }, InsertP5)) Error!Flow {
+pub fn opIdxInsert(e: *Exec, op: *OpFor(.IdxInsert)) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
@@ -228,16 +212,11 @@ pub fn opIdxInsert(e: *Exec, op: *OpWithP5(.{ .cursor, .reg, .reg }, InsertP5)) 
     }
     // Whether the insert fails or not (the b-tree does not read it).
     c.cache_status = vi.cache_stale;
-    try b.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
-        .append = op.p5.append,
-        .save_position = op.p5.save_position,
-        .seek_result = insertSeekResult(op.p5, b),
-        .preformat = op.p5.preformat,
-    });
+    try b.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, insertOptions(op.p5, b));
     return .next;
 }
 
-pub fn opIdxDelete(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
+pub fn opIdxDelete(e: *Exec, op: *OpFor(.IdxDelete)) Error!Flow {
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
     const cur = b.cursor;
@@ -285,31 +264,28 @@ pub fn opIdxDelete(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
 
 // ================================================================ sorters
 
-pub fn opSorterCompare(e: *Exec, op: *OpOf(.{ .cursor, .addr, .reg })) Error!Flow {
-    const c = e.csr(op.p1);
-    const res = try sorter.compare(c, e.reg(op.p3), op.p4As(.int32));
+pub fn opSorterCompare(e: *Exec, op: *OpFor(.SorterCompare)) Error!Flow {
+    const res = try sorter.compare(e.csr(op.p1).kind.sorter, e.reg(op.p3), op.p4As(.int32));
     return if (res != 0) .jump_p2 else .next;
 }
 
-pub fn opSorterData(e: *Exec, op: *OpOf(.{ .cursor, .reg, .cursor })) Error!Flow {
-    const c = e.csr(op.p1);
-    try sorter.rowkey(c, e.reg(op.p2));
+pub fn opSorterData(e: *Exec, op: *OpFor(.SorterData)) Error!Flow {
+    try sorter.rowkey(e.csr(op.p1).kind.sorter, e.reg(op.p2));
     e.csr(op.p3).cache_status = vi.cache_stale;
     return .next;
 }
 
-pub fn opSorterInsert(e: *Exec, op: *OpOf(.{ .cursor, .reg, .reg })) Error!Flow {
-    const c = e.csr(op.p1);
+pub fn opSorterInsert(e: *Exec, op: *OpFor(.SorterInsert)) Error!Flow {
     const in2 = e.reg(op.p2);
     if (in2.flags.Zero) try mem.expandBlob(in2);
-    try sorter.write(c, in2);
+    try sorter.write(e.csr(op.p1).kind.sorter, in2);
     return .next;
 }
 
-pub fn opResetSorter(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+pub fn opResetSorter(e: *Exec, op: *OpFor(.ResetSorter)) Error!Flow {
     const c = e.csr(op.p1);
     switch (c.kind) {
-        .sorter => sorter.reset(c),
+        .sorter => |s| sorter.reset(s),
         else => {
             const b = &c.kind.btree;
             _ = try b.cursor.bt.clearTable(b.pgno_root);
@@ -319,7 +295,7 @@ pub fn opResetSorter(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
 }
 
 /// OP_QueuePush (not in C): append the record in register P2 to queue P1.
-pub fn opQueuePush(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
+pub fn opQueuePush(e: *Exec, op: *OpFor(.QueuePush)) Error!Flow {
     const q = e.csr(op.p1).kind.queue;
     const in2 = e.reg(op.p2);
     std.debug.assert(in2.flags.Blob);
@@ -331,7 +307,7 @@ pub fn opQueuePush(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
 /// OP_QueuePop (not in C): move the oldest record of queue P1 into the
 /// register of pseudo cursor P3, whose column cache it invalidates (as
 /// OP_NullRow and OP_RowData did), or jump to P2 if the queue is empty.
-pub fn opQueuePop(e: *Exec, op: *OpOf(.{ .cursor, .jump, .cursor })) Error!Flow {
+pub fn opQueuePop(e: *Exec, op: *OpFor(.QueuePop)) Error!Flow {
     const q = e.csr(op.p1).kind.queue;
     const c = e.csr(op.p3);
     const record = c.kind.pseudo;

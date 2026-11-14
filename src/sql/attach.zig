@@ -111,7 +111,7 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     // As in sqlite3BtreeOpen(): ":memory:", mode=memory, or "" with
     // temp_store=MEMORY is an in-memory database.
     const is_memdb = flags.memory or std.mem.eql(u8, path_name, ":memory:") or
-        (path_name.len == 0 and @import("../vdbe/sorter.zig").tempInMemory(db));
+        (path_name.len == 0 and @import("../vdbe/vdbe_int.zig").tempInMemory(db));
     const path: ?[]const u8 = if (is_memdb or path_name.len == 0) null else path_name;
     // The URI's own vfs=, which the registry of the caller (the C ABI)
     // resolves; otherwise the connection's VFS.
@@ -337,7 +337,7 @@ fn codeAttach(p: *Parse, typ: AuthCode, func: *const FuncDef, auth_arg: ?*Expr, 
     expr_code.exprCode(p, dbname, reg_args.at(1));
     expr_code.exprCode(p, key, reg_args.at(2));
     if (v) |vm| {
-        _ = aux.addFunctionCall(p, 0, reg_args.at(3 - func.n_arg), reg_args.at(3), func.n_arg, func, 0);
+        _ = aux.addFunctionCall(p, 0, reg_args.at(3 - func.n_arg), reg_args.at(3), func.n_arg, func, .{});
         // ATTACH expires only this statement, DETACH all of them.
         _ = aux.emit(vm, .Expire, .{typ == .attach});
     }

@@ -12,50 +12,36 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const Op = vi.Op;
-const OpOf = vi.OpOf;
+const OpFor = vi.OpFor;
 const MEM = vi.MEM;
 const OP = vi.OP;
 const ENC = vi.ENC;
 const RC = int.RC;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
 pub const handlers = .{
-    .{ .ops = .{.Integer}, .f = opInteger, .call = .always_inline },
-    .{ .ops = .{.Int64}, .f = opInt64 },
-    .{ .ops = .{.Real}, .f = opReal },
-    .{ .ops = .{.String8}, .f = opString8 },
-    .{ .ops = .{.String}, .f = opString },
     .{ .ops = .{ .BeginSubrtn, .Null }, .f = opNull },
-    .{ .ops = .{.SoftNull}, .f = opSoftNull },
-    .{ .ops = .{.Blob}, .f = opBlob },
-    .{ .ops = .{.Variable}, .f = opVariable },
-    .{ .ops = .{.Move}, .f = opMove },
-    .{ .ops = .{.Copy}, .f = opCopy, .call = .always_inline },
-    .{ .ops = .{.SCopy}, .f = opSCopy, .call = .always_inline },
-    .{ .ops = .{.IntCopy}, .f = opIntCopy },
-    .{ .ops = .{.FkCheck}, .f = opFkCheck },
-    .{ .ops = .{.ResultRow}, .f = opResultRow, .call = .always_inline },
-    .{ .ops = .{.ClrSubtype}, .f = opClrSubtype },
-    .{ .ops = .{.GetSubtype}, .f = opGetSubtype },
-    .{ .ops = .{.SetSubtype}, .f = opSetSubtype },
 };
+
+pub const inlined = .{ .Integer, .Copy, .SCopy, .ResultRow };
 
 /// INT32_TO_64(): P1 is the low half, P3 the high half.
 fn int32To64(lo: i32, hi: i32) i64 {
     return @bitCast(@as(u64, @as(u32, @bitCast(hi))) << 32 | @as(u32, @bitCast(lo)));
 }
 
-pub fn opInteger(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
+pub fn opInteger(e: *Exec, op: *OpFor(.Integer)) Flow {
     e.out2Prerelease(op).u = .{ .i = op.p1 };
     return .next;
 }
 
-pub fn opInt64(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
+pub fn opInt64(e: *Exec, op: *OpFor(.Int64)) Flow {
     e.out2Prerelease(op).u = .{ .i = int32To64(op.p1, op.p3) };
     return .next;
 }
 
-pub fn opReal(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
+pub fn opReal(e: *Exec, op: *OpFor(.Real)) Flow {
     const out = e.out2Prerelease(op);
     out.flags = .{ .Real = true };
     out.u = .{ .r = @bitCast(int32To64(op.p1, op.p3)) };
@@ -65,7 +51,7 @@ pub fn opReal(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
 /// OP_String8 becomes OP_String, with the length in P1, on its first run.
 /// In a UTF-16 database the string is first converted, once, into a
 /// buffer of the program that becomes P4.
-pub fn opString8(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Error!Flow {
+pub fn opString8(e: *Exec, op: *OpFor(.String8)) Error!Flow {
     _ = e.out2Prerelease(op);
     op.p1 = @intCast(std.mem.len(op.p4As(.z)));
     if (e.encoding != ENC.UTF8) try string8ToUtf16(e, op.raw());
@@ -87,7 +73,7 @@ fn string8ToUtf16(e: *Exec, op: *Op) Error!void {
     op.p1 = @intCast(n);
 }
 
-pub fn opString(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Flow {
+pub fn opString(e: *Exec, op: *OpFor(.String)) Flow {
     const out = e.out2Prerelease(op);
     out.flags = .{ .Str = true, .Static = true, .Term = true };
     out.z = @constCast(op.p4As(.z));
@@ -102,7 +88,7 @@ pub fn opString(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Flow {
 }
 
 /// OP_Null and OP_BeginSubrtn.
-pub fn opNull(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Flow {
+pub fn opNull(e: *Exec, op: *OpFor(.BeginSubrtn)) Flow {
     const out = e.out2Prerelease(op);
     const null_flag: MEM = if (op.p1 != 0) .{ .Null = true, .Cleared = true } else .{ .Null = true };
     out.flags = null_flag;
@@ -117,13 +103,13 @@ pub fn opNull(e: *Exec, op: *OpOf(.{ .int, .reg, .reg })) Flow {
     return .next;
 }
 
-pub fn opSoftNull(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
+pub fn opSoftNull(e: *Exec, op: *OpFor(.SoftNull)) Flow {
     const out = e.reg(op.p1);
     out.flags = out.flags.without(MEM.Undefined.with(MEM.AffMask)).with(.{ .Null = true });
     return .next;
 }
 
-pub fn opBlob(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opBlob(e: *Exec, op: *OpFor(.Blob)) Error!Flow {
     const out = e.out2Prerelease(op);
     if (op.p4type != .z) {
         mem.setZeroBlob(out, op.p1);
@@ -135,7 +121,7 @@ pub fn opBlob(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opVariable(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opVariable(e: *Exec, op: *OpFor(.Variable)) Error!Flow {
     const v = e.v;
     std.debug.assert(op.p1 > 0 and op.p1 <= v.vars.len);
     const var_ = &v.vars[@intCast(op.p1 - 1)];
@@ -153,7 +139,7 @@ pub fn opVariable(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opMove(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
+pub fn opMove(e: *Exec, op: *OpFor(.Move)) Error!Flow {
     const n: usize = @intCast(op.p3);
     std.debug.assert(n > 0 and op.p1 != .none and op.p2 != .none);
     const from = e.regRange(op.p1, n);
@@ -166,7 +152,7 @@ pub fn opMove(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opCopy(e: *Exec, op: *vi.OpWithP5(.{ .reg, .reg, .int }, vi.CopyP5)) Error!Flow {
+pub fn opCopy(e: *Exec, op: *OpFor(.Copy)) Error!Flow {
     // P3+1 registers (P3 is the number after the first).
     const n: usize = @as(usize, @intCast(op.p3)) + 1;
     std.debug.assert(op.p1 != op.p2);
@@ -178,26 +164,26 @@ pub fn opCopy(e: *Exec, op: *vi.OpWithP5(.{ .reg, .reg, .int }, vi.CopyP5)) Erro
     return .next;
 }
 
-pub fn opSCopy(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opSCopy(e: *Exec, op: *OpFor(.SCopy)) Flow {
     std.debug.assert(op.p1 != op.p2);
     mem.shallowCopy(e.reg(op.p2), e.reg(op.p1), .{ .Ephem = true });
     return .next;
 }
 
-pub fn opIntCopy(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opIntCopy(e: *Exec, op: *OpFor(.IntCopy)) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(in1.flags.Int);
     mem.setInt64(e.reg(op.p2), in1.u.i);
     return .next;
 }
 
-pub fn opFkCheck(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opFkCheck(e: *Exec, op: *OpFor(.FkCheck)) Error!Flow {
     _ = op;
     try aux.checkFkImmediate(e.v);
     return .next;
 }
 
-pub fn opResultRow(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
+pub fn opResultRow(e: *Exec, op: *OpFor(.ResultRow)) Error!Flow {
     const v = e.v;
     std.debug.assert(v.n_res_column == op.p2);
     v.cache_ctr = (v.cache_ctr + 2) | 1;
@@ -209,12 +195,12 @@ pub fn opResultRow(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Error!Flow {
     return .ret;
 }
 
-pub fn opClrSubtype(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
+pub fn opClrSubtype(e: *Exec, op: *OpFor(.ClrSubtype)) Flow {
     e.reg(op.p1).flags.Subtype = false;
     return .next;
 }
 
-pub fn opGetSubtype(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opGetSubtype(e: *Exec, op: *OpFor(.GetSubtype)) Flow {
     const in1 = e.reg(op.p1);
     const out = e.reg(op.p2);
     if (in1.flags.Subtype) {
@@ -225,7 +211,7 @@ pub fn opGetSubtype(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     return .next;
 }
 
-pub fn opSetSubtype(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opSetSubtype(e: *Exec, op: *OpFor(.SetSubtype)) Flow {
     const in1 = e.reg(op.p1);
     const out = e.reg(op.p2);
     if (in1.flags.Null) {

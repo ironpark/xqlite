@@ -255,8 +255,7 @@ fn isCandidateForInOpt(x: *const Expr) ?*Select {
 fn setHasNullFlag(v: *Vdbe, cur: Cursor, reg: Reg, sort_order: u8) void {
     _ = aux.emit(v, .Integer, .{ 0, reg });
     const addr1 = aux.emitAny(v, if (sort_order == 0) OP.Rewind else OP.Last, .{ .cursor, .jump, .int }, .{cur});
-    _ = aux.emit(v, .Column, .{ cur, 0, reg });
-    aux.changeP5(v, vi.ColumnP5{ .arg = .typeof });
+    _ = aux.emit5(v, .Column, .{ cur, 0, reg }, .{ .arg = .typeof });
     aux.landHere(v, addr1);
 }
 
@@ -703,27 +702,18 @@ fn codeINJump(p: *Parse, e: *Expr, dest_if_false: Jump, dest_if_null: Jump) void
             releaseTempReg(p, reg_to_free);
             const p4: vi.P4 = if (coll) |c| .{ .collseq = c } else .notused;
             // A value that is the left side itself is in if it is not
-            // NULL. OP_NotNull and OP_IsNull do not read P3; it is left
-            // as the comparison would have it.
-            // OP_NotNull and OP_IsNull have the comparison's P5 too, as
-            // a number.
+            // NULL.
             if (ii < list.len() - 1 or dest_if_null != dest_if_false) {
-                const cmp = vi.CmpP5.init(zaff[0], .{});
                 if (r_lhs != r2) {
-                    _ = aux.emit4(v, .Eq, .{ r_lhs, label_ok, r2 }, p4);
-                    aux.changeP5(v, cmp);
+                    _ = aux.emit45(v, .Eq, .{ r_lhs, label_ok, r2 }, p4, .init(zaff[0], .{}));
                 } else {
-                    _ = aux.emit4(v, .NotNull, .{ r_lhs, label_ok, r2.int() }, p4);
-                    aux.changeP5(v, vi.p5.int(cmp));
+                    _ = aux.emit(v, .NotNull, .{ r_lhs, label_ok });
                 }
             } else {
-                const cmp = vi.CmpP5.init(zaff[0], .{ .jump_if_null = true });
                 if (r_lhs != r2) {
-                    _ = aux.emit4(v, .Ne, .{ r_lhs, dest_if_false, r2 }, p4);
-                    aux.changeP5(v, cmp);
+                    _ = aux.emit45(v, .Ne, .{ r_lhs, dest_if_false, r2 }, p4, .init(zaff[0], .{ .jump_if_null = true }));
                 } else {
-                    _ = aux.emit4(v, .IsNull, .{ r_lhs, dest_if_false, r2.int() }, p4);
-                    aux.changeP5(v, vi.p5.int(cmp));
+                    _ = aux.emit(v, .IsNull, .{ r_lhs, dest_if_false });
                 }
             }
         }
@@ -1403,8 +1393,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, out: Reg) Reg {
                     if (w != 0 and ctype.eqlNoCase(e.token(), "sum")) {
                         var zero: Expr = .{ .op = TK.INTEGER, .flags = .{ .IntValue = true, .TokenOnly = true }, .u = .{ .value = 0 } };
                         const r0: Reg = codeTemp(p, &zero, &reg_free1);
-                        _ = aux.emit(v, .Add, .{ r0, reg, out });
-                        aux.changeP5(v, w);
+                        _ = aux.emit5(v, .Add, .{ r0, reg, out }, w);
                         return out;
                     }
                 }
@@ -1633,7 +1622,7 @@ fn codeFunction(p: *Parse, e: *Expr, out: Reg) Reg {
     if (def.func_flags.NEEDCOLL) {
         _ = aux.emit4(v, .CollSeq, .{}, .{ .collseq = coll orelse coll_mod.dfltColl(p.db) });
     }
-    _ = aux.addFunctionCall(p, @bitCast(const_mask), r1, out, @intCast(n_farg), def, e.op2);
+    _ = aux.addFunctionCall(p, @bitCast(const_mask), r1, out, @intCast(n_farg), def, .fromNC(.fromInt(e.op2)));
     if (n_farg != 0 and const_mask == 0) releaseTempRange(p, r1, n_farg);
     return out;
 }

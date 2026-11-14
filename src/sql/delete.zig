@@ -149,15 +149,15 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     if (rcauth == auth.OK and where == null and !b_complex and !t.isVirtual()) {
         // Without a WHERE clause the b-trees are just cleared.
         build.tableLock(p, @intCast(i_db), t.tnum, true, t.name);
-        // OP_Clear adds the rows it removes to r[P3] if P3 is positive.
-        const clear_count: i32 = if (mem_cnt.isNone()) -1 else mem_cnt.int();
+        // OP_Clear of the table counts the rows it removes, and adds
+        // them to mem_cnt if there is one.
         if (t.hasRowid()) {
-            _ = aux.emitStr(v, .Clear, .{ t.tnum, i_db, clear_count }, t.name);
+            _ = aux.emitStr5(v, .Clear, .{ t.tnum, i_db, mem_cnt }, t.name, .{ .nchange = true });
         }
         idx_opt = t.index;
         while (idx_opt) |ix| : (idx_opt = ix.next) {
             if (ix.isPrimaryKey() and !t.hasRowid()) {
-                _ = aux.emit(v, .Clear, .{ ix.tnum, i_db, clear_count });
+                _ = aux.emit5(v, .Clear, .{ ix.tnum, i_db, mem_cnt }, .{ .nchange = true });
             } else {
                 _ = aux.emit(v, .Clear, .{ ix.tnum, i_db });
             }
@@ -270,8 +270,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
                 _ = aux.emit(v, .Close, .{tab_cur});
                 if (p.toplevel == null) p.is_multi_write = false;
             }
-            _ = aux.emit4(v, .VUpdate, .{ 0, 1, key }, build.vtabP4(db, t));
-            aux.changeP5(v, OE.Abort.int());
+            _ = aux.emit45(v, .VUpdate, .{ 0, 1, key }, build.vtabP4(db, t), OE.Abort.int());
         } else {
             generateRowDelete(p, t, trig, data_cur, idx_cur, key, n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
         }
@@ -366,9 +365,8 @@ pub fn generateRowDelete(
     if (!t.isView()) {
         var p5: vi.DeleteP5 = .{};
         generateRowIndexDelete(p, t, data_cur, idx_cur, null, idx_no_seek);
-        _ = aux.emit(v, .Delete, .{ data_cur, count });
+        _ = aux.emit5(v, .Delete, .{ data_cur, count }, .{ .aux_delete = e_mode != ONEPASS.OFF });
         if (p.nested == 0 or std.ascii.eqlIgnoreCase(t.name, "sqlite_stat1")) aux.appendP4(v, .{ .table = t });
-        if (e_mode != ONEPASS.OFF) aux.changeP5(v, vi.DeleteP5{ .aux_delete = true });
         if (idx_no_seek) |c| if (c != data_cur) {
             _ = aux.emit(v, .Delete, .{c});
         };
@@ -402,8 +400,7 @@ pub fn generateRowIndexDelete(p: *Parse, t: *Table, data_cur: Cursor, idx_cur: C
         var part_idx_label: ?Label = null;
         r1 = generateIndexKey(p, idx, data_cur, .none, true, &part_idx_label, prior, r1);
         const rec: Reg = if (idx.has_expr and reg_idx != null) reg_idx.?[i] else .none;
-        _ = aux.emit4(v, .IdxDelete, .{ cur, r1, rec }, .{ .index = idx });
-        aux.changeP5(v, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
+        _ = aux.emit45(v, .IdxDelete, .{ cur, r1, rec }, .{ .index = idx }, if (idx.uniq_not_null) idx.n_key_col else idx.n_column);
         resolvePartIdxLabel(p, part_idx_label);
         prior = idx;
     }

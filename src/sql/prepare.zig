@@ -518,9 +518,7 @@ pub fn prepareV3(db: *Sqlite3, sql: []const u8, prep_flags: int.PrepFlags, stmt:
 /// The flags stored for sqlite3_prepare_v2() and _v3(): `prep_flags`
 /// with save_sql.
 fn v3Flags(prep_flags: int.PrepFlags) int.PrepFlags {
-    var flags = prep_flags;
-    flags.save_sql = true;
-    return flags;
+    return prep_flags.with(.{ .save_sql = true });
 }
 
 /// prepareV3() with the flags as stored in the statement: without

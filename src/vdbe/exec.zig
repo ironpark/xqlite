@@ -22,18 +22,8 @@
 //! tells them apart takes the opcode as a comptime parameter, so that
 //! each arm gets its own copy without the test.
 //!
-//! A handler takes its instruction as a vi.OpOf(): P1, P2 and P3 with the
-//! types OP.kinds() gives them (operand.Reg, operand.Cursor, a jump
-//! or an address, or a number), checked at compile time against the
-//! opcodes it runs (see `modules`). Registers and cursors are reached
-//! through them, `e.reg(op.p3)`, `e.csr(op.p1)`, `e.regsFrom(op.p2)`,
-//! so that a handler that reads a cursor where the opcode has a register
-//! does not compile, as aux.emit() does not let the code generator pass
-//! one for the other. A number that is a register only under a flag of
-//! P5 (OP_OpenWrite's P2 with OpenP5.p2_is_reg) is `.int` in the table and
-//! converted with `.from()` where the handler tests the flag. P5 is a
-//! number, or for the opcodes whose P5 is a set of flags the packed
-//! struct of their family (vi.OpWithP5(), p5.zig).
+//! A handler takes its instruction with its operands typed as the
+//! opcode's (see operand.zig and `modules`).
 //!
 //! Each handler returns a `Flow`, which stands in for the gotos of the C
 //! code: `.next` continues, `.jump_p2` goes to P2, `.goto` to the address
@@ -131,25 +121,22 @@ pub const Flow = packed struct(u64) {
     }
 };
 
-/// The modules of handlers. Each declares `handlers`, a tuple of entries
-/// `.{ .ops = .{ .Add, .Subtract, ... }, .f = opArith }` naming the
-/// opcodes a function runs, with `.call = .always_inline` where the run
-/// loop is to inline it. The function is `fn (*Exec, *OpOf(shape)) Flow`
-/// (or `Error!Flow`), or takes a third parameter `comptime opc: OP`, the
-/// opcode it runs, if it runs several and tells them apart.
+/// The modules of handlers. The handler of OP_X is the function `opX` of
+/// one of them, unless a module lists it in its `handlers`, a tuple of
+/// entries `.{ .ops = .{ .Add, .Subtract, ... }, .f = opArith }` for the
+/// functions that run several opcodes. The run loop inlines the handlers
+/// of the opcodes in a module's `inlined`, and of the entries with
+/// `.call = .always_inline`. An opcode with no handler, or with two, does
+/// not compile.
 ///
-/// The second parameter is the instruction with its operands typed (see
-/// vi.OpOf()). `shape` is what the handler takes P1, P2 and P3 to be,
-/// `.{ .reg, .jump, .int }` and the like, and must be OP.kinds() of
-/// every opcode it runs: the handler of OP_Gosub cannot read its P1 as a
-/// cursor, and an entry of the kinds table that does not say what the
-/// handler reads does not compile. A handler of opcodes whose operands
-/// differ (OP_Last and OP_SeekEnd) takes `op: anytype` with the opcode,
-/// and gets the shape of each opcode in its copy for that opcode; one
-/// that reads no operand takes `*OpOf(null)`. An opcode whose P5 is a set
-/// of flags (OP.P5(), p5.zig) has a handler that takes
-/// `*OpWithP5(shape, ItsP5)`, so that it cannot read another family's
-/// flags.
+/// A handler is `fn (e: *Exec, op: *OpFor(.X)) Flow` (or `Error!Flow`),
+/// with a third parameter `comptime opc: OP`, the opcode it runs, if it
+/// runs several and tells them apart. `op` is the instruction with its
+/// operands typed as those of the opcode (vi.OpFor(), operand.zig), and
+/// its type must be that of every opcode the handler runs. A handler of
+/// opcodes whose operands differ (OP_Last and OP_SeekEnd), or that reads
+/// none, takes `op: anytype` and gets the type of each opcode in its copy
+/// for that opcode.
 ///
 /// Inlined are the handlers of the opcodes of inner loops (stepping and
 /// seeking cursors, OP_Column, register copies, arithmetic, comparisons,
@@ -159,62 +146,69 @@ pub const Flow = packed struct(u64) {
 /// about half of that.
 const modules = .{ control, register, arith, record, txn, cursor, btree_ops, agg, vtab_ops, misc };
 
-const HandlerAt = struct { module: usize, entry: usize };
+/// Where the handler of an opcode is: entry `entry` of the `handlers` of
+/// module `module`, or (null) its function named after the opcode.
+const HandlerAt = struct { module: usize, entry: ?usize };
 
-/// For each opcode (by value), the module and entry of its handler. An
-/// opcode with no handler or with two is a compile error.
-const handler_index: [256]?HandlerAt = blk: {
-    @setEvalBranchQuota(100_000);
-    var index: [256]?HandlerAt = @splat(null);
+const handler_at: std.enums.EnumArray(OP, HandlerAt) = blk: {
+    @setEvalBranchQuota(200_000);
+    var at: std.enums.EnumArray(OP, ?HandlerAt) = .initFill(null);
     for (modules, 0..) |m, mi| {
         for (m.handlers, 0..) |h, hi| {
             for (h.ops) |o| {
-                const opc: OP = o;
-                if (index[@backingInt(opc)] != null) @compileError("two handlers for OP_" ++ @tagName(opc));
-                index[@backingInt(opc)] = .{ .module = mi, .entry = hi };
+                if (at.get(o) != null) @compileError("two handlers for OP_" ++ @tagName(@as(OP, o)));
+                at.set(o, .{ .module = mi, .entry = hi });
             }
         }
     }
-    const info = @typeInfo(OP).@"enum";
-    for (info.field_names, info.field_values) |name, value| {
-        if (index[value] == null) @compileError("no handler for OP_" ++ name);
+    for (std.enums.values(OP)) |opc| {
+        for (modules, 0..) |m, mi| {
+            if (!@hasDecl(m, "op" ++ @tagName(opc))) continue;
+            if (at.get(opc)) |x| {
+                // The function of the entry that lists the opcode.
+                if (x.entry != null and x.module == mi) continue;
+                @compileError("two handlers for OP_" ++ @tagName(opc));
+            }
+            at.set(opc, .{ .module = mi, .entry = null });
+        }
+        if (at.get(opc) == null) @compileError("no handler for OP_" ++ @tagName(opc));
     }
-    break :blk index;
+    var out: std.enums.EnumArray(OP, HandlerAt) = undefined;
+    for (std.enums.values(OP)) |opc| out.set(opc, at.get(opc).?);
+    for (modules, 0..) |m, mi| if (@hasDecl(m, "inlined")) for (m.inlined) |o| {
+        const x = out.get(o);
+        if (x.module != mi or x.entry != null) @compileError("inlined: OP_" ++ @tagName(@as(OP, o)) ++ " is not run by op" ++ @tagName(@as(OP, o)) ++ " of the module");
+    };
+    break :blk out;
 };
 
 /// The handler of opcode `opc` and how the run loop calls it.
 fn handler(comptime opc: OP) type {
-    const at = handler_index[@backingInt(opc)].?;
-    const entry = modules[at.module].handlers[at.entry];
-    const params = @typeInfo(@TypeOf(entry.f)).@"fn".param_types;
+    const at = handler_at.get(opc);
+    const m = modules[at.module];
     const name = "the handler of OP_" ++ @tagName(opc);
     return struct {
-        const f = entry.f;
-        const call: std.builtin.CallModifier = if (@hasField(@TypeOf(entry), "call")) entry.call else .auto;
+        const f = if (at.entry) |i| m.handlers[i].f else @field(m, "op" ++ @tagName(opc));
+        const call: std.builtin.CallModifier = if (at.entry) |i|
+            (if (@hasField(@TypeOf(m.handlers[i]), "call")) m.handlers[i].call else .auto)
+        else if (isInlined(m, opc)) .always_inline else .auto;
+        const params = @typeInfo(@TypeOf(f)).@"fn".param_types;
         const takes_opc = params.len == 3;
-        /// The type of the instruction it takes: its own, which must
-        /// fit the opcode, or the opcode's for `op: anytype`.
-        const Ins = if (params[1]) |P| blk: {
-            const pointer = switch (@typeInfo(P)) {
-                .pointer => |p| p,
-                else => @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpOf(shape)"),
+        /// The type of the instruction it takes: that of the opcode,
+        /// which a handler of several opcodes must fit to all of them.
+        const Ins = *vi.OpFor(opc);
+        comptime {
+            if (params[1]) |P| if (P != Ins) {
+                @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpFor(." ++ @tagName(opc) ++ "), which is " ++ @typeName(vi.OpFor(opc)));
             };
-            const V = pointer.child;
-            if (!@hasDecl(V, "kinds") or !@hasDecl(V, "P5Type") or V != vi.OpWithP5(V.kinds, V.P5Type)) @compileError(name ++ " takes " ++ @typeName(P) ++ ", not *OpOf(shape)");
-            if (V.kinds) |k| if (!std.meta.eql(k, opc.kinds())) {
-                @compileError(name ++ " takes its operands to be " ++ shapeName(k) ++ ", OP.kinds() says " ++ shapeName(opc.kinds()));
-            };
-            if (V.P5Type != opc.P5()) @compileError(name ++ " takes P5 as " ++ @typeName(V.P5Type) ++ ", OP.P5() says " ++ @typeName(opc.P5()));
-            break :blk P;
-        } else blk: {
-            if (!takes_opc) @compileError(name ++ " takes `op: anytype` without the opcode");
-            break :blk *vi.OpFor(opc);
-        };
+        }
     };
 }
 
-fn shapeName(comptime k: [3]operand.Kind) []const u8 {
-    return ".{ ." ++ @tagName(k[0]) ++ ", ." ++ @tagName(k[1]) ++ ", ." ++ @tagName(k[2]) ++ " }";
+fn isInlined(comptime m: anytype, comptime opc: OP) bool {
+    if (!@hasDecl(m, "inlined")) return false;
+    for (m.inlined) |o| if (o == opc) return true;
+    return false;
 }
 
 /// Port of sqlite3VdbeExec(): run the program until it produces a row
@@ -280,27 +274,23 @@ pub const Exec = struct {
     /// (the run loop keeps its own copy in a local).
     progress_limit: u64 = std.math.maxInt(u64),
 
-    // The registers and cursors that operands name. A handler passes an
-    // operand of its OpOf() (`e.reg(op.p1)`), which has the type the
-    // kinds table gives it, or the register after one
-    // (`e.reg(op.p2.at(i))`). A number that is a register only in some
-    // uses of the opcode (`.int` in the table) is converted where the
-    // handler knows it is one, with `Reg.from()` (OP_OpenWrite's P2 under
-    // OpenP5.p2_is_reg), as is an operand of another instruction than the
-    // handler's own if it is not read through opAt().
+    // The registers and cursors that typed operands name (operand.zig).
 
     pub fn reg(e: *Exec, r: Reg) *Mem {
         return &e.regs[@intCast(r.int())];
     }
 
-    /// The registers from `r` on, as an UnpackedRecord takes them.
-    pub fn regsFrom(e: *Exec, r: Reg) [*]Mem {
-        return e.regs[@intCast(r.int())..].ptr;
-    }
-
     /// The `n` registers from `r` on.
     pub fn regRange(e: *Exec, r: Reg, n: usize) []Mem {
         return e.regs[@intCast(r.int())..][0..n];
+    }
+
+    /// Take the program and registers of the Vdbe's current frame
+    /// (Vdbe.prog, Vdbe.mem), which a handler that enters or leaves a
+    /// trigger program has switched; it then returns a `.frame` flow.
+    pub fn syncFrame(e: *Exec) void {
+        e.ops = e.v.prog;
+        e.regs = e.v.mem;
     }
 
     /// Register `r` of the main program, even inside a trigger.

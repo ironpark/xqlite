@@ -19,8 +19,7 @@ const malloc = @import("../../sql/malloc.zig");
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const OpOf = vi.OpOf;
-const OpWithP5 = vi.OpWithP5;
+const OpFor = vi.OpFor;
 const OpenP5 = vi.OpenP5;
 const StmtStatus = vi.StmtStatus;
 const Mem = vi.Mem;
@@ -30,41 +29,21 @@ const VdbeCursor = vi.VdbeCursor;
 const Cursor = @import("../operand.zig").Cursor;
 const RC = int.RC;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
 pub const handlers = .{
-    .{ .ops = .{.ReopenIdx}, .f = opReopenIdx },
-    .{ .ops = .{ .OpenRead, .OpenWrite }, .f = opOpen },
-    .{ .ops = .{.OpenDup}, .f = opOpenDup },
+    .{ .ops = .{ .OpenRead, .OpenWrite, .OpenWriteReg }, .f = opOpen },
     .{ .ops = .{ .OpenAutoindex, .OpenEphemeral }, .f = opOpenEphemeral },
-    .{ .ops = .{.SorterOpen}, .f = opSorterOpen },
-    .{ .ops = .{.OpenQueue}, .f = opOpenQueue },
-    .{ .ops = .{.SequenceTest}, .f = opSequenceTest },
-    .{ .ops = .{.OpenPseudo}, .f = opOpenPseudo },
-    .{ .ops = .{.Close}, .f = opClose },
     .{ .ops = .{ .SeekLT, .SeekLE, .SeekGE, .SeekGT }, .f = opSeek, .call = .always_inline },
-    .{ .ops = .{.SeekScan}, .f = opSeekScan },
-    .{ .ops = .{.SeekHit}, .f = opSeekHit },
-    .{ .ops = .{.IfNoHope}, .f = opIfNoHope },
     .{ .ops = .{ .NoConflict, .NotFound, .Found }, .f = opFound, .call = .always_inline },
-    .{ .ops = .{.SeekRowid}, .f = opSeekRowid, .call = .always_inline },
-    .{ .ops = .{.NotExists}, .f = opNotExists, .call = .always_inline },
-    .{ .ops = .{.Sequence}, .f = opSequence },
-    .{ .ops = .{.Rowid}, .f = opRowid },
     .{ .ops = .{ .CursorLock, .CursorUnlock }, .f = opCursorLock },
-    .{ .ops = .{.NullRow}, .f = opNullRow, .call = .always_inline },
     .{ .ops = .{ .SeekEnd, .Last }, .f = opLast },
-    .{ .ops = .{.IfSizeBetween}, .f = opIfSizeBetween },
     .{ .ops = .{ .SorterSort, .Sort }, .f = opSort },
-    .{ .ops = .{.Rewind}, .f = opRewind, .call = .always_inline },
-    .{ .ops = .{.IfEmpty}, .f = opIfEmpty },
-    .{ .ops = .{.SorterNext}, .f = opSorterNext },
-    .{ .ops = .{.Prev}, .f = opPrev, .call = .always_inline },
-    .{ .ops = .{.Next}, .f = opNext, .call = .always_inline },
     .{ .ops = .{ .DeferredSeek, .IdxRowid }, .f = opIdxRowid },
-    .{ .ops = .{.FinishSeek}, .f = opFinishSeek },
     .{ .ops = .{ .IdxLE, .IdxGT, .IdxLT, .IdxGE }, .f = opIdxCompare, .call = .always_inline },
-    .{ .ops = .{.IFindKey}, .f = opIFindKey },
 };
+
+pub const inlined = .{ .SeekRowid, .NotExists, .NullRow, .Rewind, .Prev, .Next };
 
 /// BTREE_UNORDERED: an ephemeral table whose order does not matter.
 const BTREE_UNORDERED: u16 = 8;
@@ -131,7 +110,6 @@ fn newBox(cache: []u32, kind: VdbeCursor.Kind) vi.CursorBox {
         .vc = .{
             .kind = kind,
             .i_db = 0,
-            .n_field = @intCast(n),
             .types = cache[0..n],
             .offsets = cache[n..],
         },
@@ -141,40 +119,32 @@ fn newBox(cache: []u32, kind: VdbeCursor.Kind) vi.CursorBox {
 
 // ================================================================ opening
 
-pub fn opReopenIdx(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, OpenP5)) Error!Flow {
-    if (e.csrIfOpen(op.p1)) |c| switch (c.kind) {
-        .btree => |*b| if (b.pgno_root == @as(u32, @intCast(op.p2))) {
-            // Already open on this index: the position is forgotten
-            // (sqlite3BtreeClearCursor()), so that OP_SeekScan seeks.
-            b.cursor.clear();
-            b.seek_eq = op.p5.seek_eq;
-            return .next;
-        },
-        else => {},
+pub fn opReopenIdx(e: *Exec, op: *OpFor(.ReopenIdx)) Error!Flow {
+    if (e.csrIfOpen(op.p1)) |c| if (c.kind.as(.btree)) |b| if (b.pgno_root == @as(u32, @intCast(op.p2))) {
+        // Already open on this index: the position is forgotten
+        // (sqlite3BtreeClearCursor()), so that OP_SeekScan seeks.
+        b.cursor.clear();
+        b.seek_eq = op.p5.seek_eq;
+        return .next;
     };
     return opOpen(e, op, .OpenRead);
 }
 
-/// OP_OpenRead and OP_OpenWrite.
-pub fn opOpen(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, OpenP5), comptime opc: OP) Error!Flow {
+/// OP_OpenRead, OP_OpenWrite and OP_OpenWriteReg (OP_ReopenIdx).
+pub fn opOpen(e: *Exec, op: anytype, comptime opc: OP) Error!Flow {
     const v = e.v;
     const db = e.db;
     if (v.expired == .now) return e.abort(RC.ABORT_ROLLBACK);
-    var p2: u32 = @intCast(op.p2);
     const i_db = op.p3;
     const pdb = &db.dbs.items[@intCast(i_db)];
     const bt = pdb.bt.?;
-    var write = false;
-    if (opc == .OpenWrite) {
-        write = true;
-        if (pdb.schema.file_format < v.min_write_file_format) v.min_write_file_format = pdb.schema.file_format;
-        if (op.p5.p2_is_reg) {
-            // P2 is the register of the root page.
-            const in2 = e.reg(.from(op.p2));
-            mem.integerify(in2);
-            p2 = @intCast(in2.u.i);
-        }
-    }
+    const write = opc != .OpenRead;
+    if (write and pdb.schema.file_format < v.min_write_file_format) v.min_write_file_format = pdb.schema.file_format;
+    const p2: u32 = if (opc == .OpenWriteReg) root: {
+        const in2 = e.reg(op.p2);
+        mem.integerify(in2);
+        break :root @intCast(in2.u.i);
+    } else @intCast(op.p2);
     var key_info: ?*vi.KeyInfo = null;
     var n_field: i32 = 0;
     switch (op.p4type) {
@@ -196,11 +166,11 @@ pub fn opOpen(e: *Exec, op: *OpWithP5(.{ .cursor, .int, .int }, OpenP5), comptim
     return .next;
 }
 
-pub fn opOpenDup(e: *Exec, op: *OpOf(.{ .cursor, .cursor, .int })) Error!Flow {
+pub fn opOpenDup(e: *Exec, op: *OpFor(.OpenDup)) Error!Flow {
     const orig = e.csr(op.p2);
     std.debug.assert(orig.is_ephemeral);
     const ob = &orig.kind.btree;
-    const c = try allocateBtreeCursor(e, op.p1, orig.n_field, ob.btx.?, ob.pgno_root, true, orig.key_info);
+    const c = try allocateBtreeCursor(e, op.p1, orig.nField(), ob.btx.?, ob.pgno_root, true, orig.key_info);
     c.null_row = true;
     c.is_ephemeral = true;
     c.is_ordered = orig.is_ordered;
@@ -211,7 +181,7 @@ pub fn opOpenDup(e: *Exec, op: *OpOf(.{ .cursor, .cursor, .int })) Error!Flow {
 }
 
 /// OP_OpenEphemeral and OP_OpenAutoindex.
-pub fn opOpenEphemeral(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow {
+pub fn opOpenEphemeral(e: *Exec, op: *OpFor(.OpenAutoindex)) Error!Flow {
     const db = e.db;
     if (op.p3 != .none) {
         // Make reg[P3] usable as zero-length data for OP_Insert.
@@ -220,7 +190,7 @@ pub fn opOpenEphemeral(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow
         r.z = @constCast("".ptr);
     }
     if (e.csrIfOpen(op.p1)) |cx| {
-        if (!cx.no_reuse and op.p2 <= cx.n_field) {
+        if (!cx.no_reuse and op.p2 <= cx.nField()) {
             // Erase the content of the open ephemeral table.
             cx.seq_count = 0;
             cx.cache_status = vi.cache_stale;
@@ -232,7 +202,7 @@ pub fn opOpenEphemeral(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow
     }
     const bt = try btree.Btree.open(malloc.allocator, db.vfs.?, null, .{
         // SQLITE_OPEN_TRANSIENT_DB, in memory with temp_store=MEMORY.
-        .memory = @import("../sorter.zig").tempInMemory(db),
+        .memory = vi.tempInMemory(db),
         .temp_kind = .transient_db,
         .mmap_size = db.sz_mmap,
         .conn = @import("../../sql/main.zig").btreeConn(db),
@@ -258,7 +228,7 @@ pub fn opOpenEphemeral(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg })) Error!Flow
 }
 
 /// The cursor of OP_OpenEphemeral on its new b-tree `bt`.
-fn openEphemeralTable(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg }), bt: *btree.Btree) Error!*VdbeCursor {
+fn openEphemeralTable(e: *Exec, op: *OpFor(.OpenEphemeral), bt: *btree.Btree) Error!*VdbeCursor {
     try bt.beginTrans(.write, 0);
     if (op.p4type == .keyinfo) {
         // A transient index gets its own b-tree; a table uses page 1.
@@ -268,7 +238,7 @@ fn openEphemeralTable(e: *Exec, op: *OpOf(.{ .cursor, .int, .reg }), bt: *btree.
     return allocateBtreeCursor(e, op.p1, op.p2, bt, 1, true, null);
 }
 
-pub fn opSorterOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+pub fn opSorterOpen(e: *Exec, op: *OpFor(.SorterOpen)) Error!Flow {
     const ki = op.p4As(.keyinfo);
     const s = try sorter.init(e.db, op.p3, ki);
     const c = allocateCursor(e, op.p1, op.p2, .{ .sorter = s }) catch |err| {
@@ -281,13 +251,10 @@ pub fn opSorterOpen(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
 
 /// OP_OpenQueue (not in C): open cursor P1 as an empty queue
 /// (queue.zig), or empty the queue it is.
-pub fn opOpenQueue(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
-    if (e.csrIfOpen(op.p1)) |cx| switch (cx.kind) {
-        .queue => |q| {
-            q.clear();
-            return .next;
-        },
-        else => {},
+pub fn opOpenQueue(e: *Exec, op: *OpFor(.OpenQueue)) Error!Flow {
+    if (e.csrIfOpen(op.p1)) |cx| if (cx.kind.as(.queue)) |q| {
+        q.*.clear();
+        return .next;
     };
     const q = try queue.Queue.init(e.db);
     _ = allocateCursor(e, op.p1, 0, .{ .queue = q }) catch |err| {
@@ -297,19 +264,19 @@ pub fn opOpenQueue(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opSequenceTest(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Flow {
+pub fn opSequenceTest(e: *Exec, op: *OpFor(.SequenceTest)) Flow {
     const c = e.csr(op.p1);
     c.seq_count += 1;
     return if (c.seq_count - 1 == 0) .jump_p2 else .next;
 }
 
-pub fn opOpenPseudo(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
+pub fn opOpenPseudo(e: *Exec, op: *OpFor(.OpenPseudo)) Error!Flow {
     const c = try allocateCursor(e, op.p1, op.p3, .{ .pseudo = op.p2 });
     c.null_row = true;
     return .next;
 }
 
-pub fn opClose(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Flow {
+pub fn opClose(e: *Exec, op: *OpFor(.Close)) Flow {
     const slot = e.csrSlot(op.p1);
     aux.freeCursor(e.v, slot.*);
     slot.* = null;
@@ -319,7 +286,7 @@ pub fn opClose(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Flow {
 // ================================================================ seeking
 
 /// OP_SeekLT, OP_SeekLE, OP_SeekGE and OP_SeekGT.
-pub fn opSeek(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc: OP) Error!Flow {
+pub fn opSeek(e: *Exec, op: *OpFor(.SeekLT), comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
     const cur = b.cursor;
@@ -396,7 +363,7 @@ pub fn opSeek(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc: OP) 
     return .next;
 }
 
-pub fn opSeekScan(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opSeekScan(e: *Exec, op: *OpFor(.SeekScan)) Error!Flow {
     const next_op = e.opAt(.SeekGE, e.pc + 1);
     const c = e.csr(next_op.p1);
     const cur = c.kind.btree.cursor;
@@ -422,7 +389,7 @@ pub fn opSeekScan(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     }
 }
 
-pub fn opSeekHit(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Flow {
+pub fn opSeekHit(e: *Exec, op: *OpFor(.SeekHit)) Flow {
     const c = e.csr(op.p1);
     if (c.seek_hit < op.p2) {
         c.seek_hit = @intCast(op.p2);
@@ -432,26 +399,25 @@ pub fn opSeekHit(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Flow {
     return .next;
 }
 
-pub fn opIfNoHope(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
+pub fn opIfNoHope(e: *Exec, op: *OpFor(.IfNoHope)) Error!Flow {
     const c = e.csr(op.p1);
     if (c.seek_hit >= op.p4As(.int32)) return .next;
     return opFound(e, op, .IfNoHope);
 }
 
 /// OP_Found, OP_NotFound, OP_NoConflict, and OP_IfNoHope after its test.
-pub fn opFound(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc: OP) Error!Flow {
+pub fn opFound(e: *Exec, op: *OpFor(.NoConflict), comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
     const cur = b.cursor;
-    const regs = e.regsFrom(op.p3);
     const n_field: u16 = @intCast(op.p4As(.int32));
     const order = if (n_field > 0) order: {
         // The key is n_field unpacked registers.
-        var r: vi.UnpackedRecord = .{ .key_info = c.key_info.?, .fields = regs[0..n_field], .default_rc = 0 };
+        var r: vi.UnpackedRecord = .{ .key_info = c.key_info.?, .fields = e.regRange(op.p3, n_field), .default_rc = 0 };
         break :order try serial.indexMoveto(cur, &r);
     } else order: {
         // The key is a record in one register.
-        const key = &regs[0];
+        const key = e.reg(op.p3);
         if (key.flags.Zero) try mem.expandBlob(key);
         const ki = c.key_info.?;
         break :order try serial.btreeKeyInfo(ki).call(.{ cur, key.bytes() });
@@ -468,14 +434,14 @@ pub fn opFound(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc: OP)
         if (!exists) return .jump_p2;
         if (opc == .NoConflict) {
             // A key with a NULL never conflicts.
-            for (regs[0..n_field]) |m| if (m.flags.Null) return .jump_p2;
+            for (e.regRange(op.p3, n_field)) |m| if (m.flags.Null) return .jump_p2;
         }
         if (opc == .IfNoHope) c.seek_hit = @intCast(op.p4As(.int32));
     }
     return .next;
 }
 
-pub fn opSeekRowid(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
+pub fn opSeekRowid(e: *Exec, op: *OpFor(.SeekRowid)) Error!Flow {
     const in3 = e.reg(op.p3);
     if (!in3.flags.intersects(.{ .Int = true, .IntReal = true })) {
         // Convert a copy: the register must keep its type.
@@ -495,12 +461,12 @@ pub fn opSeekRowid(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
     return notExists(e, op, in3.u.i);
 }
 
-pub fn opNotExists(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Error!Flow {
+pub fn opNotExists(e: *Exec, op: *OpFor(.NotExists)) Error!Flow {
     return notExists(e, op, e.reg(op.p3).u.i);
 }
 
 /// OP_NotExists, and OP_SeekRowid once the key is an integer.
-fn notExists(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), key: i64) Error!Flow {
+fn notExists(e: *Exec, op: *OpFor(.NotExists), key: i64) Error!Flow {
     const c = e.csr(op.p1);
     const b = &c.kind.btree;
     const order = try b.cursor.tableMoveto(key, false);
@@ -516,7 +482,7 @@ fn notExists(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), key: i64) Error!Flo
     return .next;
 }
 
-pub fn opSequence(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Flow {
+pub fn opSequence(e: *Exec, op: *OpFor(.Sequence)) Flow {
     const c = e.csr(op.p1);
     e.out2Prerelease(op).u = .{ .i = c.seq_count };
     c.seq_count += 1;
@@ -525,7 +491,7 @@ pub fn opSequence(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Flow {
 
 // ================================================================ reading
 
-pub fn opRowid(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
+pub fn opRowid(e: *Exec, op: *OpFor(.Rowid)) Error!Flow {
     const out = e.out2Prerelease(op);
     const c = e.csr(op.p1);
     if (c.null_row) {
@@ -561,13 +527,13 @@ pub fn opRowid(e: *Exec, op: *OpOf(.{ .cursor, .reg, .int })) Error!Flow {
 /// OP_CursorLock and OP_CursorUnlock: pin the b-tree cursor P1 to its
 /// row, so that a trigger which would move it fails with
 /// SQLITE_CONSTRAINT_PINNED, or release it.
-pub fn opCursorLock(e: *Exec, op: *OpOf(.{ .cursor, .int, .int }), comptime opc: OP) Flow {
+pub fn opCursorLock(e: *Exec, op: *OpFor(.CursorLock), comptime opc: OP) Flow {
     const bc = e.csr(op.p1).kind.btree.cursor;
     if (opc == .CursorLock) bc.pin() else bc.unpin();
     return .next;
 }
 
-pub fn opNullRow(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+pub fn opNullRow(e: *Exec, op: *OpFor(.NullRow)) Error!Flow {
     const c = e.csrIfOpen(op.p1) orelse blk: {
         // A NULL row for a cursor that was never opened.
         const cx = try allocateCursor(e, op.p1, 1, .{ .pseudo = .none });
@@ -576,10 +542,7 @@ pub fn opNullRow(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
     };
     c.null_row = op.p2 == 0;
     c.cache_status = vi.cache_stale;
-    switch (c.kind) {
-        .btree => |b| b.cursor.clear(),
-        else => {},
-    }
+    if (c.kind.as(.btree)) |b| b.cursor.clear();
     return .next;
 }
 
@@ -609,7 +572,7 @@ pub fn opLast(e: *Exec, op: anytype, comptime opc: OP) Error!Flow {
     return .next;
 }
 
-pub fn opIfSizeBetween(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opIfSizeBetween(e: *Exec, op: *OpFor(.IfSizeBetween)) Error!Flow {
     const cur = e.csr(op.p1).kind.btree.cursor;
     const has_rows = try cur.first();
     var sz: i64 = -1;
@@ -620,15 +583,15 @@ pub fn opIfSizeBetween(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flo
 }
 
 /// OP_Sort and OP_SorterSort.
-pub fn opSort(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opSort(e: *Exec, op: *OpFor(.SorterSort)) Error!Flow {
     e.v.counters.getPtr(.sort).* += 1;
     return opRewind(e, op);
 }
 
-pub fn opRewind(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opRewind(e: *Exec, op: *OpFor(.Rewind)) Error!Flow {
     const c = e.csr(op.p1);
     const empty = switch (c.kind) {
-        .sorter => try sorter.rewind(c),
+        .sorter => |s| try sorter.rewind(s),
         else => blk: {
             const b = &c.kind.btree;
             b.deferred_moveto = false;
@@ -641,25 +604,25 @@ pub fn opRewind(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opIfEmpty(e: *Exec, op: *OpOf(.{ .cursor, .jump, .int })) Error!Flow {
+pub fn opIfEmpty(e: *Exec, op: *OpFor(.IfEmpty)) Error!Flow {
     const cur = e.csr(op.p1).kind.btree.cursor;
     const empty = try cur.isEmpty();
     return if (empty) .jump_p2 else .next;
 }
 
-pub fn opSorterNext(e: *Exec, op: *OpWithP5(.{ .cursor, .jump, .int }, StmtStatus)) Error!Flow {
+pub fn opSorterNext(e: *Exec, op: *OpFor(.SorterNext)) Error!Flow {
     const c = e.csr(op.p1);
-    const more = try sorter.next(c);
+    const more = try sorter.next(c.kind.sorter);
     return nextTail(e, op.p5, c, more);
 }
 
-pub fn opPrev(e: *Exec, op: *OpWithP5(.{ .cursor, .jump, .int }, StmtStatus)) Error!Flow {
+pub fn opPrev(e: *Exec, op: *OpFor(.Prev)) Error!Flow {
     const c = e.csr(op.p1);
     const more = try c.kind.btree.cursor.previous();
     return nextTail(e, op.p5, c, more);
 }
 
-pub fn opNext(e: *Exec, op: *OpWithP5(.{ .cursor, .jump, .int }, StmtStatus)) Error!Flow {
+pub fn opNext(e: *Exec, op: *OpFor(.Next)) Error!Flow {
     const c = e.csr(op.p1);
     const more = try c.kind.btree.cursor.next();
     return nextTail(e, op.p5, c, more);
@@ -706,14 +669,14 @@ pub fn opIdxRowid(e: *Exec, op: anytype, comptime opc: OP) Error!Flow {
     return .next;
 }
 
-pub fn opFinishSeek(e: *Exec, op: *OpOf(.{ .cursor, .int, .int })) Error!Flow {
+pub fn opFinishSeek(e: *Exec, op: *OpFor(.FinishSeek)) Error!Flow {
     const c = e.csr(op.p1);
     if (c.kind.btree.deferred_moveto) try serial.finishMoveto(c);
     return .next;
 }
 
 /// OP_IdxLE, OP_IdxGT, OP_IdxLT and OP_IdxGE.
-pub fn opIdxCompare(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc: OP) Error!Flow {
+pub fn opIdxCompare(e: *Exec, op: *OpFor(.IdxLE), comptime opc: OP) Error!Flow {
     const c = e.csr(op.p1);
     var r: vi.UnpackedRecord = .{
         .key_info = c.key_info.?,
@@ -733,7 +696,7 @@ pub fn opIdxCompare(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg }), comptime opc
 /// look near the cursor for an entry of index P4 whose REAL fields
 /// from expressions differ by a few ULPs (sqlite3VdbeFindIndexKey());
 /// jump to P2 if there is none.
-pub fn opIFindKey(e: *Exec, op: *OpOf(.{ .cursor, .jump, .reg })) Flow {
+pub fn opIFindKey(e: *Exec, op: *OpFor(.IFindKey)) Flow {
     const c = e.csr(op.p1);
     std.debug.assert(!c.kind.btree.is_table);
     const idx = op.p4As(.index);

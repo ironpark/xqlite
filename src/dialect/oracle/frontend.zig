@@ -151,7 +151,7 @@ fn autocommitRegister(p: *int.Parse) ?Reg {
     const defs = dialect.engineFunctionSearch("xq_ora_autocommit");
     if (defs.len == 0) return null;
     const r = p.newReg();
-    _ = aux.addFunctionCall(p, 0, .none, r, 0, &defs[0], 0);
+    _ = aux.addFunctionCall(p, 0, .none, r, 0, &defs[0], .{});
     return r;
 }
 

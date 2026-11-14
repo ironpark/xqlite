@@ -711,8 +711,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
         while (i < n_arg) : (i += 1) _ = aux.emit(v, .Column, .{ ephem_tab, i, reg_arg.at(i) });
     }
     vtab.makeWritable(p, t);
-    _ = aux.emit4(v, .VUpdate, .{ 0, n_arg, reg_arg }, build.vtabP4(db, t));
-    aux.changeP5(v, (if (on_error == OE.Default) OE.Abort else on_error).int());
+    _ = aux.emit45(v, .VUpdate, .{ 0, n_arg, reg_arg }, build.vtabP4(db, t), (if (on_error == OE.Default) OE.Abort else on_error).int());
     main_mod.mayAbort(p);
 
     // The end of the loop over the ephemeral table; or with one pass,

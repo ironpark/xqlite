@@ -14,6 +14,8 @@ pub const CmpP5 = p5.CmpP5;
 pub const CompareP5 = p5.CompareP5;
 pub const CopyP5 = p5.CopyP5;
 pub const HaltP5 = p5.HaltP5;
+pub const TypeMaskP5 = p5.TypeMaskP5;
+pub const FuncP5 = p5.FuncP5;
 pub const StmtStatus = p5.StmtStatus;
 const operand = @import("operand.zig");
 const flags = @import("xqlite_base").flags;
@@ -27,6 +29,30 @@ pub const Table = int.Table;
 pub const Index = int.Index;
 pub const Pgno = int.Pgno;
 pub const Allocator = std.mem.Allocator;
+
+/// Port of sqlite3TempInMemory() for SQLITE_TEMP_STORE=1: temporary
+/// files are in memory only with PRAGMA temp_store=MEMORY.
+pub fn tempInMemory(db: *const Sqlite3) bool {
+    return db.temp_store == 2;
+}
+
+/// The most memory, in bytes, that a sorter holds before it writes a PMA
+/// (mxPmaSize in vdbesort.c), and the queue of a recursive CTE before it
+/// writes chunks to its file (queue.zig): the cache size of the main
+/// database, at least SQLITE_SORTER_PMASZ (250) pages and at most
+/// SQLITE_MAX_PMASZ (512 MiB). Null if they never spill: with
+/// temp_store=MEMORY, or without a main b-tree (hand-built test programs).
+pub fn spillSize(db: *const Sqlite3) ?usize {
+    const sorter_pmasz = 250;
+    const max_pmasz = 1 << 29;
+    if (tempInMemory(db) or db.dbs.items.len == 0) return null;
+    const bt = db.dbs.items[0].bt orelse return null;
+    const pgsz: usize = bt.getPageSize();
+    const cache_size = db.dbs.items[0].schema.cache_size;
+    // A negative cache size is in KiB.
+    const cache: usize = if (cache_size < 0) @as(usize, @abs(cache_size)) * 1024 else @as(usize, @intCast(cache_size)) * pgsz;
+    return @max(sorter_pmasz * pgsz, @min(cache, max_pmasz));
+}
 
 /// Text encodings (SQLITE_UTF8 etc.).
 pub const ENC = struct {
@@ -243,7 +269,7 @@ pub const UnpackedRecord = struct {
 /// One instruction (VdbeOp). As in C built without
 /// SQLITE_ENABLE_EXPLAIN_COMMENTS, it is 24 bytes: the P4 type fits in
 /// the padding before p5, and P4 is a single word. Extern, so that
-/// OpOf() can lay its fields out the same way.
+/// OpFor() can lay its fields out the same way.
 pub const Op = extern struct {
     opcode: OP,
     /// Which field of `p4` is valid (p4type).
@@ -299,10 +325,20 @@ pub const Op = extern struct {
         return p5.from(T, op.p5);
     }
 
-    /// Set P5 to `x`, a value of the type of the opcode's (OP.P5()).
+    /// Set P5 to `x`: an integer if the opcode's P5 is a number, else a
+    /// value of the type of its family (OP.P5()).
     pub inline fn setP5(op: *Op, x: anytype) void {
-        std.debug.assert(op.opcode.info().p5 == comptime p5.Family.of(@TypeOf(x)));
-        op.p5 = p5.int(x);
+        const T = @TypeOf(x);
+        switch (@typeInfo(T)) {
+            .int, .comptime_int => {
+                std.debug.assert(op.opcode.info().p5 == .number);
+                op.p5 = @intCast(x);
+            },
+            else => {
+                std.debug.assert(op.opcode.info().p5 == comptime p5.Family.of(T));
+                op.p5 = p5.int(x);
+            },
+        }
     }
 };
 
@@ -310,37 +346,28 @@ comptime {
     if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Op) == 24);
 }
 
-/// An instruction as the handler of its opcode sees it (exec.zig): an Op
-/// whose P1, P2 and P3 have the types of `shape`, the OP.kinds() of
-/// the opcode (operand.Reg, operand.Cursor, operand.Jump, operand.Addr,
-/// or i32 for a number), so that reading an operand as something it is
-/// not does not compile. With a null shape the operands are `Unread`:
-/// for a handler that does not read them, whatever its opcodes are. P5
-/// is a number; OpWithP5() is the instruction of an opcode whose P5 is
-/// a set of flags.
-pub fn OpOf(comptime shape: ?[3]operand.Kind) type {
-    return OpWithP5(shape, u16);
+/// The instruction of opcode `opc` as its handler takes it (exec.zig): an
+/// Op whose P1, P2 and P3 have the types OP.kinds() gives them
+/// (operand.zig: Reg, Cursor, Jump, Addr, or i32 for a number) and whose
+/// P5 has the type OP.P5() (p5.zig). Opcodes with the same kinds and P5
+/// have the same instruction type: a handler of OP_Eq .. OP_Ge takes
+/// `*OpFor(.Eq)`.
+pub fn OpFor(comptime opc: OP) type {
+    return Instruction(opc.kinds(), opc.P5());
 }
 
-/// OpOf(shape) with P5 of type `P5`: the OP.P5() of the opcode, a
-/// packed struct of its flags (p5.zig), so that a handler reads only the
-/// flags of its own opcode.
-pub fn OpWithP5(comptime shape: ?[3]operand.Kind, comptime P5: type) type {
+/// OpFor() by what it depends on, so that equal operands make one type.
+fn Instruction(comptime kinds: [3]operand.Kind, comptime P5: type) type {
     return extern struct {
         opcode: OP,
         p4type: P4Type,
         p5: P5,
-        p1: OperandOf(shape, 0),
-        p2: OperandOf(shape, 1),
-        p3: OperandOf(shape, 2),
+        p1: OperandOf(kinds[0]),
+        p2: OperandOf(kinds[1]),
+        p3: OperandOf(kinds[2]),
         p4: P4Union,
 
         const Self = @This();
-
-        /// What P1, P2 and P3 are (null: not read).
-        pub const kinds = shape;
-        /// What P5 is.
-        pub const P5Type = P5;
 
         comptime {
             std.debug.assert(@sizeOf(Self) == @sizeOf(Op));
@@ -368,23 +395,14 @@ pub fn OpWithP5(comptime shape: ?[3]operand.Kind, comptime P5: type) type {
     };
 }
 
-/// The instruction of opcode `opc`, with its operands and its P5 typed.
-pub fn OpFor(comptime opc: OP) type {
-    return OpWithP5(opc.kinds(), opc.P5());
-}
-
 /// Instruction `o`, which is an `opc`, with the operands of that opcode.
 pub inline fn opAs(o: *Op, comptime opc: OP) *OpFor(opc) {
     std.debug.assert(o.opcode == opc);
     return @ptrCast(o);
 }
 
-/// An operand of OpOf(null), which its handler does not read.
-pub const Unread = enum(i32) { _ };
-
-fn OperandOf(comptime shape: ?[3]operand.Kind, comptime n: usize) type {
-    const s = shape orelse return Unread;
-    return switch (s[n]) {
+fn OperandOf(comptime kind: operand.Kind) type {
+    return switch (kind) {
         .int => i32,
         .reg => operand.Reg,
         .cursor => operand.Cursor,
@@ -494,10 +512,6 @@ pub const COLNAME_N = 2;
 
 // =============================================================== cursors
 
-/// What a cursor reads (CURTYPE_*): the tag of VdbeCursor.kind.
-/// `queue` is not in C (OP_OpenQueue, queue.zig).
-pub const CurType = enum(u8) { btree = 0, sorter = 1, vtab = 2, pseudo = 3, queue = 4 };
-
 /// A cursor of the VM (VdbeCursor). What only one kind of cursor has is
 /// in `kind`; the rest, OP_Column's cache of the record above all, is
 /// that of any cursor that reads records.
@@ -517,22 +531,27 @@ pub const VdbeCursor = struct {
     key_info: ?*KeyInfo = null,
     /// Offset of the next unparsed byte of the record header.
     i_hdr_offset: u32 = 0,
-    n_field: i16,
     /// Header fields parsed so far.
     n_hdr_parsed: u16 = 0,
-    /// Offsets of the fields (n_field + 1 entries).
+    /// Offsets of the fields (nField() + 1 entries).
     offsets: []u32,
     /// The record, if it is all on one page.
     row: ?[*]const u8 = null,
     payload_size: u32 = 0,
     /// Bytes available at `row`.
     sz_row: u32 = 0,
-    /// Serial types of the fields (n_field entries).
+    /// Serial types of the fields, one per field of the cursor.
     types: []u32,
 
-    /// The cursor's kind (eCurType) and what it reads (uc). A cursor
-    /// keeps its kind, from its allocation to its close.
-    pub const Kind = union(CurType) {
+    /// The number of fields of the cursor's records (nField).
+    pub fn nField(c: *const VdbeCursor) i32 {
+        return @intCast(c.types.len);
+    }
+
+    /// The cursor's kind (eCurType, CURTYPE_*) and what it reads (uc). A
+    /// cursor keeps its kind, from its allocation to its close. `queue` is
+    /// not in C.
+    pub const Kind = union(enum) {
         btree: OnBtree,
         sorter: *@import("sorter.zig").Sorter,
         vtab: *@import("../sql/vtab.zig").VtabCursor,
@@ -543,11 +562,13 @@ pub const VdbeCursor = struct {
         /// The FIFO of a recursive CTE (OP_OpenQueue). It reads no record:
         /// OP_QueuePop hands each one to a pseudo cursor.
         queue: *@import("queue.zig").Queue,
-    };
 
-    pub fn curType(c: *const VdbeCursor) CurType {
-        return c.kind;
-    }
+        /// What a cursor of kind `t` reads, or null if it is of another
+        /// kind.
+        pub inline fn as(k: *Kind, comptime t: std.meta.Tag(Kind)) ?*@FieldType(Kind, @tagName(t)) {
+            return if (k.* == t) &@field(k, @tagName(t)) else null;
+        }
+    };
 };
 
 /// A cursor on a b-tree (a table, an index or an ephemeral table).
@@ -852,5 +873,15 @@ pub const Vdbe = struct {
     /// n_res_column is but for the listing of EXPLAIN.
     pub fn nColNames(v: *const Vdbe) usize {
         return v.col_names.len / COLNAME_N;
+    }
+
+    /// The slot of name `var_` (COLNAME_*) of column `i`: in col_names
+    /// for COLNAME_NAME and COLNAME_DECLTYPE, in col_meta for the origin
+    /// names, each array holding one kind of name for every column, then
+    /// the next. Null if that array was not allocated.
+    pub fn colNameSlot(v: *const Vdbe, i: usize, var_: usize) ?*Mem {
+        const names, const k = if (var_ < COLNAME_N) .{ v.col_names, var_ } else .{ v.col_meta, var_ - COLNAME_N };
+        if (names.len == 0) return null;
+        return &names[i + k * v.nColNames()];
     }
 };

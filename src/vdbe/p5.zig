@@ -3,12 +3,15 @@
 //! families here it is a set of flags, each a `packed struct(u16)` with
 //! the bits of C's OPFLAG_* and SQLITE_* constants (EXPLAIN and bytecode()
 //! print P5 as the number). Each opcode's family is `p5` of its entry in
-//! opcodes.zig's table; a handler takes P5 as the type of its family
-//! (vi.OpOf()), and aux.changeP5() asserts that a value fits the opcode
-//! it is set on.
+//! opcodes.zig's table. The code generator passes P5 to aux.emit5() and
+//! its family as a value of the opcode's type, checked at compile time
+//! (aux.changeP5(), for an opcode chosen at run time, asserts it), and a
+//! handler reads it with that type (vi.OpFor()).
 
 const std = @import("std");
+const flags = @import("xqlite_base").flags;
 const Aff = @import("../sql/sqlite_int.zig").Aff;
+const NC = @import("../sql/sqlite_int.zig").NC;
 
 /// The kind of P5 an opcode has.
 pub const Family = enum {
@@ -23,6 +26,9 @@ pub const Family = enum {
     copy,
     halt,
     counter,
+    type_mask,
+    func,
+    clear,
 
     /// The type of P5 of an opcode of the family.
     pub fn Type(comptime f: Family) type {
@@ -37,6 +43,9 @@ pub const Family = enum {
             .copy => CopyP5,
             .halt => HaltP5,
             .counter => StmtStatus,
+            .type_mask => TypeMaskP5,
+            .func => FuncP5,
+            .clear => ClearP5,
         };
     }
 
@@ -55,6 +64,7 @@ pub inline fn int(x: anytype) u16 {
     return switch (@typeInfo(T)) {
         .@"enum" => @backingInt(x),
         .@"struct" => @bitCast(x),
+        .int => x,
         else => @compileError("not a P5: " ++ @typeName(T)),
     };
 }
@@ -89,6 +99,16 @@ pub const InsertP5 = packed struct(u16) {
     /// OPFLAG_PREFORMAT).
     preformat: bool = false,
     _8: u8 = 0,
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const isEmpty = ops.isEmpty;
+
+    comptime {
+        flags.checkBits(InsertP5, .{ .nchange = 0x01, .save_position = 0x02, .is_update = 0x04, .append = 0x08, .use_seek_result = 0x10, .last_rowid = 0x20, .preformat = 0x80 });
+    }
 };
 
 /// OP_Delete (whose P2 has OPFLAG_NCHANGE, the count of sqlite3_changes()).
@@ -100,6 +120,10 @@ pub const DeleteP5 = packed struct(u16) {
     /// cursor need not end up anywhere in particular (OPFLAG_AUXDELETE).
     aux_delete: bool = false,
     _3: u13 = 0,
+
+    comptime {
+        flags.checkBits(DeleteP5, .{ .save_position = 0x02, .aux_delete = 0x04 });
+    }
 };
 
 /// OP_OpenRead, OP_OpenWrite and OP_ReopenIdx.
@@ -111,9 +135,12 @@ pub const OpenP5 = packed struct(u16) {
     _2: u1 = 0,
     /// The cursor is opened to delete (OPFLAG_FORDELETE).
     for_delete: bool = false,
-    /// P2 is the register of the root page (OPFLAG_P2ISREG).
-    p2_is_reg: bool = false,
-    _5: u11 = 0,
+    /// C's OPFLAG_P2ISREG (0x10) is OP_OpenWriteReg here.
+    _4: u12 = 0,
+
+    comptime {
+        flags.checkBits(OpenP5, .{ .bulk_csr = 0x01, .seek_eq = 0x02, .for_delete = 0x08 });
+    }
 };
 
 /// What OP_Column is to load of a column: all of it, or only what
@@ -131,13 +158,22 @@ pub const ColumnP5 = packed struct(u16) {
     arg: ColumnArg = .none,
     _8: u8 = 0,
 
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+
     /// The flags of Expr.op2 of a column (the low byte of P5).
     pub fn fromByte(b: u8) ColumnP5 {
-        return @bitCast(@as(u16, b));
+        return fromInt(b);
     }
 
+    /// The flags as Expr.op2 holds them (update.zig).
     pub fn byte(c: ColumnP5) u8 {
-        return @intCast(int(c));
+        return @intCast(c.int());
+    }
+
+    comptime {
+        flags.checkBits(ColumnP5, .{ .nochng = 0x01, .arg = 0xc0 });
     }
 };
 
@@ -157,15 +193,33 @@ pub const CmpP5 = packed struct(u16) {
     null_eq: bool = false,
     _8: u8 = 0,
 
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+
     /// `nulls` (its flags) with affinity `aff`.
     pub fn init(aff: u8, nulls: CmpP5) CmpP5 {
         std.debug.assert(aff & ~Aff.mask == 0 and nulls.affinity() == 0);
-        return @bitCast(int(nulls) | aff);
+        return fromInt(nulls.int() | aff);
     }
 
     pub fn affinity(c: CmpP5) u8 {
-        return @intCast(int(c) & Aff.mask);
+        return @intCast(c.int() & Aff.mask);
     }
+
+    comptime {
+        // aff_low and aff_high are SQLITE_AFF_MASK; SQLITE_NOTNULL is
+        // both flags.
+        flags.checkBits(CmpP5, .{ .aff_low = 0x07, .jump_if_null = 0x10, .aff_high = 0x40, .null_eq = 0x80 });
+        std.debug.assert(Aff.mask == 0x47);
+    }
+};
+
+/// OP_Clear.
+pub const ClearP5 = packed struct(u16) {
+    /// Count the rows in sqlite3_changes() (C: P3 not 0).
+    nchange: bool = false,
+    _1: u15 = 0,
 };
 
 /// OP_Compare.
@@ -174,6 +228,10 @@ pub const CompareP5 = packed struct(u16) {
     /// (OPFLAG_PERMUTE).
     permute: bool = false,
     _1: u15 = 0,
+
+    comptime {
+        flags.checkBits(CompareP5, .{ .permute = 0x01 });
+    }
 };
 
 /// OP_Copy.
@@ -184,6 +242,10 @@ pub const CopyP5 = packed struct(u16) {
     /// Clear the subtype of the copy.
     clear_subtype: bool = false,
     _2: u14 = 0,
+
+    comptime {
+        flags.checkBits(CopyP5, .{ .no_merge = 0x01, .clear_subtype = 0x02 });
+    }
 };
 
 /// The constraint whose violation an OP_Halt reports (P5_Constraint*).
@@ -215,6 +277,68 @@ pub const HaltP5 = packed struct(u16) {
     /// the registers it lists.
     dialect: bool = false,
     _5: u11 = 0,
+
+    comptime {
+        // P5_ConstraintNotNull .. P5_ConstraintFK are 1 .. 4 (Constraint).
+        flags.checkBits(HaltP5, .{ .constraint = 0x0f, .dialect = 0x10 });
+    }
+};
+
+/// OP_IsType: the types of value that jump, a bit for each fundamental
+/// datatype t (SQLITE_INTEGER .. SQLITE_NULL) at 1 << (t - 1).
+pub const TypeMaskP5 = packed struct(u16) {
+    integer: bool = false,
+    float: bool = false,
+    text: bool = false,
+    blob: bool = false,
+    null: bool = false,
+    _5: u11 = 0,
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const intersects = ops.intersects;
+
+    /// The fundamental datatype `t` (sqlite3_value_type()) alone.
+    pub fn of(t: i32) TypeMaskP5 {
+        return ops.fromInt(@as(u16, 1) << @intCast(t - 1));
+    }
+
+    pub const any: TypeMaskP5 = .{ .integer = true, .float = true, .text = true, .blob = true, .null = true };
+
+    comptime {
+        flags.checkBits(TypeMaskP5, .{ .integer = 0x01, .float = 0x02, .text = 0x04, .blob = 0x08, .null = 0x10 });
+    }
+};
+
+/// OP_PureFunc and OP_Function: what the expression of an OP_PureFunc is
+/// in, for the error of a non-deterministic function (the bits of
+/// NC_SelfRef of NameContext.nc_flags, at the same places).
+pub const FuncP5 = packed struct(u16) {
+    _0: u1 = 0,
+    part_idx: bool = false,
+    is_check: bool = false,
+    gen_col: bool = false,
+    _4: u1 = 0,
+    idx_expr: bool = false,
+    _6: u10 = 0,
+
+    pub const isEmpty = flags.Ops(@This()).isEmpty;
+
+    /// The NC_SelfRef flags of `nc` (NameContext.nc_flags, or Expr.op2
+    /// of a function, which holds them).
+    pub fn fromNC(nc: NC) FuncP5 {
+        return @bitCast(@as(u16, @intCast(nc.only(NC.SelfRef).int())));
+    }
+
+    comptime {
+        flags.checkBits(FuncP5, .{
+            .part_idx = NC.int(.{ .PartIdx = true }),
+            .is_check = NC.int(.{ .IsCheck = true }),
+            .gen_col = NC.int(.{ .GenCol = true }),
+            .idx_expr = NC.int(.{ .IdxExpr = true }),
+        });
+        std.debug.assert(NC.SelfRef.int() == 0x2e);
+    }
 };
 
 /// The counters of sqlite3_stmt_status() (SQLITE_STMTSTATUS_*, which are
@@ -233,40 +357,21 @@ pub const StmtStatus = enum(u16) {
     filter_hit = 8,
 };
 
-test "P5 flags are the bits of C" {
+// The bit layouts are checked by flags.checkBits() in each type; these are
+// the values inside a field of several bits.
+test "P5 values are those of C" {
     const t = std.testing;
-    try t.expectEqual(@as(u16, 0x01), int(InsertP5{ .nchange = true }));
-    try t.expectEqual(@as(u16, 0x02), int(InsertP5{ .save_position = true }));
-    try t.expectEqual(@as(u16, 0x04), int(InsertP5{ .is_update = true }));
-    try t.expectEqual(@as(u16, 0x08), int(InsertP5{ .append = true }));
-    try t.expectEqual(@as(u16, 0x10), int(InsertP5{ .use_seek_result = true }));
-    try t.expectEqual(@as(u16, 0x20), int(InsertP5{ .last_rowid = true }));
-    try t.expectEqual(@as(u16, 0x80), int(InsertP5{ .preformat = true }));
-    try t.expectEqual(@as(u16, 0x02), int(DeleteP5{ .save_position = true }));
-    try t.expectEqual(@as(u16, 0x04), int(DeleteP5{ .aux_delete = true }));
-    try t.expectEqual(@as(u16, 0x01), int(OpenP5{ .bulk_csr = true }));
-    try t.expectEqual(@as(u16, 0x02), int(OpenP5{ .seek_eq = true }));
-    try t.expectEqual(@as(u16, 0x08), int(OpenP5{ .for_delete = true }));
-    try t.expectEqual(@as(u16, 0x10), int(OpenP5{ .p2_is_reg = true }));
-    try t.expectEqual(@as(u16, 0x01), int(ColumnP5{ .nochng = true }));
+    // OPFLAG_LENGTHARG, OPFLAG_TYPEOFARG, OPFLAG_BYTELENARG.
     try t.expectEqual(@as(u16, 0x40), int(ColumnP5{ .arg = .length }));
     try t.expectEqual(@as(u16, 0x80), int(ColumnP5{ .arg = .typeof }));
     try t.expectEqual(@as(u16, 0xc0), int(ColumnP5{ .arg = .octet_length }));
-    try t.expectEqual(@as(u16, 0x10), int(CmpP5{ .jump_if_null = true }));
-    try t.expectEqual(@as(u16, 0x80), int(CmpP5{ .null_eq = true }));
-    // SQLITE_NOTNULL
-    try t.expectEqual(@as(u16, 0x90), int(CmpP5{ .null_eq = true, .jump_if_null = true }));
     try t.expectEqual(@as(u16, 0x43 | 0x10), int(CmpP5.init(Aff.numeric, .{ .jump_if_null = true })));
     try t.expectEqual(Aff.text, CmpP5.init(Aff.text, .{ .null_eq = true }).affinity());
     try t.expectEqual(Aff.none, CmpP5.init(Aff.none, .{}).affinity());
-    try t.expectEqual(@as(u16, 0x01), int(CompareP5{ .permute = true }));
-    try t.expectEqual(@as(u16, 0x01), int(CopyP5{ .no_merge = true }));
-    try t.expectEqual(@as(u16, 0x02), int(CopyP5{ .clear_subtype = true }));
     try t.expectEqual(@as(u16, 1), int(HaltP5{ .constraint = .not_null }));
     try t.expectEqual(@as(u16, 2), int(HaltP5{ .constraint = .unique }));
     try t.expectEqual(@as(u16, 3), int(HaltP5{ .constraint = .check }));
     try t.expectEqual(@as(u16, 4), int(HaltP5{ .constraint = .foreign_key }));
-    try t.expectEqual(@as(u16, 0x10), int(HaltP5{ .dialect = true }));
     try t.expectEqual(@as(u16, 1), int(StmtStatus.fullscan_step));
     try t.expectEqual(@as(u16, 3), int(StmtStatus.autoindex));
     try t.expectEqual(@as(u16, 8), int(StmtStatus.filter_hit));

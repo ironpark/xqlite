@@ -374,8 +374,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         _ = aux.emitInt(v, .FilterAdd, .{ level.reg_filter, 0, reg_base }, loop.btree.n_eq);
     }
     aux.scanStatusCounters(v, addr_exp, addr_exp, aux.here(v));
-    _ = aux.emit(v, .IdxInsert, .{ idx_cur, reg_record });
-    aux.changeP5(v, vi.InsertP5{ .use_seek_result = true });
+    _ = aux.emit5(v, .IdxInsert, .{ idx_cur, reg_record }, .{ .use_seek_result = true });
     if (skip_row) |l| aux.place(v, l);
     if (src.fg.via_coroutine) {
         std.debug.assert(src.fg.is_subquery and src.u4.subq != null);
@@ -386,8 +385,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         src.fg.via_coroutine = false;
         aux.landHere(v, addr_top);
     } else {
-        _ = aux.emit(v, .Next, .{ tab_cur, addr_top.plus(1) });
-        aux.changeP5(v, vi.StmtStatus.autoindex);
+        _ = aux.emit5(v, .Next, .{ tab_cur, addr_top.plus(1) }, .autoindex);
         if (src.fg.jointype.LEFT) aux.landHere(v, addr_top);
     }
     expr_mod.releaseTempReg(p, reg_record);

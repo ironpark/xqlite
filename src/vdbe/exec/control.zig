@@ -15,8 +15,7 @@ const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
 const Op = vi.Op;
-const OpOf = vi.OpOf;
-const OpWithP5 = vi.OpWithP5;
+const OpFor = vi.OpFor;
 const HaltP5 = vi.HaltP5;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
@@ -26,36 +25,21 @@ const VdbeCursor = vi.VdbeCursor;
 const RC = int.RC;
 const OE = int.OE;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
 pub const handlers = .{
-    .{ .ops = .{.Goto}, .f = opGoto },
-    .{ .ops = .{.Gosub}, .f = opGosub },
-    .{ .ops = .{.Return}, .f = opReturn },
-    .{ .ops = .{.InitCoroutine}, .f = opInitCoroutine },
-    .{ .ops = .{.EndCoroutine}, .f = opEndCoroutine },
-    .{ .ops = .{.Yield}, .f = opYield, .call = .always_inline },
-    .{ .ops = .{.HaltIfNull}, .f = opHaltIfNull },
-    .{ .ops = .{.Halt}, .f = opHalt },
-    .{ .ops = .{.Once}, .f = opOnce },
     .{ .ops = .{ .Trace, .Init }, .f = opInit },
-    .{ .ops = .{.Program}, .f = opProgram },
-    .{ .ops = .{.Param}, .f = opParam },
-    .{ .ops = .{.FkCounter}, .f = opFkCounter },
-    .{ .ops = .{.FkIfZero}, .f = opFkIfZero },
-    .{ .ops = .{.MemMax}, .f = opMemMax },
-    .{ .ops = .{.IfPos}, .f = opIfPos },
-    .{ .ops = .{.OffsetLimit}, .f = opOffsetLimit },
-    .{ .ops = .{.IfNotZero}, .f = opIfNotZero },
-    .{ .ops = .{.DecrJumpZero}, .f = opDecrJumpZero },
 };
 
-pub fn opGoto(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
+pub const inlined = .{.Yield};
+
+pub fn opGoto(e: *Exec, op: *OpFor(.Goto)) Flow {
     _ = e;
     _ = op;
     return .jump_p2_check;
 }
 
-pub fn opGosub(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opGosub(e: *Exec, op: *OpFor(.Gosub)) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(!in1.isDynamic());
     in1.flags = .{ .Int = true };
@@ -63,7 +47,7 @@ pub fn opGosub(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
     return .jump_p2_check;
 }
 
-pub fn opReturn(e: *Exec, op: *OpOf(.{ .reg, .addr, .int })) Flow {
+pub fn opReturn(e: *Exec, op: *OpFor(.Return)) Flow {
     const in1 = e.reg(op.p1);
     // The address of the OP_Gosub: continue after it.
     if (in1.flags.Int) return .goto(@intCast(in1.u.i + 1));
@@ -71,7 +55,7 @@ pub fn opReturn(e: *Exec, op: *OpOf(.{ .reg, .addr, .int })) Flow {
     return .next;
 }
 
-pub fn opInitCoroutine(e: *Exec, op: *OpOf(.{ .reg, .jump, .addr })) Flow {
+pub fn opInitCoroutine(e: *Exec, op: *OpFor(.InitCoroutine)) Flow {
     const out = e.reg(op.p1);
     std.debug.assert(!out.isDynamic());
     out.u = .{ .i = op.p3.int() - 1 };
@@ -80,7 +64,7 @@ pub fn opInitCoroutine(e: *Exec, op: *OpOf(.{ .reg, .jump, .addr })) Flow {
     return .jump_p2;
 }
 
-pub fn opEndCoroutine(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
+pub fn opEndCoroutine(e: *Exec, op: *OpFor(.EndCoroutine)) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(in1.flags == MEM{ .Int = true });
     const caller = e.opAt(.Yield, @intCast(in1.u.i));
@@ -88,7 +72,7 @@ pub fn opEndCoroutine(e: *Exec, op: *OpOf(.{ .reg, .int, .int })) Flow {
     return .goto(@intCast(caller.p2.int()));
 }
 
-pub fn opYield(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opYield(e: *Exec, op: *OpFor(.Yield)) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(!in1.isDynamic());
     in1.flags = .{ .Int = true };
@@ -99,12 +83,12 @@ pub fn opYield(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
     return .goto(@intCast(dest + 1));
 }
 
-pub fn opHaltIfNull(e: *Exec, op: *OpWithP5(.{ .int, .int, .reg }, HaltP5)) Error!Flow {
+pub fn opHaltIfNull(e: *Exec, op: *OpFor(.HaltIfNull)) Error!Flow {
     if (!e.reg(op.p3).flags.Null) return .next;
     return opHalt(e, op);
 }
 
-pub fn opHalt(e: *Exec, op: *OpWithP5(.{ .int, .int, .reg }, HaltP5)) Error!Flow {
+pub fn opHalt(e: *Exec, op: *OpFor(.Halt)) Error!Flow {
     const v = e.v;
     const db = e.db;
     std.debug.assert(op.p1 != RC.INTERNAL);
@@ -115,8 +99,7 @@ pub fn opHalt(e: *Exec, op: *OpWithP5(.{ .int, .int, .reg }, HaltP5)) Error!Flow
         v.n_frame -= 1;
         aux.setChanges(db, v.n_change);
         const caller = aux.frameRestore(frame);
-        e.ops = v.prog;
-        e.regs = v.mem;
+        e.syncFrame();
         // After the calling OP_Program, or for RAISE(IGNORE) at its P2.
         if (op.p2 == OE.Ignore.int()) return .frame(@intCast(e.opAt(.Program, caller).p2.int()));
         return .frame(caller + 1);
@@ -166,18 +149,18 @@ fn dialectConstraintError(e: *Exec, op: *const Op) Error!void {
     aux.vdbeErrorState(v, state, "{s}", .{msg});
 }
 
-pub fn opOnce(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
+pub fn opOnce(e: *Exec, op: *OpFor(.Once)) Flow {
     const v = e.v;
-    std.debug.assert(e.ops[0].opcode == OP.Init);
+    const init = e.opAt(.Init, 0);
     if (v.frame) |frame| {
         const addr = e.pc;
         const bit: u8 = @as(u8, 1) << @intCast(addr & 7);
         if (frame.once[addr / 8] & bit != 0) return .jump_p2;
         frame.once[addr / 8] |= bit;
     } else {
-        if (e.ops[0].p1 == op.p1) return .jump_p2;
+        if (init.p1 == op.p1) return .jump_p2;
     }
-    op.p1 = e.ops[0].p1;
+    op.p1 = init.p1;
     return .next;
 }
 
@@ -258,7 +241,7 @@ fn allocFrame(e: *Exec, program: *vi.SubProgram) error{OutOfMemory}!*vi.VdbeFram
     return frame;
 }
 
-pub fn opProgram(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Error!Flow {
+pub fn opProgram(e: *Exec, op: *OpFor(.Program)) Error!Flow {
     const v = e.v;
     const db = e.db;
     const program = op.p4As(.subprogram);
@@ -297,12 +280,11 @@ pub fn opProgram(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Error!Flow {
     v.csr = frame.child_csr;
     @memset(frame.once, 0);
     v.prog = program.ops;
-    e.ops = program.ops;
-    e.regs = v.mem;
+    e.syncFrame();
     return .frameCheck(0);
 }
 
-pub fn opParam(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
+pub fn opParam(e: *Exec, op: *OpFor(.Param)) Flow {
     const out = e.out2Prerelease(op);
     const frame = e.v.frame.?;
     // Register P1 of those of the trigger's arguments in the calling
@@ -313,7 +295,7 @@ pub fn opParam(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
     return .next;
 }
 
-pub fn opFkCounter(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opFkCounter(e: *Exec, op: *OpFor(.FkCounter)) Error!Flow {
     const counter: *i64 = if (op.p1 != 0)
         &e.db.n_deferred_cons
     else if (e.db.flags.DeferFKs)
@@ -351,7 +333,7 @@ fn fkCounted(e: *Exec, op: *const Op, count: i64) error{OutOfMemory}!void {
     v.xq_fk_error = owned.ptr;
 }
 
-pub fn opFkIfZero(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
+pub fn opFkIfZero(e: *Exec, op: *OpFor(.FkIfZero)) Flow {
     const db = e.db;
     const zero = if (op.p1 != 0)
         db.n_deferred_cons == 0 and db.n_deferred_imm_cons == 0
@@ -360,7 +342,7 @@ pub fn opFkIfZero(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Flow {
     return if (zero) .jump_p2 else .next;
 }
 
-pub fn opMemMax(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
+pub fn opMemMax(e: *Exec, op: *OpFor(.MemMax)) Flow {
     const in1 = e.rootReg(op.p1);
     mem.integerify(in1);
     const in2 = e.reg(op.p2);
@@ -369,7 +351,7 @@ pub fn opMemMax(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Flow {
     return .next;
 }
 
-pub fn opIfPos(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opIfPos(e: *Exec, op: *OpFor(.IfPos)) Flow {
     const in1 = e.reg(op.p1);
     if (in1.u.i > 0) {
         in1.u.i -= op.p3;
@@ -378,7 +360,7 @@ pub fn opIfPos(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
     return .next;
 }
 
-pub fn opOffsetLimit(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg })) Flow {
+pub fn opOffsetLimit(e: *Exec, op: *OpFor(.OffsetLimit)) Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
     const out = e.out2Prerelease(op);
@@ -388,7 +370,7 @@ pub fn opOffsetLimit(e: *Exec, op: *OpOf(.{ .reg, .reg, .reg })) Flow {
     return .next;
 }
 
-pub fn opIfNotZero(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opIfNotZero(e: *Exec, op: *OpFor(.IfNotZero)) Flow {
     const in1 = e.reg(op.p1);
     if (in1.u.i != 0) {
         if (in1.u.i > 0) in1.u.i -= 1;
@@ -397,7 +379,7 @@ pub fn opIfNotZero(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
     return .next;
 }
 
-pub fn opDecrJumpZero(e: *Exec, op: *OpOf(.{ .reg, .jump, .int })) Flow {
+pub fn opDecrJumpZero(e: *Exec, op: *OpFor(.DecrJumpZero)) Flow {
     const in1 = e.reg(op.p1);
     if (in1.u.i > std.math.minInt(i64)) in1.u.i -= 1;
     return if (in1.u.i == 0) .jump_p2 else .next;

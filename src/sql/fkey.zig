@@ -174,8 +174,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
                     const child = cols.at(build.tableColumnToStorage(fk.from, @intCast(ai_col[i])));
                     // A composite key may include the IPK.
                     const parent = build.columnRegister(ix.table, rowid, ix.ai_column[i]);
-                    _ = aux.emit(v, .Ne, .{ child, jump, parent });
-                    aux.changeP5(v, vi.CmpP5{ .jump_if_null = true });
+                    _ = aux.emit5(v, .Ne, .{ child, jump, parent }, .{ .jump_if_null = true });
                 }
                 _ = aux.emit(v, .Goto, .{ 0, ok });
             }
@@ -190,8 +189,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, de
             const must_be_int = aux.emit(v, .MustBeInt, .{ temp, 0 });
             // A row inserted into its own parent table satisfies itself.
             if (t == fk.from and n_incr == 1) {
-                _ = aux.emit(v, .Eq, .{ rowid, ok, temp });
-                aux.changeP5(v, vi.CmpP5{ .null_eq = true, .jump_if_null = true });
+                _ = aux.emit5(v, .Eq, .{ rowid, ok, temp }, .{ .null_eq = true, .jump_if_null = true });
             }
             insert_mod.openTable(p, cur, i_db, t, OP.OpenRead);
             _ = aux.emit(v, .NotExists, .{ cur, 0, temp });

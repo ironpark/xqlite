@@ -111,6 +111,36 @@ pub fn emitStr(v: *Vdbe, comptime op: OP, args: anytype, z: ?[]const u8) Addr {
     return addr;
 }
 
+/// emit() with P5, of the type of the opcode's P5 (OP.P5(): the flags of
+/// its family, p5.zig, or a number).
+pub fn emit5(v: *Vdbe, comptime op: OP, args: anytype, p5: op.P5()) Addr {
+    const addr = emit(v, op, args);
+    setP5At(v, addr, p5);
+    return addr;
+}
+
+/// emit4() with P5.
+pub fn emit45(v: *Vdbe, comptime op: OP, args: anytype, p4: P4, p5: op.P5()) Addr {
+    const addr = emit4(v, op, args, p4);
+    setP5At(v, addr, p5);
+    return addr;
+}
+
+/// emitStr() with P5.
+pub fn emitStr5(v: *Vdbe, comptime op: OP, args: anytype, z: ?[]const u8, p5: op.P5()) Addr {
+    const addr = emitStr(v, op, args, z);
+    setP5At(v, addr, p5);
+    return addr;
+}
+
+/// P5 of the instruction just added at `addr`, whose type the caller's
+/// signature checked. Nothing after an allocation failure, which may
+/// have left the instruction out.
+fn setP5At(v: *Vdbe, addr: Addr, x: anytype) void {
+    if (v.db.malloc_failed) return;
+    getOp(v, addr).p5 = vi.p5.int(x);
+}
+
 /// emit() for an opcode chosen when the statement is compiled (OP_NotExists
 /// or OP_NotFound, by the kind of table): `shape` is what the operands of
 /// every opcode `op` can be are, and the arguments are checked against it.
@@ -236,12 +266,10 @@ pub fn multiLoad(v: *Vdbe, dest: Reg, values: []const LoadValue, no_result_row: 
     if (!no_result_row) _ = emit(v, .ResultRow, .{ dest, values.len });
 }
 
-/// NC_SelfRef: the call context bit kept in P5 of OP_PureFunc.
-pub const NC_SelfRef: i32 = 0x00002e;
-
 /// Port of sqlite3VdbeAddFunctionCall(): OP_Function, or OP_PureFunc when
-/// `e_call_ctx` is set, with a context for `func`.
-pub fn addFunctionCall(p: *Parse, p1: i32, p2: Reg, p3: Reg, n_arg: i32, func: *const int.FuncDef, e_call_ctx: i32) Addr {
+/// `call_ctx` (the NC_SelfRef flags of the expression) is not empty, with
+/// a context for `func`.
+pub fn addFunctionCall(p: *Parse, p1: i32, p2: Reg, p3: Reg, n_arg: i32, func: *const int.FuncDef, call_ctx: vi.FuncP5) Addr {
     const v = p.vdbe.?;
     const a = v.alloc();
     const ctx = a.create(vi.Context) catch {
@@ -258,8 +286,8 @@ pub fn addFunctionCall(p: *Parse, p1: i32, p2: Reg, p3: Reg, n_arg: i32, func: *
     // the allocation held, such as the `out` of a freed context whose
     // registers were at the same address (argv then stays unset).
     ctx.* = .{ .out = undefined, .func = func, .argv = argv, .i_op = v.nOp(), .vdbe = null };
-    const addr = emitAny4(v, if (e_call_ctx != 0) OP.PureFunc else OP.Function, .{ .int, .reg, .reg }, .{ p1, p2, p3 }, .{ .funcctx = ctx });
-    changeP5(v, @as(u16, @intCast(e_call_ctx & NC_SelfRef)));
+    const addr = emitAny4(v, if (!call_ctx.isEmpty()) OP.PureFunc else OP.Function, .{ .int, .reg, .reg }, .{ p1, p2, p3 }, .{ .funcctx = ctx });
+    changeP5(v, call_ctx);
     main_mod.mayAbort(p);
     return addr;
 }
@@ -382,8 +410,7 @@ pub fn explainPop(p: *Parse) void {
 /// Port of sqlite3VdbeAddParseSchemaOp(): reread the schema entries
 /// matching `where` (all if null).
 pub fn addParseSchemaOp(v: *Vdbe, i_db: i32, where: ?[]const u8, p5: u16) void {
-    _ = emitStr(v, .ParseSchema, .{i_db}, where);
-    changeP5(v, p5);
+    _ = emitStr5(v, .ParseSchema, .{i_db}, where, p5);
     for (0..v.db.dbs.items.len) |j| usesBtree(v, @intCast(j));
     main_mod.mayAbort(v.parse.?);
 }
@@ -500,28 +527,14 @@ pub fn changeP3(v: *Vdbe, addr: Addr, val: i32) void {
     getOp(v, addr).p3 = val;
 }
 
-/// Port of sqlite3VdbeChangeP5(): P5 of the last instruction: a number,
-/// or for an opcode whose P5 is a set of flags a value of their type
-/// (OP.P5(), p5.zig).
+/// Port of sqlite3VdbeChangeP5(): P5 of the last instruction, for an
+/// opcode chosen at run time or a P5 set after the instruction (emit5()
+/// otherwise): see Op.setP5(). Nothing after an allocation failure, which
+/// may have left the instruction out (C then sets P5 of the one before;
+/// the statement fails either way).
 pub fn changeP5(v: *Vdbe, p5: anytype) void {
-    if (v.ops.items.len == 0) return;
-    const op = &v.ops.items[v.ops.items.len - 1];
-    const T = @TypeOf(p5);
-    const n: u16 = switch (@typeInfo(T)) {
-        .int, .comptime_int => @intCast(p5),
-        else => vi.p5.int(p5),
-    };
-    // After an allocation failure (or past SQLITE_LIMIT_VDBE_OP) the
-    // instruction was not added, and P5 lands on the one before, as in
-    // C; the statement fails anyway.
-    if (!v.db.malloc_failed) {
-        const family: vi.p5.Family = switch (@typeInfo(T)) {
-            .int, .comptime_int => .number,
-            else => comptime .of(T),
-        };
-        std.debug.assert(op.opcode.info().p5 == family);
-    }
-    op.p5 = n;
+    if (v.db.malloc_failed) return;
+    getLastOp(v).setP5(p5);
 }
 
 /// Port of sqlite3VdbeTypeofColumn(): the OP_Column that loads `dest`, if
@@ -864,7 +877,7 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: NEXTOP, pc: *i32, addr: *usize, 
         if (e_mode == .NORMAL) break;
         if (e_mode == .TABLES_USED) {
             const op = &a_op[i];
-            if (op.opcode.info().opens_table and !(op.opcode == OP.OpenWrite and op.p5As(vi.OpenP5).p2_is_reg)) break;
+            if (op.opcode.info().opens_table) break;
         } else {
             std.debug.assert(e_mode == .EQP);
             if (a_op[i].opcode == OP.Explain) break;
@@ -1149,10 +1162,8 @@ pub fn setColType(v: *Vdbe, idx: usize, t: @import("../sql/types.zig").Type) voi
 /// `idx`. The name is copied.
 pub fn setColName(v: *Vdbe, idx: usize, var_: usize, name: [:0]const u8) void {
     if (v.db.malloc_failed) return;
-    const m = if (var_ < vi.COLNAME_N)
-        &v.col_names[idx + var_ * v.nColNames()]
-    else
-        &v.col_meta[idx + (var_ - vi.COLNAME_N) * v.nColNames()];
+    // setNumCols() allocated the names, or failed and set malloc_failed.
+    const m = v.colNameSlot(idx, var_) orelse unreachable;
     mem.setTextZ(m, name, .transient) catch |err| switch (err) {
         // Reported to the statement being compiled.
         error.TooBig => {},

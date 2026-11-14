@@ -13,32 +13,28 @@ const int = @import("../../sql/sqlite_int.zig");
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const OpOf = vi.OpOf;
+const OpFor = vi.OpFor;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
 const RC = int.RC;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
 pub const handlers = .{
-    .{ .ops = .{.RowSetAdd}, .f = opRowSetAdd },
-    .{ .ops = .{.RowSetRead}, .f = opRowSetRead },
-    .{ .ops = .{.RowSetTest}, .f = opRowSetTest },
-    .{ .ops = .{.FilterAdd}, .f = opFilterAdd },
-    .{ .ops = .{.Filter}, .f = opFilter },
     .{ .ops = .{ .Noop, .Explain, .CursorHint, .Abortable, .ReleaseReg, .Permutation }, .f = opNoop },
     .{ .ops = .{ .Offset, .ColumnsUsed }, .f = opNotSupported },
 };
 
 // ================================================================ row sets
 
-pub fn opRowSetAdd(e: *Exec, op: *OpOf(.{ .reg, .reg, .int })) Error!Flow {
+pub fn opRowSetAdd(e: *Exec, op: *OpFor(.RowSetAdd)) Error!Flow {
     const in1 = e.reg(op.p1);
     if (!in1.flags.Blob) try rowset.memSetRowSet(in1, e.db.gpa);
     try rowset.fromMem(in1).insert(e.reg(op.p2).u.i);
     return .next;
 }
 
-pub fn opRowSetRead(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Error!Flow {
+pub fn opRowSetRead(e: *Exec, op: *OpFor(.RowSetRead)) Error!Flow {
     const in1 = e.reg(op.p1);
     const val: ?i64 = if (!in1.flags.Blob)
         null
@@ -52,7 +48,7 @@ pub fn opRowSetRead(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Error!Flow {
     return .jump_p2_check;
 }
 
-pub fn opRowSetTest(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Error!Flow {
+pub fn opRowSetTest(e: *Exec, op: *OpFor(.RowSetTest)) Error!Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
     const i_set = op.p4As(.int32);
@@ -103,7 +99,7 @@ fn filterHash(e: *Exec, op: anytype) u64 {
     return h;
 }
 
-pub fn opFilterAdd(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Flow {
+pub fn opFilterAdd(e: *Exec, op: *OpFor(.FilterAdd)) Flow {
     const in1 = e.reg(op.p1);
     var h = filterHash(e, op);
     h %= @as(u64, @intCast(in1.n)) * 8;
@@ -111,7 +107,7 @@ pub fn opFilterAdd(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Flow {
     return .next;
 }
 
-pub fn opFilter(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Flow {
+pub fn opFilter(e: *Exec, op: *OpFor(.Filter)) Flow {
     const in1 = e.reg(op.p1);
     var h = filterHash(e, op);
     h %= @as(u64, @intCast(in1.n)) * 8;
@@ -126,7 +122,7 @@ pub fn opFilter(e: *Exec, op: *OpOf(.{ .reg, .jump, .reg })) Flow {
 /// The opcodes that only mark the program for others: OP_Noop,
 /// OP_Explain, OP_CursorHint, OP_Abortable, OP_ReleaseReg, and
 /// OP_Permutation (read by the OP_Compare that follows).
-pub fn opNoop(e: *Exec, op: *OpOf(null)) Flow {
+pub fn opNoop(e: *Exec, op: anytype) Flow {
     _ = e;
     _ = op;
     return .next;
@@ -135,7 +131,7 @@ pub fn opNoop(e: *Exec, op: *OpOf(null)) Flow {
 // ============================================================ not ported
 
 /// Offset and ColumnsUsed (not in the C build either).
-pub fn opNotSupported(e: *Exec, op: *OpOf(null)) Error!Flow {
+pub fn opNotSupported(e: *Exec, op: anytype) Error!Flow {
     aux.vdbeError(e.v, "not supported yet: OP_{s}", .{op.opcode.name()});
     return error.Error;
 }

@@ -1223,18 +1223,18 @@ a3ffbd5aa427e931 49aa3dbdc992028d SELECT * FROM t1, json_tree(x)
 6192d20257095283 ac2b79f9fe6d7702 SELECT * FROM json_each('{"\u0017":1}')
 50f66f5b7dd29462 46376557c1836f2e SELECT * FROM json_tree('{"a\"b":{"c.d":[1]}}')
 ----
-3d7755259d3c9fb9 631e295612096a30 SELECT a.value, b.value FROM a RIGHT JOIN b ON a.value = b.value
+7932612d94fb9fb0 631e295612096a30 SELECT a.value, b.value FROM a RIGHT JOIN b ON a.value = b.value
 185ec5bda83c654e c22f73a82369df9c SELECT a.value, b.value FROM json_each('["a", "c", null]') AS b LEFT JOIN json_each('["a", "b", null]') AS a ON a.value = b.value
-b73c65289f585f22 7cdde5915dffcaf0 SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
-a9d92b2bbac00577 ec124652e9b9d1ed SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN b ON a.value = b.value
-db49641aa5b5c7b1 651d0a967c8062a7 SELECT a.value, b.value FROM a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
-e49f77b8cb50ee72 301c609b7f0250bd SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a FULL JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+3ee7a585264a53c8 7cdde5915dffcaf0 SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+f2bfa11f251c2bdf ec124652e9b9d1ed SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN b ON a.value = b.value
+8019d293355da886 651d0a967c8062a7 SELECT a.value, b.value FROM a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+0c6d26df39eae851 301c609b7f0250bd SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a FULL JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
 ----
-f1dfc3b0860eb906 d77557c577480144 SELECT value, t1.* FROM json_each('7') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT a, b FROM t1)
+57dcaf6f6de56646 d77557c577480144 SELECT value, t1.* FROM json_each('7') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT a, b FROM t1)
 ----
-9cd5accfe642757b 1fc517b67b906cd1 SELECT value, t1.* FROM json_each('17') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
-36041d1d6c65b61e 1fc517b67b906cd1 SELECT value, t1.* FROM json_each('null') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
-02a6e89d161a2467 651d0a967c8062a7 SELECT quote(a.key), b.value FROM a RIGHT JOIN json_each('["a","c"]') AS b ON a.key=b.value
+73bc3b75a8c124f5 1fc517b67b906cd1 SELECT value, t1.* FROM json_each('17') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
+2fbe0ee8be05c6a1 1fc517b67b906cd1 SELECT value, t1.* FROM json_each('null') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
+88f9393595c3fd90 651d0a967c8062a7 SELECT quote(a.key), b.value FROM a RIGHT JOIN json_each('["a","c"]') AS b ON a.key=b.value
 ----
 c67fb8bd13be80ae db2177ef4e4a8db5 SELECT * FROM t6 WHERE 1 IN (SELECT value FROM json_each(x))
 ----
@@ -1389,7 +1389,7 @@ ebf3dcaf3ebe115d 557304895ea39fc1 SELECT a.key, b.key, c.key FROM json_each('{"p
 ce6fdd01ed578865 1b1249c024407ce3 SELECT a.value FROM json_each('[1,2,3]') AS a WHERE a.value NOT IN (SELECT value FROM json_each('[2]'))
 8a885dbdc492ac7d 893ef43e7f78e20a SELECT j.value, t.w FROM tag AS t JOIN json_each('["z","x","q"]') AS j ON j.value = t.name
 f4ad864239fa852d f3532bc19e385804 SELECT j.value, t.w FROM json_each('["z","x","q"]') AS j LEFT JOIN tag AS t ON j.value = t.name
-70d0ac6814e02e06 49271f34e059fda2 SELECT j.value, t.w FROM tag AS t RIGHT JOIN json_each('["z","x","q"]') AS j ON j.value = t.name
+262752a89512aa2c 49271f34e059fda2 SELECT j.value, t.w FROM tag AS t RIGHT JOIN json_each('["z","x","q"]') AS j ON j.value = t.name
 b1c16aedd724e5d1 d98408e695ac22e5 SELECT j.key, j.value FROM doc, json_each(doc.body) AS j WHERE doc.id = 5
 02a514181f57e440 d98408e695ac22e5 SELECT j.key, j.value FROM doc, json_each(doc.body) AS j WHERE doc.id = 1 AND j.key = 'n'
 a23f658f0cf15f9a 1752f99007e846d8 SELECT doc.id, json_group_array(j.value) FROM doc, json_each(doc.body, '$.tags') AS j GROUP BY doc.id
@@ -1486,7 +1486,7 @@ b9b25f14b80e18d1 78511fbfcd5da8a9 SELECT * FROM flat
 eca891dde90109fd 78511fbfcd5da8a9 INSERT INTO dst SELECT src.id, j.fullkey, j.value, j.type FROM src, json_tree(src.j) AS j; SELECT * FROM dst ORDER BY rowid
 aae811bd01168e33 c70232c347101a1e UPDATE src SET j = (SELECT json_group_array(value) FROM json_each(src.j)); SELECT * FROM src
 3b83b65c1b52d722 c70232c347101a1e DELETE FROM src WHERE EXISTS (SELECT 1 FROM json_each(src.j) WHERE value = 6); SELECT * FROM src
-7c23cd41cdd439dc e85b6fd73f5028bb CREATE TABLE ctas AS SELECT * FROM json_tree('{"a":[1,2]}'); SELECT * FROM ctas
+bd7d63972c0c186a e85b6fd73f5028bb CREATE TABLE ctas AS SELECT * FROM json_tree('{"a":[1,2]}'); SELECT * FROM ctas
 3c569af34734bd95 ac2b79f9fe6d7702 INSERT INTO dst(id, k) SELECT key, value FROM json_each('{"x":1,"y":2}') RETURNING *
 edd23cd16969e7fc b6399ad617a8262e UPDATE src SET j = json_set(j, '$.n', (SELECT count(*) FROM json_tree(src.j))) RETURNING *
 ----

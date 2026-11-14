@@ -17,43 +17,20 @@ const cast = @import("xqlite_base").cast;
 const Exec = core.Exec;
 const Flow = core.Flow;
 const Error = core.Error;
-const OpOf = vi.OpOf;
+const OpFor = vi.OpFor;
 const MEM = vi.MEM;
 const ENC = vi.ENC;
 const Sqlite3 = int.Sqlite3;
 const RC = int.RC;
 const OE = int.OE;
 
-/// The opcodes this module runs, for the run loop (see exec.zig).
-pub const handlers = .{
-    .{ .ops = .{.Savepoint}, .f = opSavepoint },
-    .{ .ops = .{.AutoCommit}, .f = opAutoCommit },
-    .{ .ops = .{.Transaction}, .f = opTransaction },
-    .{ .ops = .{.ReadCookie}, .f = opReadCookie },
-    .{ .ops = .{.SetCookie}, .f = opSetCookie },
-    .{ .ops = .{.Destroy}, .f = opDestroy },
-    .{ .ops = .{.Clear}, .f = opClear },
-    .{ .ops = .{.CreateBtree}, .f = opCreateBtree },
-    .{ .ops = .{.SqlExec}, .f = opSqlExec },
-    .{ .ops = .{.ParseSchema}, .f = opParseSchema },
-    .{ .ops = .{.LoadAnalysis}, .f = opLoadAnalysis },
-    .{ .ops = .{.DropTable}, .f = opDropTable },
-    .{ .ops = .{.DropIndex}, .f = opDropIndex },
-    .{ .ops = .{.DropTrigger}, .f = opDropTrigger },
-    .{ .ops = .{.IntegrityCk}, .f = opIntegrityCk },
-    .{ .ops = .{.Vacuum}, .f = opVacuum },
-    .{ .ops = .{.Checkpoint}, .f = opCheckpoint },
-    .{ .ops = .{.JournalMode}, .f = opJournalMode },
-    .{ .ops = .{.IncrVacuum}, .f = opIncrVacuum },
-    .{ .ops = .{.TableLock}, .f = opTableLock },
-    .{ .ops = .{.Expire}, .f = opExpire },
-    .{ .ops = .{.Pagecount}, .f = opPagecount },
-    .{ .ops = .{.MaxPgcnt}, .f = opMaxPgcnt },
-};
+/// The functions that run several opcodes, and what the run loop inlines
+/// (see `modules` in exec.zig).
+pub const handlers = .{};
 
 // ============================================================ transactions
 
-pub fn opAutoCommit(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opAutoCommit(e: *Exec, op: *OpFor(.AutoCommit)) Error!Flow {
     const v = e.v;
     const db = e.db;
     const desired = op.p1 != 0;
@@ -108,7 +85,7 @@ fn fkReturn(e: *Exec, err: aux.FkError) Flow {
 
 /// Port of OP_Savepoint: open (P1 SAVEPOINT_BEGIN), release or roll
 /// back to the savepoint named by P4.
-pub fn opSavepoint(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opSavepoint(e: *Exec, op: *OpFor(.Savepoint)) Error!Flow {
     const v = e.v;
     const db = e.db;
     const p1: aux.SAVEPOINT = @fromBackingInt(@intCast(op.p1));
@@ -230,7 +207,7 @@ pub fn opSavepoint(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opTransaction(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opTransaction(e: *Exec, op: *OpFor(.Transaction)) Error!Flow {
     const v = e.v;
     const db = e.db;
     if (op.p2 != 0 and db.flags.intersects(.{ .QueryOnly = true, .CorruptRdOnly = true })) {
@@ -281,14 +258,14 @@ pub fn opTransaction(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opReadCookie(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
+pub fn opReadCookie(e: *Exec, op: *OpFor(.ReadCookie)) Flow {
     const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
     const meta = bt.getMeta(cast.enumFromInt(btree.Meta, op.p3));
     e.out2Prerelease(op).u = .{ .i = @as(i32, @bitCast(meta)) };
     return .next;
 }
 
-pub fn opSetCookie(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opSetCookie(e: *Exec, op: *OpFor(.SetCookie)) Error!Flow {
     const db = e.db;
     const pdb = &db.dbs.items[@intCast(op.p1)];
     const rc_err = pdb.bt.?.updateMeta(cast.enumFromInt(btree.Meta, op.p2), @bitCast(op.p3));
@@ -308,7 +285,7 @@ pub fn opSetCookie(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
 
 // ================================================================= schema
 
-pub fn opDestroy(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opDestroy(e: *Exec, op: *OpFor(.Destroy)) Error!Flow {
     const v = e.v;
     const db = e.db;
     const out = e.out2Prerelease(op);
@@ -329,18 +306,15 @@ pub fn opDestroy(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opClear(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opClear(e: *Exec, op: *OpFor(.Clear)) Error!Flow {
     const v = e.v;
     const n_change = try e.db.dbs.items[@intCast(op.p2)].bt.?.clearTable(@intCast(op.p1));
-    if (op.p3 != 0) {
-        v.n_change += n_change;
-        // P3 positive: a register that counts the rows.
-        if (op.p3 > 0) e.reg(.from(op.p3)).u.i += n_change;
-    }
+    if (op.p5.nchange) v.n_change += n_change;
+    if (op.p3 != .none) e.reg(op.p3).u.i += n_change;
     return .next;
 }
 
-pub fn opCreateBtree(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opCreateBtree(e: *Exec, op: *OpFor(.CreateBtree)) Error!Flow {
     const out = e.out2Prerelease(op);
     const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
     const kind: btree.TableKind = if (op.p3 == 1) .intkey else .blobkey;
@@ -349,7 +323,7 @@ pub fn opCreateBtree(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opSqlExec(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opSqlExec(e: *Exec, op: *OpFor(.SqlExec)) Error!Flow {
     var err_msg: ?[:0]u8 = null;
     e.db.n_sql_exec += 1;
     const x_auth = e.db.auth;
@@ -419,7 +393,7 @@ fn execDialect(db: *int.Sqlite3, sql: [:0]const u8, lang: @import("../../dialect
     return rc;
 }
 
-pub fn opParseSchema(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opParseSchema(e: *Exec, op: *OpFor(.ParseSchema)) Error!Flow {
     const v = e.v;
     const db = e.db;
     const prepare = @import("../../sql/prepare.zig");
@@ -450,27 +424,27 @@ fn schemaClear(db: *Sqlite3, i_db: usize) void {
     @import("../../sql/build.zig").schemaClear(db, db.dbs.items[i_db].schema);
 }
 
-pub fn opLoadAnalysis(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opLoadAnalysis(e: *Exec, op: *OpFor(.LoadAnalysis)) Error!Flow {
     try e.check(@import("../../sql/analyze.zig").analysisLoad(e.db, @intCast(op.p1)));
     return .next;
 }
 
-pub fn opDropTable(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
+pub fn opDropTable(e: *Exec, op: *OpFor(.DropTable)) Flow {
     @import("../../sql/build.zig").unlinkAndDeleteTable(e.db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
     return .next;
 }
 
-pub fn opDropIndex(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
+pub fn opDropIndex(e: *Exec, op: *OpFor(.DropIndex)) Flow {
     @import("../../sql/build.zig").unlinkAndDeleteIndex(e.db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
     return .next;
 }
 
-pub fn opDropTrigger(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
+pub fn opDropTrigger(e: *Exec, op: *OpFor(.DropTrigger)) Flow {
     @import("../../sql/trigger.zig").unlinkAndDeleteTrigger(e.db, @intCast(op.p1), std.mem.span(op.p4As(.z)));
     return .next;
 }
 
-pub fn opIntegrityCk(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Error!Flow {
+pub fn opIntegrityCk(e: *Exec, op: *OpFor(.IntegrityCk)) Error!Flow {
     const db = e.db;
     const n_root: usize = @intCast(op.p2);
     const roots = op.p4IntArray();
@@ -497,7 +471,7 @@ pub fn opIntegrityCk(e: *Exec, op: *OpOf(.{ .reg, .int, .reg })) Error!Flow {
 /// and the frames checkpointed (-1 if not in WAL mode).
 /// OP_Vacuum: vacuum database P1, or write a vacuumed copy of it to the
 /// file named in register P2 if P2 is not 0 (VACUUM INTO).
-pub fn opVacuum(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opVacuum(e: *Exec, op: *OpFor(.Vacuum)) Error!Flow {
     std.debug.assert(!e.v.read_only);
     const out: ?*vi.Mem = if (op.p2 != .none) e.reg(op.p2) else null;
     const rc = @import("../../sql/vacuum.zig").runVacuum(e.v, e.db, @intCast(op.p1), out);
@@ -505,7 +479,7 @@ pub fn opVacuum(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opCheckpoint(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
+pub fn opCheckpoint(e: *Exec, op: *OpFor(.Checkpoint)) Error!Flow {
     var res = [3]i32{ 0, -1, -1 };
     main_mod.checkpoint(e.db, op.p1, @fromBackingInt(@intCast(op.p2)), &res[1], &res[2]) catch |err| switch (err) {
         error.Busy => res[0] = 1,
@@ -519,7 +493,7 @@ pub fn opCheckpoint(e: *Exec, op: *OpOf(.{ .int, .int, .reg })) Error!Flow {
 /// only queries), storing the mode in effect in register P2. Moving
 /// into or out of WAL mode also rewrites the file format versions in
 /// the header, in a rollback-journal transaction.
-pub fn opJournalMode(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
+pub fn opJournalMode(e: *Exec, op: *OpFor(.JournalMode)) Error!Flow {
     const db = e.db;
     const out = e.out2Prerelease(op);
     const bt = db.dbs.items[@intCast(op.p1)].bt.?;
@@ -570,7 +544,7 @@ pub fn opJournalMode(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opIncrVacuum(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Error!Flow {
+pub fn opIncrVacuum(e: *Exec, op: *OpFor(.IncrVacuum)) Error!Flow {
     const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
     const more = try bt.incrVacuum();
     return if (more) .next else .jump_p2;
@@ -579,7 +553,7 @@ pub fn opIncrVacuum(e: *Exec, op: *OpOf(.{ .int, .jump, .int })) Error!Flow {
 /// Port of OP_TableLock: lock table P2 of database P1 for reading (P3 0)
 /// or writing in the shared cache. Read locks are skipped with PRAGMA
 /// read_uncommitted.
-pub fn opTableLock(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
+pub fn opTableLock(e: *Exec, op: *OpFor(.TableLock)) Error!Flow {
     const write = op.p3 != 0;
     if (write or !e.db.flags.ReadUncommit) {
         const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
@@ -591,7 +565,7 @@ pub fn opTableLock(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Error!Flow {
     return .next;
 }
 
-pub fn opExpire(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
+pub fn opExpire(e: *Exec, op: *OpFor(.Expire)) Flow {
     // P2 0 expires now, 1 when convenient.
     const how: vi.Expired = if (op.p2 == 0) .now else .when_convenient;
     if (op.p1 == 0) {
@@ -602,13 +576,13 @@ pub fn opExpire(e: *Exec, op: *OpOf(.{ .int, .int, .int })) Flow {
     return .next;
 }
 
-pub fn opPagecount(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
+pub fn opPagecount(e: *Exec, op: *OpFor(.Pagecount)) Flow {
     const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
     e.out2Prerelease(op).u = .{ .i = bt.lastPage() };
     return .next;
 }
 
-pub fn opMaxPgcnt(e: *Exec, op: *OpOf(.{ .int, .reg, .int })) Flow {
+pub fn opMaxPgcnt(e: *Exec, op: *OpFor(.MaxPgcnt)) Flow {
     const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
     var new_max: u32 = 0;
     if (op.p3 != 0) {

@@ -999,8 +999,7 @@ fn windowCheckValue(p: *Parse, reg: Reg, e_cond: usize) void {
     if (e_cond >= WINDOW_STARTING_NUM) {
         const reg_string = expr_mod.getTempReg(p);
         _ = aux.emit4(v, .String8, .{ 0, reg_string }, .{ .z = "" });
-        _ = aux.emit(v, .Ge, .{ reg_string, aux.here(v).plus(2), reg });
-        aux.changeP5(v, vi.CmpP5.init(Aff.numeric, .{ .jump_if_null = true }));
+        _ = aux.emit5(v, .Ge, .{ reg_string, aux.here(v).plus(2), reg }, .init(Aff.numeric, .{ .jump_if_null = true }));
     } else {
         _ = aux.emit(v, .MustBeInt, .{ reg, aux.here(v).plus(2) });
     }
@@ -1130,7 +1129,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: Cursor, b_inverse: boo
             }
             _ = aux.emitAny(v, if (b_inverse) OP.AggInverse else OP.AggStep, .{ .int, .reg, .reg }, .{ b_inverse, reg_arg, win.reg_accum });
             aux.appendP4(v, .{ .funcdef = func });
-            aux.changeP5(v, @as(u16, @intCast(n_arg)));
+            aux.changeP5(v, n_arg);
             if (win.expr_args) expr_mod.releaseTempRange(p, reg_arg, n_arg);
         }
 
@@ -1560,8 +1559,7 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: Reg, jump_on_eof: bo
     }
 
     if (op == cx.e_delete) {
-        _ = aux.emit(v, .Delete, .{csr});
-        aux.changeP5(v, vi.DeleteP5{ .save_position = true });
+        _ = aux.emit5(v, .Delete, .{csr}, .{ .save_position = true });
     }
 
     if (jump_on_eof) {

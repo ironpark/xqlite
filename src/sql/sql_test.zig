@@ -126,6 +126,31 @@ pub const Conn = struct {
         try testing.expectEqualStrings(expected, msg.?);
     }
 
+    /// Run `sql` with the default temp_store, where big sorts and queues
+    /// spill to temporary files, then with temp_store=MEMORY, where they
+    /// do not: the rows must be the same, and `expected` if given. Returns
+    /// how much the run that may spill added to `counter`, a count of the
+    /// connection's kept for tests (n_pma_written, n_queue_spilled).
+    pub fn expectSameSpilled(c: *Conn, comptime counter: std.meta.FieldEnum(int.Sqlite3), sql: []const u8, expected: ?[]const u8) !u64 {
+        const count = &@field(c.db, @tagName(counter));
+        try c.exec("PRAGMA temp_store=0");
+        const before = count.*;
+        const spilled = try c.query(sql);
+        defer testing.allocator.free(spilled);
+        const n = count.* - before;
+        try c.exec("PRAGMA temp_store=2");
+        const in_memory = try c.query(sql);
+        defer testing.allocator.free(in_memory);
+        try c.exec("PRAGMA temp_store=0");
+        try testing.expectEqual(before + n, count.*);
+        testing.expectEqualStrings(in_memory, spilled) catch |err| {
+            std.debug.print("query: {s}\n", .{sql});
+            return err;
+        };
+        if (expected) |rows| try testing.expectEqualStrings(rows, spilled);
+        return n;
+    }
+
     /// The result column names of `sql`, separated by "|".
     pub fn expectColumns(c: *Conn, sql: []const u8, expected: []const u8) !void {
         var stmt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;

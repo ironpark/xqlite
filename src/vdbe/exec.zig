@@ -189,7 +189,10 @@ fn handler(comptime opc: OP) type {
     const name = "the handler of OP_" ++ @tagName(opc);
     return struct {
         const f = if (at.entry) |i| m.handlers[i].f else @field(m, "op" ++ @tagName(opc));
-        const call: std.builtin.CallModifier = if (at.entry) |i|
+        // A build for size calls every handler rather than inline it.
+        const call: std.builtin.CallModifier = if (@import("builtin").mode == .small)
+            .never_inline
+        else if (at.entry) |i|
             (if (@hasField(@TypeOf(m.handlers[i]), "call")) m.handlers[i].call else .auto)
         else if (isInlined(m, opc)) .always_inline else .auto;
         const params = @typeInfo(@TypeOf(f)).@"fn".param_types;
@@ -344,6 +347,14 @@ pub const Exec = struct {
         return out;
     }
 
+    /// Whether each arm of the run loop dispatches the next instruction
+    /// itself. Not on WebAssembly, which has no indirect jump: the jumps
+    /// from every arm to every arm are control flow it cannot express, and
+    /// LLVM, making it expressible, took 23 minutes and 23 GB to build
+    /// the wasm32 module (under a minute otherwise). Not in a build for
+    /// size either.
+    const threaded = !@import("builtin").cpu.arch.isWasm() and @import("builtin").mode != .small;
+
     fn run(e: *Exec, comptime scan: bool) i32 {
         // The switch below has an arm for each opcode (inline else).
         @setEvalBranchQuota(10_000);
@@ -375,7 +386,7 @@ pub const Exec = struct {
         // (continue :dispatch), so that each opcode has its own indirect
         // branch, which the CPU predicts from that opcode (8-12% on scan
         // and cte against one shared dispatch at the top of a loop).
-        dispatch: switch (ops[pc].opcode) {
+        loop: while (true) dispatch: switch (ops[pc].opcode) {
             // Every opcode has its own arm, which calls its handler (with
             // the opcode as a comptime argument if it takes one) and, only
             // if the handler can fail, catches its error: a catch after
@@ -429,9 +440,10 @@ pub const Exec = struct {
                     },
                     .ret => return e.vdbeReturn(n_vm_step),
                 }
-                continue :dispatch ops[pc].opcode;
+                if (threaded) continue :dispatch ops[pc].opcode;
+                continue :loop;
             },
-        }
+        };
     }
 
     /// The tail of sqlite3VdbeExec() for an error: the labels too_big,
